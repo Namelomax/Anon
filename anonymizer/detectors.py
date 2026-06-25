@@ -456,3 +456,42 @@ def is_job_title(text: str) -> bool:
 def is_non_pii(text: str) -> bool:
     """True if a PERSON/ORG span should be left unmasked (title or software)."""
     return is_job_title(text) or is_software(text)
+
+
+_DECLENSION_LABELS = frozenset({"PERSON", "LOCATION", "ORG"})
+
+
+def propagate_declensions(text: str, spans: list[Span]) -> list[Span]:
+    """Find declined case-forms of already-detected single-word entities.
+
+    NER/LLM may catch "Лента"/"Москва" (nominative) but miss "Лентой"/"Москве"
+    (oblique cases), especially on large chunks. For each detected single-word
+    PERSON/LOCATION/ORG, this scans for `<stem><russian-ending>` occurrences and
+    returns them as NEW spans (each keeps its own surface text, so the mapping
+    stays reversible). Returns only spans not overlapping the existing ones.
+    """
+    existing = [(s.start, s.end) for s in spans]
+    seen_stems: set[str] = set()
+    extra: list[Span] = []
+    for s in spans:
+        if s.label not in _DECLENSION_LABELS:
+            continue
+        val = s.text.strip()
+        if " " in val or len(val) < 5 or not val[0].isupper():
+            continue
+        stem = val[:-1]
+        key = (s.label, stem.casefold())
+        if key in seen_stems or len(stem) < 4:
+            continue
+        seen_stems.add(key)
+        pattern = re.compile(
+            r"(?<![А-Яа-яЁёA-Za-z])" + re.escape(stem) + r"[а-яё]{0,3}(?![А-Яа-яЁёA-Za-z])"
+        )
+        for m in pattern.finditer(text):
+            a, b = m.start(), m.end()
+            if any(a < e and st < b for st, e in existing):
+                continue
+            if any(a < e2 and st2 < b for st2, e2 in ((x.start, x.end) for x in extra)):
+                continue
+            extra.append(Span(a, b, s.label, text[a:b], source="morph"))
+    return extra

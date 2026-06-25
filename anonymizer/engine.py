@@ -12,6 +12,7 @@ from .detectors import (
     DEFAULT_PRIORITY,
     Detector,
     is_non_pii,
+    propagate_declensions,
     run_detectors,
 )
 
@@ -80,6 +81,10 @@ class Anonymizer:
             and not (s.label in _TITLE_FILTER_LABELS and is_non_pii(s.text))
         ]
         spans = resolve_overlaps(raw, priority=self._priority)
+        # Mask declined case-forms of detected entities (e.g. "Лентой" given "Лента").
+        extra = propagate_declensions(text, spans)
+        if extra:
+            spans = resolve_overlaps(spans + extra, priority=self._priority)
         mapping, span_placeholders = assign_placeholders(spans)
 
         if self._mask_all and mapping:
