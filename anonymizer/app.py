@@ -80,8 +80,23 @@ def _build_zip(stem: str, doc_name: str, doc_bytes: bytes, mapping_json: str) ->
     return buf.getvalue()
 
 
-# --- Sidebar: configuration ------------------------------------------------
-st.sidebar.header("⚙️ Настройки движка")
+# --- Sidebar: remote backend ----------------------------------------------
+st.sidebar.header("🌐 Бэкенд")
+use_remote = st.sidebar.checkbox(
+    "Удалённый бэкенд (GPU-сервер)", value=False,
+    help="Обрабатывать на сервере (server.py на JupyterHub). Локально — только интерфейс.",
+)
+remote_url = st.sidebar.text_input(
+    "URL бэкенда", "https://jh.interfonica.cloud/user/<id>/proxy/8000",
+    disabled=not use_remote,
+)
+remote_key = st.sidebar.text_input(
+    "Токен (Bearer)", "", type="password", disabled=not use_remote,
+    help="JupyterHub-токен для доступа к proxy.",
+)
+
+# --- Sidebar: local engine (used only when remote is off) ------------------
+st.sidebar.header("⚙️ Настройки движка (локально)")
 ner_backend = st.sidebar.radio(
     "NER (ФИО / адреса / организации)",
     options=["GLiNER", "Natasha", "нет"],
@@ -128,8 +143,14 @@ with tab_anon:
                 st.warning("Загрузите файл или вставьте текст.")
                 st.stop()
 
-            with st.spinner("Обрабатываю в отдельном процессе…"):
-                result = run_worker(text, ner_backend, corporate, use_llm, llm_base_url, llm_model)
+            if use_remote:
+                from anonymizer.remote_client import anonymize_remote
+
+                with st.spinner("Обрабатываю на удалённом GPU-сервере…"):
+                    result = anonymize_remote(text, remote_url, remote_key)
+            else:
+                with st.spinner("Обрабатываю в отдельном процессе…"):
+                    result = run_worker(text, ner_backend, corporate, use_llm, llm_base_url, llm_model)
 
             stem = Path(name).stem
             mapping = result["mapping"]

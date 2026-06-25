@@ -320,7 +320,31 @@ def _gliner_cfg(args):
         return None
     from anonymizer.gliner_ner import GLiNERConfig
 
-    return GLiNERConfig(threshold=args.gliner_threshold)
+    return GLiNERConfig(threshold=args.gliner_threshold, device=getattr(args, "device", "cpu"))
+
+
+def _make_anon(args):
+    """Build a local anonymizer, or a remote client if --remote-url is set."""
+    if getattr(args, "remote_url", ""):
+        from anonymizer.remote_client import RemoteAnonymizer
+
+        return RemoteAnonymizer(args.remote_url, args.remote_key)
+    return build_anonymizer(
+        use_ner=not args.no_ner, ner_backend=_backend(args),
+        gliner_config=_gliner_cfg(args), use_llm=args.llm, llm_config=_llm_cfg(args),
+    )
+
+
+def _llm_cfg(args):
+    if not getattr(args, "llm", False):
+        return None
+    from anonymizer.llm import LLMConfig
+
+    extra = {"reasoning_effort": "none"} if getattr(args, "llm_no_think", False) else {}
+    return LLMConfig(
+        base_url=args.llm_base_url, model=args.llm_model,
+        api_key=args.llm_api_key, extra_body=extra,
+    )
 
 
 def main() -> None:
@@ -344,6 +368,15 @@ def main() -> None:
         default=0.3,
         help="GLiNER entity confidence threshold (higher = more precise)",
     )
+    parser.add_argument("--device", default="cpu", help="GLiNER device: cpu | cuda | dml")
+    parser.add_argument("--llm-base-url", default="http://127.0.0.1:1234/v1")
+    parser.add_argument("--llm-model", default="qwen/qwen3.5-9b")
+    parser.add_argument("--llm-api-key", default="not-needed")
+    parser.add_argument("--llm-no-think", action="store_true",
+                        help="Disable reasoning (reasoning_effort=none — for Ollama)")
+    parser.add_argument("--remote-url", default="",
+                        help="Use a remote backend (server.py) instead of running locally")
+    parser.add_argument("--remote-key", default="", help="Bearer token for the remote backend")
     parser.add_argument(
         "--errors",
         default="",
@@ -381,7 +414,7 @@ def main() -> None:
     print(f"Evaluating {len(rows)} rows from {path}")
 
     if args.demo:
-        anon = build_anonymizer(use_ner=not args.no_ner, ner_backend=_backend(args), gliner_config=_gliner_cfg(args), use_llm=args.llm)
+        anon = _make_anon(args)
         for row in rows[: args.demo]:
             res = anon.anonymize(row["text"])
             print("\n" + "=" * 72)
@@ -394,13 +427,13 @@ def main() -> None:
 
     if args.ab:
         print("Loading Natasha; LLM A/B (one LLM call per row, this is slow)...", file=sys.stderr)
-        base = build_anonymizer(use_ner=True)
-        full = build_anonymizer(use_ner=True, use_llm=True)
+        base = build_anonymizer(use_ner=not args.no_ner, ner_backend=_backend(args), gliner_config=_gliner_cfg(args))
+        full = build_anonymizer(use_ner=not args.no_ner, ner_backend=_backend(args), gliner_config=_gliner_cfg(args), use_llm=True, llm_config=_llm_cfg(args))
         acc_base, acc_full = evaluate_ab(base, full, rows)
         report_ab(acc_base, acc_full)
         return
 
-    anon = build_anonymizer(use_ner=not args.no_ner, ner_backend=_backend(args), gliner_config=_gliner_cfg(args), use_llm=args.llm)
+    anon = _make_anon(args)
     if not args.no_ner:
         print("Loading Natasha NER model...", file=sys.stderr)
     if args.llm:

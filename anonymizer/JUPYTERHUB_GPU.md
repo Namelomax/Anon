@@ -65,6 +65,40 @@ time CUDA_VISIBLE_DEVICES=1 python anonymizer/worker.py --in doc.txt --out f.jso
 Ожидаемо на этом железе для 50 страниц: GLiNER на 3070 ~5–10 с, LLM на 3090 (без
 сетевого прокси) заметно быстрее локального → суммарно **под минуту**.
 
+## Режим «тонкий клиент»: бэкенд на хабе, UI/бенчмарк локально
+
+Это для демо заказчику: весь пайплайн (GLiNER на CUDA + LLM) крутится на GPU-сервере,
+а на ноутбуке — только интерфейс, который к нему подключается.
+
+### Шаг 1. Поднять бэкенд НА ХАБЕ
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python anonymizer/server.py --port 8000 \
+  --device cuda --corporate \
+  --llm --llm-base-url http://127.0.0.1:11433/v1 --llm-model qwen3.5:9b --llm-no-think
+```
+Сервис поднимется на `127.0.0.1:8000`; снаружи он доступен через JupyterHub-proxy:
+`https://jh.interfonica.cloud/user/<id>/proxy/8000` (с Bearer-токеном, как у Ollama).
+Проверка: `GET …/proxy/8000/health` → `{"status":"ok", ...}`.
+
+### Шаг 2а. Бенчмарк ЛОКАЛЬНО через удалённый бэкенд
+
+```bash
+python anonymizer/eval_benchmark.py --csv pii_benchmark/test.csv \
+  --remote-url "https://jh.interfonica.cloud/user/<id>/proxy/8000" \
+  --remote-key "<OLLAMA_API_KEY>" --sample 200 --seed 42
+```
+GLiNER+LLM считаются на сервере; локально только подсчёт метрик.
+
+### Шаг 2б. UI ЛОКАЛЬНО через удалённый бэкенд
+
+```bash
+streamlit run anonymizer/app.py
+```
+В сайдбаре включить **«Удалённый бэкенд (GPU-сервер)»**, вставить URL
+(`…/proxy/8000`) и токен. Документы обрабатываются на сервере, локально — только
+показ результата и сборка `.docx`/ZIP.
+
 ## Доступ к LLM СНАРУЖИ (если нужно из локального ПК)
 
 Из локальной машины тот же Ollama доступен через JupyterHub-proxy с Bearer-ключом:

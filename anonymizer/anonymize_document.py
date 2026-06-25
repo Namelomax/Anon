@@ -67,12 +67,19 @@ def main() -> None:
         use_llm=args.llm,
         llm_config=llm_config,
     )
-    if not args.no_ner:
-        print(f"Загружаю NER ({ner_backend}) ...", file=sys.stderr)
-    if args.llm:
-        print("LLM-слой включён ...", file=sys.stderr)
+    import time
 
+    ner_desc = "выкл" if args.no_ner else f"{ner_backend} (device={args.device})"
+    llm_desc = f"вкл — {args.llm_model} @ {args.llm_base_url}" if args.llm else "выкл"
+    print(
+        f"Конфигурация: NER={ner_desc} | corporate={'да' if args.corporate else 'нет'} "
+        f"| LLM={llm_desc}",
+        file=sys.stderr,
+    )
+
+    t0 = time.time()
     written = anonymize_to_files(src, anon, args.out_dir or None)
+    elapsed = time.time() - t0
 
     # Re-read for a quick on-screen summary.
     text = read_text(src)
@@ -87,7 +94,14 @@ def main() -> None:
         by_type[label] = by_type.get(label, 0) + 1
 
     print("\n" + "=" * 72)
-    print(f"Символов: {len(text)} | уникальных сущностей: {len(mapping)}")
+    print("КОНФИГУРАЦИЯ:")
+    print(f"  NER:       {ner_desc}")
+    print(f"  corporate: {'да' if args.corporate else 'нет'}")
+    print(f"  LLM:       {llm_desc}")
+    print("СКОРОСТЬ:")
+    print(f"  время обработки: {elapsed:.1f} c")
+    print(f"  символов:        {len(text)}  ({len(text)/elapsed:.0f} симв/с)")
+    print(f"  сущностей:       {len(mapping)}")
     print(f"По типам: {by_type}")
     print("\n--- ПРЕВЬЮ ОБЕЗЛИЧЕННОГО ТЕКСТА ---")
     print(anon_text[: args.preview])
