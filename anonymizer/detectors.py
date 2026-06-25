@@ -242,6 +242,17 @@ PERSON_INITIALS = RegexDetector(
     r"|(?<!\w)[А-ЯЁ]\.\s?[А-ЯЁ]\.\s+[А-ЯЁ][а-яё]+",
 )
 
+# Full name anchored on a Russian patronymic, in ANY grammatical case — catches
+# declined full names that NER/LLM sometimes miss ("Дроновой Екатериной
+# Сергеевной", "Громовой Оксане Владимировне"). The patronymic suffix
+# (-ович/-евич/-овна/-евна + case endings) makes it high-precision; we grab the
+# 1-2 preceding capitalized words (surname + given name).
+_PATRONYMIC = r"[А-ЯЁ][а-яё]+(?:вич(?:[ауеё]|ем)?|вн[аеоуы]й?)"
+PERSON_PATRONYMIC = RegexDetector(
+    "PERSON",
+    r"(?:[А-ЯЁ][а-яё]+\s+){1,2}" + _PATRONYMIC + r"(?![а-яё])",
+)
+
 
 class SeriesNumberDetector:
     """Detect "серия NN NN ... номер NNNNNN" runs and label by local context.
@@ -338,6 +349,7 @@ DEFAULT_DETECTORS: tuple[Detector, ...] = (
     MILITARY_FMT,
     MILITARY_KW,
     PERSON_INITIALS,
+    PERSON_PATRONYMIC,
     PHONE,
 )
 

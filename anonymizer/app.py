@@ -80,44 +80,15 @@ def _build_zip(stem: str, doc_name: str, doc_bytes: bytes, mapping_json: str) ->
     return buf.getvalue()
 
 
-# --- Sidebar: remote backend ----------------------------------------------
+# --- Remote GPU backend (fixed; server.py on JupyterHub) -------------------
+# Сервер не меняется — адрес и токен зашиты. Вся обработка (GLiNER + LLM +
+# корпоративные данные) идёт на GPU-сервере; здесь — только интерфейс.
+REMOTE_URL = "https://jh.interfonica.cloud/user/ts-bdfzametjv73gxxu/proxy/8000"
+REMOTE_KEY = "1913de7b07f34d61a28792a88f613767"
+
 st.sidebar.header("🌐 Бэкенд")
-use_remote = st.sidebar.checkbox(
-    "Удалённый бэкенд (GPU-сервер)", value=False,
-    help="Обрабатывать на сервере (server.py на JupyterHub). Локально — только интерфейс.",
-)
-remote_url = st.sidebar.text_input(
-    "URL бэкенда", "https://jh.interfonica.cloud/user/<id>/proxy/8000",
-    disabled=not use_remote,
-)
-remote_key = st.sidebar.text_input(
-    "Токен (Bearer)", "", type="password", disabled=not use_remote,
-    help="JupyterHub-токен для доступа к proxy.",
-)
-
-# --- Sidebar: local engine (used only when remote is off) ------------------
-st.sidebar.header("⚙️ Настройки движка (локально)")
-ner_backend = st.sidebar.radio(
-    "NER (ФИО / адреса / организации)",
-    options=["GLiNER", "Natasha", "нет"],
-    index=0,
-    help="GLiNER — мультиязычный, выше полнота. Natasha — быстрее. «нет» — только регулярки.",
-)
-corporate = st.sidebar.checkbox(
-    "Корпоративные данные", value=True,
-    help="Суммы, номера договоров, даты, ООО/АО «…», имена файлов.",
-)
-use_llm = st.sidebar.checkbox(
-    "LLM-слой (добивание)", value=False,
-    help="Локальная LLM ловит склонения, латиницу, числа прописью. Медленнее.",
-)
-llm_base_url = st.sidebar.text_input("LLM base_url", "http://127.0.0.1:1234/v1", disabled=not use_llm)
-llm_model = st.sidebar.text_input("LLM модель", "qwen/qwen3.5-9b", disabled=not use_llm)
-
-st.sidebar.caption(
-    "Порядок слоёв: регулярки → NER → LLM. Чем больше включено, тем меньше "
-    "пропусков (но дольше и больше над-редактирования)."
-)
+st.sidebar.success("GPU-сервер (GLiNER + LLM + корпоративные данные)")
+st.sidebar.caption("Обработка на удалённом сервере. Локально — только интерфейс.")
 
 st.title("🛡️ Анонимизатор персональных данных")
 
@@ -143,14 +114,10 @@ with tab_anon:
                 st.warning("Загрузите файл или вставьте текст.")
                 st.stop()
 
-            if use_remote:
-                from anonymizer.remote_client import anonymize_remote
+            from anonymizer.remote_client import anonymize_remote
 
-                with st.spinner("Обрабатываю на удалённом GPU-сервере…"):
-                    result = anonymize_remote(text, remote_url, remote_key)
-            else:
-                with st.spinner("Обрабатываю в отдельном процессе…"):
-                    result = run_worker(text, ner_backend, corporate, use_llm, llm_base_url, llm_model)
+            with st.spinner("Обрабатываю на GPU-сервере…"):
+                result = anonymize_remote(text, REMOTE_URL, REMOTE_KEY)
 
             stem = Path(name).stem
             mapping = result["mapping"]

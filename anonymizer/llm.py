@@ -136,7 +136,7 @@ class LLMConfig:
     api_key: str = "not-needed"
     extra_body: dict = field(default_factory=dict)
     allowed_labels: frozenset = _DEFAULT_ALLOWED
-    max_chars: int = 1500
+    max_chars: int = 3000
 
 
 class LLMDetector:
