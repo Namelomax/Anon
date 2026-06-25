@@ -1,0 +1,13 @@
+# --- Anonymizer dependencies ---
+# Core (always needed):
+gliner>=0.2          # zero-shot multilingual NER (PERSON/LOCATION/ORG)
+python-docx>=1.0     # read/write .docx (also pulls lxml)
+
+# Optional:
+natasha>=1.6         # only for the --natasha NER backend (CPU, numpy)
+streamlit>=1.30      # only for the web UI (anonymizer/app.py)
+
+# PyTorch is required by GLiNER but install it to match your hardware/CUDA:
+#   CPU:   pip install torch
+#   CUDA:  pip install torch --index-url https://download.pytorch.org/whl/cu124
+# (On the GPU host it is already installed — do NOT reinstall and downgrade it.)

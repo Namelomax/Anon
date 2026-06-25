@@ -1,0 +1,14 @@
+# Whitelist: only the anonymizer package + deps go to git.
+# Everything at the project root is ignored by default...
+/*
+# ...except these:
+!/anonymizer/
+!/requirements.txt
+!/.gitignore
+
+# Drop caches/outputs even inside tracked dirs.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/

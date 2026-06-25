@@ -1,0 +1,103 @@
+"""CLI: anonymize a .docx/.txt file and write the redacted copy + mapping.
+
+Examples:
+    python anonymizer/anonymize_document.py mydoc.docx
+    python anonymizer/anonymize_document.py mydoc.docx --gliner --llm
+    python anonymizer/anonymize_document.py notes.txt --no-ner
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from anonymizer.documents import anonymize_to_files, read_text  # noqa: E402
+from anonymizer.engine import build_anonymizer  # noqa: E402
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("file", help="Path to a .docx or .txt document")
+    parser.add_argument("--out-dir", default="", help="Output directory (default: alongside input)")
+    parser.add_argument("--no-ner", action="store_true", help="Regex detectors only")
+    parser.add_argument("--gliner", action="store_true", help="Use GLiNER NER (else Natasha)")
+    parser.add_argument(
+        "--corporate",
+        action="store_true",
+        help="Also mask business data: amounts, contract numbers, dates",
+    )
+    parser.add_argument("--device", default="cpu", help="GLiNER device: cpu | cuda | dml")
+    parser.add_argument("--llm", action="store_true", help="Add the local LLM gap-filler layer")
+    parser.add_argument("--llm-base-url", default="http://127.0.0.1:1234/v1")
+    parser.add_argument("--llm-model", default="qwen/qwen3.5-9b")
+    parser.add_argument("--llm-api-key", default="not-needed")
+    parser.add_argument("--llm-no-think", action="store_true",
+                        help="Disable reasoning (reasoning_effort=none — for Ollama Qwen)")
+    parser.add_argument("--preview", type=int, default=1500, help="Chars of anonymized preview")
+    args = parser.parse_args()
+
+    src = Path(args.file)
+    if not src.exists():
+        parser.error(f"File not found: {src}")
+
+    print(f"Читаю {src.name} ...", file=sys.stderr)
+    ner_backend = "gliner" if args.gliner else "natasha"
+    gliner_config = None
+    if args.gliner:
+        from anonymizer.gliner_ner import GLiNERConfig
+
+        gliner_config = GLiNERConfig(device=args.device)
+    llm_config = None
+    if args.llm:
+        from anonymizer.llm import LLMConfig
+
+        extra = {"reasoning_effort": "none"} if args.llm_no_think else {}
+        llm_config = LLMConfig(
+            base_url=args.llm_base_url, model=args.llm_model,
+            api_key=args.llm_api_key, extra_body=extra,
+        )
+    anon = build_anonymizer(
+        use_ner=not args.no_ner,
+        ner_backend=ner_backend,
+        corporate=args.corporate,
+        gliner_config=gliner_config,
+        use_llm=args.llm,
+        llm_config=llm_config,
+    )
+    if not args.no_ner:
+        print(f"Загружаю NER ({ner_backend}) ...", file=sys.stderr)
+    if args.llm:
+        print("LLM-слой включён ...", file=sys.stderr)
+
+    written = anonymize_to_files(src, anon, args.out_dir or None)
+
+    # Re-read for a quick on-screen summary.
+    text = read_text(src)
+    anon_text = written["text"].read_text(encoding="utf-8")
+    import json
+
+    mapping = json.loads(written["mapping"].read_text(encoding="utf-8"))
+
+    by_type: dict[str, int] = {}
+    for ph in mapping:
+        label = ph.strip("[]").rsplit("_", 1)[0]
+        by_type[label] = by_type.get(label, 0) + 1
+
+    print("\n" + "=" * 72)
+    print(f"Символов: {len(text)} | уникальных сущностей: {len(mapping)}")
+    print(f"По типам: {by_type}")
+    print("\n--- ПРЕВЬЮ ОБЕЗЛИЧЕННОГО ТЕКСТА ---")
+    print(anon_text[: args.preview])
+    print("\n--- МАППИНГ (первые 40) ---")
+    for ph, original in list(mapping.items())[:40]:
+        print(f"  {ph} -> {original}")
+    print("\nФайлы:")
+    for kind, p in written.items():
+        print(f"  {kind}: {p}")
+
+
+if __name__ == "__main__":
+    main()
