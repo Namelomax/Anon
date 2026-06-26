@@ -12,6 +12,7 @@ from .detectors import (
     DEFAULT_PRIORITY,
     Detector,
     is_non_pii,
+    is_stopword_entity,
     propagate_declensions,
     run_detectors,
 )
@@ -79,6 +80,7 @@ class Anonymizer:
             s for s in raw
             if _has_alnum(s.text)
             and not (s.label in _TITLE_FILTER_LABELS and is_non_pii(s.text))
+            and not is_stopword_entity(s.text, s.label)
         ]
         spans = resolve_overlaps(raw, priority=self._priority)
         # Mask declined case-forms of detected entities (e.g. "Лентой" given "Лента").
@@ -110,15 +112,34 @@ def _label_of(placeholder: str) -> str:
     return placeholder.strip("[]").rsplit("_", 1)[0]
 
 
+_WORD_CH = "0-9A-Za-zА-Яа-яЁё"
+
+
+def _bounded(orig: str) -> str:
+    """Escape ``orig`` and add word boundaries so it only matches as a whole token.
+
+    Without this, a short value (e.g. a name "Ян" or a mis-tagged pronoun) would
+    be substituted *inside* other words ("сегодн[Я]", "п[ОН]имаю"). Boundaries
+    are added only on the alnum side(s), so values bordered by punctuation
+    (emails, "+7…", "№ ЧЕБ-…") still match.
+    """
+    esc = re.escape(orig)
+    pre = rf"(?<![{_WORD_CH}])" if orig[:1].isalnum() else ""
+    post = rf"(?![{_WORD_CH}])" if orig[-1:].isalnum() else ""
+    return pre + esc + post
+
+
 def _apply_all_occurrences(text: str, mapping: Mapping) -> tuple[str, tuple[Span, ...]]:
     """Replace every exact occurrence of each mapped value with its placeholder.
 
     Originals are matched longest-first so a value containing a shorter one wins.
-    Returns the anonymized text and the spans of all replaced occurrences.
+    Matching is whole-token (word-boundary aware) so a placeholder is never
+    spliced into the middle of an unrelated word. Returns the anonymized text and
+    the spans of all replaced occurrences.
     """
     items = sorted(mapping.items(), key=lambda kv: len(kv[1]), reverse=True)
     inverse = {orig: ph for ph, orig in items}
-    pattern = re.compile("|".join(re.escape(orig) for _, orig in items))
+    pattern = re.compile("|".join(_bounded(orig) for _, orig in items))
 
     spans: list[Span] = []
     for m in pattern.finditer(text):
@@ -145,6 +166,7 @@ def _apply(text: str, spans: list[Span], span_placeholders: dict[int, str]) -> s
 
 def build_anonymizer(
     *,
+    use_regex: bool = True,
     use_ner: bool = True,
     ner_backend: str = "natasha",
     include_org: bool = False,
@@ -155,24 +177,27 @@ def build_anonymizer(
 ) -> Anonymizer:
     """Construct an anonymizer from the layered detectors.
 
-    Layers (cheap to expensive): regex (always) -> NER -> local LLM.
-    Each layer only adds spans; overlap resolution merges them.
+    Layers (cheap to expensive): regex -> NER -> local LLM. Each layer is
+    independently switchable; each only adds spans, overlap resolution merges.
 
     Args:
+        use_regex: Include the deterministic regex detectors (contacts + RU
+            document numbers). Turn off to test NER/LLM in isolation.
         use_ner: Append an NER detector (names/locations). Loads heavy models.
         ner_backend: ``"natasha"`` (fast, CPU) or ``"gliner"`` (multilingual,
             higher recall on Cyrillic / Latin names / streets).
         include_org: Natasha-only — also redact organizations.
         gliner_config: Optional :class:`anonymizer.gliner_ner.GLiNERConfig`.
         corporate: Add business detectors (AMOUNT/CONTRACT/DATE) for business
-            documents. Off by default (not part of the PII taxonomy).
+            documents. Off by default (not part of the PII taxonomy). These are
+            regex-based but controlled separately from ``use_regex``.
         use_llm: Append the local-LLM gap-filler. Requires LM Studio / Ollama.
         llm_config: Optional :class:`anonymizer.llm.LLMConfig`.
 
     Returns:
         A configured :class:`Anonymizer`.
     """
-    detectors: list[Detector] = list(DEFAULT_DETECTORS)
+    detectors: list[Detector] = list(DEFAULT_DETECTORS) if use_regex else []
     if corporate:
         detectors.extend(CORPORATE_DETECTORS)
     if use_ner:

@@ -90,6 +90,22 @@ st.sidebar.header("🌐 Бэкенд")
 st.sidebar.success("GPU-сервер (GLiNER + LLM + корпоративные данные)")
 st.sidebar.caption("Обработка на удалённом сервере. Локально — только интерфейс.")
 
+st.sidebar.header("⚙️ Этапы обработки")
+st.sidebar.caption("Можно отключить любой слой — например, оставить только GLiNER.")
+stage_regex = st.sidebar.checkbox("Правила (regex)", value=True,
+                                  help="Телефоны, email, ИНН, паспорта, даты…")
+stage_corporate = st.sidebar.checkbox("Корпоративные (суммы/договоры)", value=True)
+stage_ner = st.sidebar.checkbox("GLiNER (ФИО, города, организации)", value=True)
+stage_llm = st.sidebar.checkbox("LLM (добивание сложных случаев)", value=True)
+STAGES = {
+    "regex": stage_regex,
+    "corporate": stage_corporate,
+    "ner": stage_ner,
+    "llm": stage_llm,
+}
+if not any(STAGES.values()):
+    st.sidebar.error("Включите хотя бы один этап.")
+
 st.title("🛡️ Анонимизатор персональных данных")
 
 tab_anon, tab_deanon = st.tabs(["🔒 Анонимизация", "🔑 Деанонимизация"])
@@ -114,10 +130,14 @@ with tab_anon:
                 st.warning("Загрузите файл или вставьте текст.")
                 st.stop()
 
+            import time
+
             from anonymizer.remote_client import anonymize_remote
 
+            t0 = time.time()
             with st.spinner("Обрабатываю на GPU-сервере…"):
-                result = anonymize_remote(text, REMOTE_URL, REMOTE_KEY)
+                result = anonymize_remote(text, REMOTE_URL, REMOTE_KEY, stages=STAGES)
+            elapsed = time.time() - t0
 
             stem = Path(name).stem
             mapping = result["mapping"]
@@ -144,6 +164,7 @@ with tab_anon:
                 "doc_mime": doc_mime,
                 "mapping_json": mapping_json,
                 "zip": zip_bytes,
+                "elapsed": elapsed,
             }
         except Exception as exc:  # show errors in UI instead of crashing
             st.error(f"Ошибка обработки: {exc}")
@@ -151,9 +172,16 @@ with tab_anon:
 
     res = st.session_state.get("anon_result")
     if res:
+        elapsed = res.get("elapsed", 0.0)
+        chars = res["orig_len"]
+        speed = f" · {chars / elapsed:.0f} символов/с" if elapsed else ""
+        c_t, c_e, c_s = st.columns(3)
+        c_t.metric("⏱️ Время обработки", f"{elapsed:.1f} с")
+        c_e.metric("Сущностей", len(res["mapping"]))
+        c_s.metric("Символов", chars)
         st.success(
-            f"Найдено уникальных сущностей: {len(res['mapping'])} · "
-            f"символов в документе: {res['orig_len']}"
+            f"Обработано за {elapsed:.1f} с{speed} · "
+            f"найдено уникальных сущностей: {len(res['mapping'])}"
         )
         if res["summary"]:
             summary_str = " · ".join(f"**{k}**: {v}" for k, v in res["summary"].items())
@@ -186,27 +214,51 @@ with tab_anon:
 # --- Tab: Deanonymize ------------------------------------------------------
 with tab_deanon:
     st.subheader("Восстановление по маппингу (без ИИ)")
+
+    last = st.session_state.get("anon_result")
+    use_last = False
+    if last and last.get("mapping"):
+        use_last = st.checkbox(
+            f"Использовать маппинг последнего документа "
+            f"(«{last['stem']}», {len(last['mapping'])} сущностей)",
+            value=True,
+            help="Маппинг подставится автоматически — загрузите только изменённый документ.",
+        )
+
     col_a, col_b = st.columns(2)
-    anon_file = col_a.file_uploader("Обезличенный текст (.txt)", type=["txt"], key="de_txt")
-    map_file = col_b.file_uploader("Маппинг (.json)", type=["json"], key="de_map")
+    anon_file = col_a.file_uploader(
+        "Изменённый документ (.txt / .docx)", type=["txt", "docx"], key="de_doc"
+    )
+    map_file = col_b.file_uploader(
+        "Маппинг (.json)", type=["json"], key="de_map", disabled=use_last
+    )
     anon_pasted = st.text_area("…или вставить обезличенный текст", height=140, key="de_paste")
 
     if st.button("🔑 Восстановить", type="primary"):
+        # 1) Mapping: last document's, or an uploaded file
+        if use_last:
+            mapping = last["mapping"]
+        elif map_file is not None:
+            try:
+                mapping = json.loads(map_file.getvalue().decode("utf-8"))
+            except json.JSONDecodeError as exc:
+                st.error(f"Некорректный JSON маппинга: {exc}")
+                st.stop()
+        else:
+            st.warning("Загрузите маппинг (.json) или включите «использовать последний».")
+            st.stop()
+
+        # 2) Document: .docx (restore into .docx), .txt, or pasted text
+        is_docx = anon_file is not None and anon_file.name.lower().endswith(".docx")
         if anon_file is not None:
-            anon_text = anon_file.getvalue().decode("utf-8")
+            if is_docx:
+                anon_text = read_text_from_bytes(anon_file.name, anon_file.getvalue())
+            else:
+                anon_text = anon_file.getvalue().decode("utf-8")
         elif anon_pasted.strip():
             anon_text = anon_pasted
         else:
-            st.warning("Загрузите или вставьте обезличенный текст.")
-            st.stop()
-
-        if map_file is None:
-            st.warning("Загрузите файл маппинга (.json).")
-            st.stop()
-        try:
-            mapping = json.loads(map_file.getvalue().decode("utf-8"))
-        except json.JSONDecodeError as exc:
-            st.error(f"Некорректный JSON маппинга: {exc}")
+            st.warning("Загрузите изменённый документ или вставьте текст.")
             st.stop()
 
         restored = deanonymize(anon_text, mapping)
@@ -218,7 +270,18 @@ with tab_deanon:
             st.warning(f"Плейсхолдеры без значения в маппинге: {sorted(set(leftover))}")
         else:
             st.success("Все плейсхолдеры восстановлены.")
-        st.download_button(
+
+        c1, c2 = st.columns(2)
+        c1.download_button(
             "⬇️ Восстановленный текст (.txt)", restored, file_name="restored.txt",
             mime="text/plain",
         )
+        if is_docx:
+            from anonymizer.documents import deanonymized_docx_bytes
+
+            c2.download_button(
+                "⬇️ Восстановленный .docx",
+                deanonymized_docx_bytes(anon_file.getvalue(), mapping),
+                file_name="restored.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )

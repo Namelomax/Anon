@@ -9,6 +9,9 @@ GPU host. ``RemoteAnonymizer`` mirrors the local ``Anonymizer.anonymize`` API
 from __future__ import annotations
 
 import json
+import sys
+import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
@@ -24,29 +27,63 @@ class RemoteResult:
     spans: tuple
 
 
-def anonymize_remote(text: str, base_url: str, api_key: str = "", timeout: float = 300.0) -> dict:
-    """POST text to the backend's /anonymize and return the parsed JSON."""
+def anonymize_remote(
+    text: str,
+    base_url: str,
+    api_key: str = "",
+    timeout: float = 300.0,
+    retries: int = 3,
+    stages: dict | None = None,
+) -> dict:
+    """POST text to the backend's /anonymize and return the parsed JSON.
+
+    ``stages`` optionally toggles pipeline stages per request, e.g.
+    ``{"regex": False, "ner": True, "llm": False}`` for GLiNER-only. Omitted
+    stages use the server's defaults.
+
+    Retries transient network/proxy failures (e.g. HTTP 599 from a dropped proxy
+    connection during long batch runs) with a short backoff.
+    """
     url = base_url.rstrip("/") + "/anonymize"
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = "Bearer " + api_key
-    req = urllib.request.Request(
-        url, data=json.dumps({"text": text}).encode("utf-8"), headers=headers
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.load(resp)
+    payload = {"text": text, **(stages or {})}
+    body = json.dumps(payload).encode("utf-8")
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, data=body, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.load(resp)
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            last_exc = exc
+            time.sleep(1.5 * (attempt + 1))
+    raise last_exc  # exhausted retries
 
 
 class RemoteAnonymizer:
     """Drop-in replacement for ``Anonymizer`` that calls the remote backend."""
 
-    def __init__(self, base_url: str, api_key: str = "", timeout: float = 300.0) -> None:
+    def __init__(
+        self, base_url: str, api_key: str = "", timeout: float = 300.0,
+        stages: dict | None = None,
+    ) -> None:
         self.base_url = base_url
         self.api_key = api_key
         self.timeout = timeout
+        self.stages = stages
+        self.failures = 0
 
     def anonymize(self, text: str) -> RemoteResult:
-        d = anonymize_remote(text, self.base_url, self.api_key, self.timeout)
+        try:
+            d = anonymize_remote(
+                text, self.base_url, self.api_key, self.timeout, stages=self.stages
+            )
+        except Exception as exc:  # don't let one bad row kill a long batch
+            self.failures += 1
+            print(f"[remote] строка пропущена ({exc})", file=sys.stderr)
+            return RemoteResult(text, text, {}, {}, ())
         spans = tuple(
             Span(s["start"], s["end"], s["label"], s.get("text", ""), source="remote")
             for s in d.get("spans", [])

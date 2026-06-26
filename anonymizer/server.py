@@ -15,7 +15,13 @@ and clients authenticate with the JupyterHub Bearer token.
 
 API:
     GET  /health           -> {"status": "ok", ...}
-    POST /anonymize  {text} -> {anonymized_text, mapping, summary, spans:[{start,end,label,text}]}
+    POST /anonymize  {text, regex?, corporate?, ner?, llm?}
+         -> {anonymized_text, mapping, summary, spans:[{start,end,label,text}], stages}
+
+Each pipeline stage (regex / corporate / ner / llm) can be toggled per request
+via optional booleans in the POST body; omitted flags fall back to the server's
+start-up defaults. This lets the UI try e.g. "GLiNER only, no regex" without a
+redeploy.
 """
 
 from __future__ import annotations
@@ -23,15 +29,30 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from anonymizer.engine import build_anonymizer  # noqa: E402
+from anonymizer.engine import Anonymizer  # noqa: E402
 
-_ANON = None  # built at startup
+_DETECTORS: dict = {}    # stage name -> list of detector objects (built once)
+_DEFAULTS: dict = {}     # stage name -> bool (start-up default on/off)
 _INFO: dict = {}
+_LOCK = threading.Lock()  # serialize model calls: torch/GLiNER is not thread-safe
+
+
+def _compose(stages: dict) -> Anonymizer:
+    """Build an Anonymizer from the selected stages (detectors are reused)."""
+    dets: list = []
+    for name in ("regex", "corporate", "ner", "llm"):
+        on = stages.get(name)
+        if on is None:
+            on = _DEFAULTS.get(name, False)
+        if on and _DETECTORS.get(name):
+            dets.extend(_DETECTORS[name])
+    return Anonymizer(dets)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -57,7 +78,11 @@ class Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length") or 0)
             data = json.loads(self.rfile.read(n) or b"{}")
             text = data.get("text", "")
-            res = _ANON.anonymize(text)
+            stages = {k: data[k] for k in ("regex", "corporate", "ner", "llm") if k in data}
+            with _LOCK:  # one model call at a time (torch is not thread-safe)
+                anon = _compose(stages)
+                res = anon.anonymize(text)
+            used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in ("regex", "corporate", "ner", "llm")}
             self._send(200, {
                 "anonymized_text": res.anonymized_text,
                 "mapping": res.mapping,
@@ -66,6 +91,7 @@ class Handler(BaseHTTPRequestHandler):
                     {"start": s.start, "end": s.end, "label": s.label, "text": s.text}
                     for s in res.spans
                 ],
+                "stages": used,
             })
         except Exception as exc:  # noqa: BLE001
             self._send(500, {"error": str(exc)})
@@ -87,33 +113,49 @@ def main() -> None:
     ap.add_argument("--llm-no-think", action="store_true")
     args = ap.parse_args()
 
-    global _ANON, _INFO
-    gconf = None
-    if args.ner == "gliner":
-        from anonymizer.gliner_ner import GLiNERConfig
+    global _INFO
+    print("Загружаю модели…", flush=True)
 
-        gconf = GLiNERConfig(device=args.device)
-    lconf = None
+    from anonymizer.detectors import CORPORATE_DETECTORS, DEFAULT_DETECTORS
+
+    _DETECTORS["regex"] = list(DEFAULT_DETECTORS)
+    _DETECTORS["corporate"] = list(CORPORATE_DETECTORS)
+
+    if args.ner != "none":
+        if args.ner == "gliner":
+            from anonymizer.gliner_ner import GLiNERConfig, GLiNERDetector
+
+            _DETECTORS["ner"] = [GLiNERDetector(GLiNERConfig(device=args.device))]
+        else:
+            from anonymizer.ner import NatashaDetector
+
+            _DETECTORS["ner"] = [NatashaDetector()]
+
     if args.llm:
-        from anonymizer.llm import LLMConfig
+        from anonymizer.llm import LLMConfig, LLMDetector
 
         extra = {"reasoning_effort": "none"} if args.llm_no_think else {}
         lconf = LLMConfig(base_url=args.llm_base_url, model=args.llm_model, extra_body=extra)
+        if args.corporate:  # let the LLM also return organization names
+            from dataclasses import replace
 
-    print("Загружаю модели…", flush=True)
-    _ANON = build_anonymizer(
-        use_ner=args.ner != "none",
-        ner_backend="gliner" if args.ner == "gliner" else "natasha",
+            lconf = replace(lconf, allowed_labels=lconf.allowed_labels | {"ORG"})
+        _DETECTORS["llm"] = [LLMDetector(lconf)]
+
+    # Start-up defaults: a stage is ON if it was loaded / requested.
+    _DEFAULTS.update(
+        regex=True,
         corporate=args.corporate,
-        gliner_config=gconf,
-        use_llm=args.llm,
-        llm_config=lconf,
+        ner=args.ner != "none",
+        llm=args.llm,
     )
-    _ANON.anonymize("Иван Иванов из Москвы, ИНН 7707083893.")  # warm up
+
+    _compose(_DEFAULTS).anonymize("Иван Иванов из Москвы, ИНН 7707083893.")  # warm up
     _INFO = {
         "ner": args.ner, "device": args.device,
         "corporate": args.corporate, "llm": args.llm,
         "llm_model": args.llm_model if args.llm else None,
+        "stages": dict(_DEFAULTS), "toggleable": True,
     }
     print(f"Сервер готов: http://{args.host}:{args.port}  {_INFO}", flush=True)
     ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()

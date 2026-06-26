@@ -128,6 +128,32 @@ def anonymized_docx_bytes(src_data: bytes, mapping: Mapping) -> bytes:
     return buf.getvalue()
 
 
+def deanonymized_docx_bytes(src_data: bytes, mapping: Mapping) -> bytes:
+    """Restore originals in a .docx (replace placeholders -> values), return bytes."""
+    import io
+
+    import docx
+
+    from .deanonymize import deanonymize
+
+    document = docx.Document(io.BytesIO(src_data))
+    for para in _iter_docx_paragraphs(document):
+        if not para.text:
+            continue
+        new_text = deanonymize(para.text, mapping)
+        if new_text == para.text:
+            continue
+        for run in list(para.runs):
+            run.text = ""
+        if para.runs:
+            para.runs[0].text = new_text
+        else:
+            para.add_run(new_text)
+    buf = io.BytesIO()
+    document.save(buf)
+    return buf.getvalue()
+
+
 def anonymize_to_files(
     path: str | Path, anon: Anonymizer, out_dir: str | Path | None = None
 ) -> dict[str, Path]:

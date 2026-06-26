@@ -23,6 +23,8 @@ def main() -> None:
     parser.add_argument("file", help="Path to a .docx or .txt document")
     parser.add_argument("--out-dir", default="", help="Output directory (default: alongside input)")
     parser.add_argument("--no-ner", action="store_true", help="Regex detectors only")
+    parser.add_argument("--no-regex", action="store_true",
+                        help="Disable regex detectors (e.g. GLiNER-only with --gliner)")
     parser.add_argument("--gliner", action="store_true", help="Use GLiNER NER (else Natasha)")
     parser.add_argument(
         "--corporate",
@@ -60,6 +62,7 @@ def main() -> None:
             api_key=args.llm_api_key, extra_body=extra,
         )
     anon = build_anonymizer(
+        use_regex=not args.no_regex,
         use_ner=not args.no_ner,
         ner_backend=ner_backend,
         corporate=args.corporate,

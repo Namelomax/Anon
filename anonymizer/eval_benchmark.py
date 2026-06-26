@@ -328,8 +328,12 @@ def _make_anon(args):
     if getattr(args, "remote_url", ""):
         from anonymizer.remote_client import RemoteAnonymizer
 
-        return RemoteAnonymizer(args.remote_url, args.remote_key)
+        stages = None
+        if getattr(args, "no_regex", False):
+            stages = {"regex": False}
+        return RemoteAnonymizer(args.remote_url, args.remote_key, stages=stages)
     return build_anonymizer(
+        use_regex=not getattr(args, "no_regex", False),
         use_ner=not args.no_ner, ner_backend=_backend(args),
         gliner_config=_gliner_cfg(args), use_llm=args.llm, llm_config=_llm_cfg(args),
     )
@@ -356,6 +360,8 @@ def main() -> None:
     )
     parser.add_argument("--limit", type=int, default=0, help="Evaluate first N rows only")
     parser.add_argument("--no-ner", action="store_true", help="Regex detectors only")
+    parser.add_argument("--no-regex", action="store_true",
+                        help="Disable regex detectors (e.g. test GLiNER-only with --gliner)")
     parser.add_argument("--llm", action="store_true", help="Also run the local LLM layer")
     parser.add_argument(
         "--gliner",

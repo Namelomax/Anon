@@ -112,7 +112,7 @@ IP_ADDRESS = RegexDetector(
     (?<![\w.:])
     (?:
         (?:\d{1,3}\.){3}\d{1,3}                       # IPv4
-      | (?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}    # IPv6 (incl. truncated)
+      | (?:[0-9a-fA-F]{1,4}:){3,7}[0-9a-fA-F]{1,4}    # IPv6 (>=4 groups; not HH:MM:SS)
     )
     (?![\w.:])
     """,
@@ -456,6 +456,42 @@ def is_job_title(text: str) -> bool:
 def is_non_pii(text: str) -> bool:
     """True if a PERSON/ORG span should be left unmasked (title or software)."""
     return is_job_title(text) or is_software(text)
+
+
+# NER/LLM labels are "soft": models sometimes tag pronouns or function words
+# ("я", "он", "это") as PERSON/LOCATION/ORG. Masking those is catastrophic with
+# mask_all_occurrences (every "я" inside "сегодня", "друзья" gets replaced), so
+# we drop such spans before masking.
+_SOFT_LABELS = frozenset({
+    "PERSON", "ORG", "LOCATION", "CITY", "REGION", "COUNTRY", "DISTRICT",
+    "STREET", "HOUSE", "ADDRESS", "FIRST_NAME", "LAST_NAME", "MIDDLE_NAME",
+})
+
+# Russian pronouns / function words that must never be treated as entities.
+_ENTITY_STOPWORDS = frozenset({
+    "я", "ты", "он", "она", "оно", "они", "мы", "вы",
+    "меня", "тебя", "его", "её", "ее", "нас", "вас", "их",
+    "мне", "тебе", "ему", "ей", "нам", "вам", "им", "них", "нему", "нею", "ней",
+    "мной", "мною", "тобой", "тобою", "нами", "вами", "ими",
+    "себя", "себе", "собой", "собою",
+    "это", "этот", "эта", "эти", "тот", "та", "те", "то", "той", "том", "этом",
+    "вот", "тут", "там", "здесь", "тогда", "сейчас", "теперь",
+    "да", "нет", "ну", "же", "бы", "ли", "не", "ни", "уж",
+    "и", "а", "но", "или", "что", "чтобы", "как", "так", "чем",
+    "кто", "где", "когда", "куда", "зачем", "почему",
+    "мой", "твой", "наш", "ваш", "свой", "весь", "вся", "всё", "все",
+    "ага", "угу", "вообще", "просто", "значит",
+})
+
+
+def is_stopword_entity(text: str, label: str) -> bool:
+    """True if a soft (NER/LLM) span is a pronoun/function word, not real PII."""
+    if label not in _SOFT_LABELS:
+        return False
+    low = text.strip().lower()
+    if len(low) <= 1:
+        return True
+    return low in _ENTITY_STOPWORDS
 
 
 _DECLENSION_LABELS = frozenset({"PERSON", "LOCATION", "ORG"})

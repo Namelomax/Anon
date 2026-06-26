@@ -28,6 +28,7 @@ def main() -> None:
     ap.add_argument("--in", dest="inp", required=True)
     ap.add_argument("--out", dest="out", required=True)
     ap.add_argument("--ner", default="gliner", choices=["gliner", "natasha", "none"])
+    ap.add_argument("--no-regex", action="store_true", help="Disable regex detectors")
     ap.add_argument("--device", default="cpu", help="GLiNER device: cpu | cuda | dml")
     ap.add_argument("--corporate", action="store_true")
     ap.add_argument("--llm", action="store_true")
@@ -57,6 +58,7 @@ def main() -> None:
         )
 
     anon = build_anonymizer(
+        use_regex=not args.no_regex,
         use_ner=args.ner != "none",
         ner_backend="gliner" if args.ner == "gliner" else "natasha",
         corporate=args.corporate,
