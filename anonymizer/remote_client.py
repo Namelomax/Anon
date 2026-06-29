@@ -56,6 +56,17 @@ def anonymize_remote(
             req = urllib.request.Request(url, data=body, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.load(resp)
+        except urllib.error.HTTPError as exc:
+            # The server reports the real cause in the JSON body; surface it.
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                pass
+            last_exc = RuntimeError(f"Сервер вернул HTTP {exc.code}: {detail or exc.reason}")
+            if exc.code < 500:  # client error won't fix itself on retry
+                raise last_exc
+            time.sleep(1.5 * (attempt + 1))
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             last_exc = exc
             time.sleep(1.5 * (attempt + 1))

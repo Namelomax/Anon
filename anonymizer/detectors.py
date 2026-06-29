@@ -494,6 +494,114 @@ def is_stopword_entity(text: str, label: str) -> bool:
     return low in _ENTITY_STOPWORDS
 
 
+# --- Precision noise filter ------------------------------------------------
+# Низкопороговый GLiNER + LLM-слой массово размечают как сущности тайм-коды,
+# метки дорожек («Спикер 4»), общие слова («человек», «команда», «компания»),
+# служебные фразы («это всё равно», «там условно»). Это не ПДн. Удаляем такой
+# шум детерминированно, до маскирования.
+
+_TIMECODE_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
+_SPEAKER_RE = re.compile(r"^(?:спикер|speaker|участ\w*|трек|track)\s*[№#]?\s*\d+$", re.IGNORECASE)
+_REPEAT_RE = re.compile(r"^(\w{1,6})(?:[\-\s]+\1){1,}$", re.IGNORECASE)
+
+# Общие существительные / доменные термины (по ОСНОВАМ, чтобы ловить падежи),
+# которые модели путают с сущностями. startswith-сопоставление токенов.
+_NOISE_STEMS = (
+    "человек", "люд", "команд", "компани", "клиент", "проект", "систем",
+    "ассистент", "нейросет", "модел", "решени", "лаборатори", "пользовател",
+    "ведущ", "смежник", "сотрудник", "персонал", "коллег", "ребят", "друзь",
+    "заказчик", "исполнител", "искусственн", "интеллект", "данн", "документ",
+    "протокол", "встреч", "вопрос", "задач", "инструмент", "процесс",
+    "результат", "коммент", "отдел", "служб", "групп", "функционал",
+    "сегодн", "завтра", "вчера", "штук", "вариант", "момент", "вещ",
+)
+
+# Одиночные общие слова с заглавной (точное совпадение), напр. «Нейросеть».
+_COMMON_NOUN_EXACT = frozenset({
+    "нейросеть", "ассистент", "компания", "команда", "система", "проект",
+    "решение", "интеллект", "пользователь", "ведущий", "заказчик",
+    "исполнитель", "документ", "протокол", "встреча", "вопрос", "задача",
+})
+
+_PREPOSITIONS = frozenset({
+    "у", "в", "во", "на", "с", "со", "к", "ко", "о", "об", "от", "до", "из",
+    "по", "за", "для", "при", "над", "под", "про", "без", "из-за", "через",
+})
+
+_INTERJECTIONS = frozenset({
+    "так", "ну", "вот", "ага", "угу", "эээ", "ммм", "да", "нет", "ок", "окей",
+    "блин", "короче", "значит", "типа", "это", "вообще", "просто", "ладно",
+})
+
+
+def _alpha_tokens(text: str) -> list[str]:
+    return _WORD_RE.findall(text.lower())
+
+
+def _is_noise_token(tok: str) -> bool:
+    """Токен — служебное/общее слово (стоп-слово, предлог, междометие, общий
+    термин по основе)."""
+    if tok in _ENTITY_STOPWORDS or tok in _PREPOSITIONS or tok in _INTERJECTIONS:
+        return True
+    return any(tok.startswith(stem) for stem in _NOISE_STEMS)
+
+
+def is_timecode(text: str) -> bool:
+    """True, если строка — это тайм-код ЧЧ:ММ:СС / ММ:СС."""
+    return bool(_TIMECODE_RE.match(text.strip()))
+
+
+def is_noise_span(text: str, label: str) -> bool:
+    """Детерминированный фильтр: True, если спан — мусор, а не ПДн.
+
+    Применяется ко ВСЕМ меткам: тайм-коды режутся для любых лейблов (включая
+    ошибочные INN/SNILS/LOCATION). Для PERSON/ORG/LOCATION дополнительно режутся
+    метки дорожек, общие слова и фразы из служебных слов.
+    """
+    s = text.strip()
+    if not s:
+        return True
+    if is_timecode(s):  # тайм-код — не ПДн в любой метке
+        return True
+
+    low = s.lower()
+    toks = _alpha_tokens(s)
+
+    if label == "PERSON":
+        if _SPEAKER_RE.match(s):
+            return True
+        if _REPEAT_RE.match(s):  # «так-так-так»
+            return True
+        if not s[0].isupper():  # настоящее ФИО начинается с заглавной
+            return True
+        if len(toks) >= 4:  # слишком длинно для имени — фраза
+            return True
+        if toks and all(
+            t in _ENTITY_STOPWORDS or t in _PREPOSITIONS or t in _INTERJECTIONS
+            for t in toks
+        ):
+            return True
+        if len(toks) == 1 and low in _COMMON_NOUN_EXACT:
+            return True
+        return False
+
+    if label in (
+        "ORG", "LOCATION", "CITY", "REGION", "COUNTRY",
+        "DISTRICT", "STREET", "HOUSE", "ADDRESS",
+    ):
+        if _SPEAKER_RE.match(s):
+            return True
+        if low in _COMMON_NOUN_EXACT:
+            return True
+        if toks and all(_is_noise_token(t) for t in toks):
+            return True
+        if len(toks) >= 5:  # длинная фраза — не название
+            return True
+        return False
+
+    return False
+
+
 _DECLENSION_LABELS = frozenset({"PERSON", "LOCATION", "ORG"})
 
 

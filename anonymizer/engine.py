@@ -12,6 +12,7 @@ from .detectors import (
     DEFAULT_PRIORITY,
     Detector,
     is_non_pii,
+    is_noise_span,
     is_stopword_entity,
     propagate_declensions,
     run_detectors,
@@ -81,6 +82,7 @@ class Anonymizer:
             if _has_alnum(s.text)
             and not (s.label in _TITLE_FILTER_LABELS and is_non_pii(s.text))
             and not is_stopword_entity(s.text, s.label)
+            and not is_noise_span(s.text, s.label)
         ]
         spans = resolve_overlaps(raw, priority=self._priority)
         # Mask declined case-forms of detected entities (e.g. "Лентой" given "Лента").

@@ -93,8 +93,8 @@ class GLiNERConfig:
     # Recall-oriented default: the goal is minimal misses (mislabeling is OK).
     # "address"/"organization" widen coverage (streets, house numbers, company
     # names) at some precision cost — acceptable for anonymization.
-    labels: tuple[str, ...] = ("person", "location", "organization", "address")
-    threshold: float = 0.3
+    labels: tuple[str, ...] = ("person", "location", "organization")
+    threshold: float = 0.45
     device: str = "cpu"
     label_map: dict = field(default_factory=lambda: dict(_DEFAULT_LABEL_MAP))
     flat_ner: bool = False
