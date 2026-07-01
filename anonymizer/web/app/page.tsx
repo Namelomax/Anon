@@ -57,6 +57,15 @@ function labelOf(placeholder: string): string {
   return placeholder.replace(/^\[|\]$/g, "").replace(/_[^_]*$/, "");
 }
 
+// Replace each placeholder token with its original value. Placeholders are
+// distinct "[LABEL_N]" tokens, so plain split/join is safe (no partial-match
+// clashes: "[PERSON_1]" is not a substring of "[PERSON_10]").
+function deanonClient(text: string, m: Record<string, string>): string {
+  let out = text;
+  for (const [ph, orig] of Object.entries(m)) out = out.split(ph).join(orig);
+  return out;
+}
+
 export default function Home() {
   const [tab, setTab] = useState<"anon" | "deanon">("anon");
 
@@ -75,6 +84,11 @@ export default function Home() {
   const [drag, setDrag] = useState(false);
   const [stagesOpen, setStagesOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  // Placeholders the user manually chose to KEEP in plain text (undo a mask).
+  // Reversible: clicking again re-masks. Everything downstream (preview,
+  // mapping.json, downloaded document) is derived from this set.
+  const [kept, setKept] = useState<Set<string>>(new Set());
+  const [docBusy, setDocBusy] = useState(false);
 
   // --- Deanonymize state ---
   const [deUseLast, setDeUseLast] = useState(true);
@@ -117,6 +131,7 @@ export default function Home() {
       const data = await resp.json();
       if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
       setResult(data as AnonResult);
+      setKept(new Set());
       setDeUseLast(true);
       setDeResult(null);
     } catch (e: unknown) {
@@ -126,17 +141,74 @@ export default function Home() {
     }
   }, [file, stages]);
 
-  const mappingJson = useMemo(
-    () => (result ? JSON.stringify(result.mapping, null, 2) : ""),
-    [result],
+  const toggleKept = (ph: string) =>
+    setKept((prev) => {
+      const next = new Set(prev);
+      if (next.has(ph)) next.delete(ph);
+      else next.add(ph);
+      return next;
+    });
+
+  // Mapping the user chose to revert (placeholder -> original), and the
+  // "effective" mapping that stays masked (the key that's actually needed).
+  const keptMapping = useMemo(() => {
+    const m: Record<string, string> = {};
+    if (result) for (const ph of kept) if (ph in result.mapping) m[ph] = result.mapping[ph];
+    return m;
+  }, [result, kept]);
+
+  const effectiveMapping = useMemo(() => {
+    const m: Record<string, string> = {};
+    if (result)
+      for (const [ph, orig] of Object.entries(result.mapping)) if (!kept.has(ph)) m[ph] = orig;
+    return m;
+  }, [result, kept]);
+
+  const mappingJson = useMemo(() => JSON.stringify(effectiveMapping, null, 2), [effectiveMapping]);
+
+  // Preview with reverted placeholders substituted back to their originals.
+  const previewText = useMemo(
+    () => (result ? deanonClient(result.anonymized_text, keptMapping) : ""),
+    [result, keptMapping],
   );
 
-  const downloadDoc = () => {
+  // Build the effective document (reverted placeholders put back). For .txt we
+  // do it client-side; for .docx we ask the backend to restore ONLY the kept
+  // placeholders in the real .docx (preserving structure), leaving the rest
+  // masked. Returns the bytes + filename to download/zip.
+  const buildEffectiveDoc = useCallback(async (): Promise<Blob> => {
+    if (!result) throw new Error("нет результата");
+    if (!result.is_docx) {
+      const txt = deanonClient(result.anonymized_text, keptMapping);
+      return new Blob([txt], { type: "text/plain;charset=utf-8" });
+    }
+    if (kept.size === 0) {
+      return new Blob([base64ToBuffer(result.document_base64)], { type: result.document_mime });
+    }
+    const resp = await fetch("/api/deanonymize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filename: result.document_name,
+        file_base64: result.document_base64,
+        mapping: keptMapping,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+    return new Blob([base64ToBuffer(data.document_base64)], { type: data.document_mime });
+  }, [result, kept, keptMapping]);
+
+  const downloadDoc = async () => {
     if (!result) return;
-    download(
-      new Blob([base64ToBuffer(result.document_base64)], { type: result.document_mime }),
-      result.document_name,
-    );
+    setDocBusy(true);
+    try {
+      download(await buildEffectiveDoc(), result.document_name);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDocBusy(false);
+    }
   };
   const downloadMapping = () => {
     if (!result) return;
@@ -144,11 +216,17 @@ export default function Home() {
   };
   const downloadZip = async () => {
     if (!result) return;
-    const zip = new JSZip();
-    zip.file(result.document_name, base64ToBuffer(result.document_base64));
-    zip.file(`${stem}.map.json`, mappingJson);
-    const blob = await zip.generateAsync({ type: "blob" });
-    download(blob, `${stem}_anonymized.zip`);
+    setDocBusy(true);
+    try {
+      const zip = new JSZip();
+      zip.file(result.document_name, await buildEffectiveDoc());
+      zip.file(`${stem}.map.json`, mappingJson);
+      download(await zip.generateAsync({ type: "blob" }), `${stem}_anonymized.zip`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDocBusy(false);
+    }
   };
 
   // --- Deanonymize action ---
@@ -361,15 +439,16 @@ export default function Home() {
               <div className="card">
                 <h2>📦 Скачать</h2>
                 <div className="row">
-                  <button className="ghost" onClick={downloadZip}>
+                  <button className="ghost" onClick={downloadZip} disabled={docBusy}>
                     ⬇️ ZIP (документ + mapping)
                   </button>
-                  <button className="ghost" onClick={downloadDoc}>
+                  <button className="ghost" onClick={downloadDoc} disabled={docBusy}>
                     ⬇️ {result.document_name}
                   </button>
                   <button className="ghost" onClick={downloadMapping}>
                     ⬇️ {stem}.map.json
                   </button>
+                  {docBusy && <span className="note">Собираю документ…</span>}
                 </div>
                 <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
                   ⚠️ Mapping — ключ восстановления. Храните его отдельно от обезличенного документа.
@@ -378,11 +457,18 @@ export default function Home() {
 
               <div className="card">
                 <h2>Обезличенный текст</h2>
-                <pre className="preview">{result.anonymized_text}</pre>
+                <pre className="preview">{previewText}</pre>
               </div>
 
               <div className="card">
                 <h2>Mapping ({entityCount})</h2>
+                {kept.size > 0 && (
+                  <p className="note" style={{ marginTop: 0 }}>
+                    Возвращено в текст вручную: {kept.size}. Эти значения НЕ обезличены — они
+                    исключены из ключа и подставлены в документ. Нажмите «Вернуть», чтобы снова
+                    скрыть.
+                  </p>
+                )}
                 {entityCount === 0 ? (
                   <p className="note">Сущностей не найдено.</p>
                 ) : (
@@ -393,20 +479,40 @@ export default function Home() {
                           <th>Плейсхолдер</th>
                           <th>Тип</th>
                           <th>Оригинал</th>
+                          <th>Действие</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {Object.entries(result.mapping).map(([ph, orig]) => (
-                          <tr key={ph}>
-                            <td>
-                              <code>{ph}</code>
-                            </td>
-                            <td>
-                              <span className="tag">{labelOf(ph)}</span>
-                            </td>
-                            <td>{orig}</td>
-                          </tr>
-                        ))}
+                        {Object.entries(result.mapping).map(([ph, orig]) => {
+                          const isKept = kept.has(ph);
+                          return (
+                            <tr key={ph} style={isKept ? { opacity: 0.55 } : undefined}>
+                              <td>
+                                <code>{ph}</code>
+                              </td>
+                              <td>
+                                <span className="tag">{labelOf(ph)}</span>
+                              </td>
+                              <td style={isKept ? { textDecoration: "line-through" } : undefined}>
+                                {orig}
+                              </td>
+                              <td>
+                                <button
+                                  className="ghost"
+                                  style={{ padding: "4px 10px", fontSize: 13 }}
+                                  onClick={() => toggleKept(ph)}
+                                  title={
+                                    isKept
+                                      ? "Снова скрыть это значение в документе"
+                                      : "Оставить это значение в тексте (не анонимизировать)"
+                                  }
+                                >
+                                  {isKept ? "↩︎ Вернуть маску" : "Оставить в тексте"}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>

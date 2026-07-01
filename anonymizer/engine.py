@@ -19,9 +19,13 @@ from .detectors import (
     propagate_declensions,
     run_detectors,
 )
+from .detectors import _SOFT_LABELS
 
-# Labels for which a job-title surface form should be left unmasked.
-_TITLE_FILTER_LABELS = frozenset({"PERSON", "ORG"})
+# Job titles / known software terms should stay unmasked under ANY soft
+# (NER/LLM) label — e.g. a product name can arrive as LOCATION, not just ORG.
+# Kept intentionally small + generic; document-specific brands/slang are the
+# review layer's job (no hardcoded per-document value lists).
+_TITLE_FILTER_LABELS = _SOFT_LABELS
 from .mapping import Mapping, assign_placeholders, find_placeholder_spans
 from .spans import Span, resolve_overlaps
 

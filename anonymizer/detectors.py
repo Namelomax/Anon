@@ -546,7 +546,7 @@ def is_stopword_entity(text: str, label: str) -> bool:
     """True if a soft (NER/LLM) span is a pronoun/function word, not real PII."""
     if label not in _SOFT_LABELS:
         return False
-    low = text.strip().lower()
+    low = " ".join(text.split()).casefold()  # collapse nbsp/spaces
     if len(low) <= 1:
         return True
     return low in _ENTITY_STOPWORDS

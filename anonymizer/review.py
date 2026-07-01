@@ -118,15 +118,9 @@ class ReviewConfig:
         extra_body: Merged into the request JSON (e.g. disable "thinking").
         context_chars: Characters of surrounding text kept on each side of a
             candidate value, to give the model enough to judge from.
-        batch_size: How many distinct candidates are sent per LLM call.
-            ``merge_with`` can only link candidates within the same batch, so
-            this wants to be as large as reliably possible — but a bigger
-            batch also makes it easier for a small/fast model to lose track
-            of which verdict belongs to which id. Each verdict's ``text``
-            field is checked against the candidate it claims to be about
-            (see ``review_spans``); a mismatch is discarded rather than
-            trusted, so a moderate batch size keeps that safety net cheap to
-            trigger rarely instead of constantly.
+        batch_size: Deprecated / ignored. The reviewer now sends the whole
+            candidate list in a single request (see ``review_spans``); kept
+            only so existing configs don't break.
     """
 
     base_url: str = "http://127.0.0.1:11434/v1"
@@ -172,26 +166,24 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
     keys = list(candidates.keys())
     items = list(candidates.items())
 
+    # Single call: the model sees the WHOLE candidate list as one JSON-like
+    # request. A small model is more self-consistent and better at spotting
+    # obvious false positives (a role word, a product name, an abbreviation)
+    # when it can compare every candidate against all the others at once than
+    # when the list is split into independent batches. merge_with ids are then
+    # global. Fail-safe: any error => empty verdicts => everything stays masked.
     verdicts: dict[int, dict] = {}
-    for i in range(0, len(items), cfg.batch_size):
-        batch = items[i : i + cfg.batch_size]
-        try:
-            raw = _ask(batch, cfg)
-        except Exception:
-            continue  # fail safe: this batch stays masked, unmerged, untrimmed
-        for local_idx, v in raw.items():
-            if not (0 <= local_idx < len(batch)):
-                continue
-            # merge_with is batch-local; rebase it to a global candidate index,
-            # or drop it if it points outside this batch (can't merge across
-            # requests — the model never saw both candidates together).
-            mw = v.get("merge_with")
-            if isinstance(mw, int):
-                if 0 <= mw < len(batch):
-                    v = {**v, "merge_with": i + mw}
-                else:
-                    v = {k: vv for k, vv in v.items() if k != "merge_with"}
-            verdicts[i + local_idx] = v
+    try:
+        raw = _ask(items, cfg)
+    except Exception:
+        raw = {}
+    for idx, v in raw.items():
+        if not (0 <= idx < len(items)):
+            continue
+        mw = v.get("merge_with")
+        if isinstance(mw, int) and not (0 <= mw < len(items)):
+            v = {k: vv for k, vv in v.items() if k != "merge_with"}
+        verdicts[idx] = v
 
     keep = {k: True for k in keys}
     trimmed_text: dict[str, str | None] = {k: None for k in keys}
