@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { describeError } from "../_shared";
+import { callBackend, describeError } from "../_shared";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -12,8 +12,7 @@ const BACKEND_KEY = process.env.ANONYMIZER_BACKEND_KEY || "";
  * Proxy for deanonymization. Accepts either:
  *  - multipart form: file (anonymized doc) + mapping (JSON string), or
  *  - JSON: { filename, file_base64, mapping }  (used by "восстановить последний")
- * Forwards to the Python backend's /deanonymize-file with the Bearer token
- * injected server-side.
+ * Uses callBackend (not fetch) to tolerate the JupyterHub proxy's malformed CSP.
  */
 export async function POST(req: NextRequest) {
   try {
@@ -41,20 +40,23 @@ export async function POST(req: NextRequest) {
       payload = { filename: file.name, file_base64: buf.toString("base64"), mapping };
     }
 
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (BACKEND_KEY) headers.Authorization = `Bearer ${BACKEND_KEY}`;
+    const resp = await callBackend(
+      `${BACKEND_URL}/deanonymize-file`,
+      JSON.stringify(payload),
+      BACKEND_KEY,
+      110_000,
+    );
 
-    const resp = await fetch(`${BACKEND_URL}/deanonymize-file`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    });
-
-    const data = await resp.json().catch(() => ({ error: "Некорректный ответ бэкенда" }));
+    let data: unknown;
+    try {
+      data = JSON.parse(resp.text);
+    } catch {
+      data = { error: `Некорректный ответ бэкенда (HTTP ${resp.status}): ${resp.text.slice(0, 300)}` };
+    }
     return NextResponse.json(data, { status: resp.status });
   } catch (e: unknown) {
     const msg = describeError(e, BACKEND_URL);
-    console.error("[/api/deanonymize] backend fetch failed:", msg, e);
+    console.error("[/api/deanonymize] backend call failed:", msg, e);
     return NextResponse.json({ error: msg }, { status: 502 });
   }
 }
