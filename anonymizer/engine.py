@@ -66,10 +66,14 @@ class Anonymizer:
         *,
         priority: dict[str, int] | None = None,
         mask_all_occurrences: bool = True,
+        review_config=None,
     ) -> None:
         self._detectors = tuple(detectors) if detectors is not None else DEFAULT_DETECTORS
         self._priority = priority if priority is not None else DEFAULT_PRIORITY
         self._mask_all = mask_all_occurrences
+        # Optional 4th layer: an LLM double-checks the surviving spans and
+        # reverts obvious false positives (see review.py). None = skip it.
+        self._review_config = review_config
 
     def anonymize(self, text: str) -> AnonymizationResult:
         """Detect sensitive spans and replace them with reversible placeholders.
@@ -93,6 +97,13 @@ class Anonymizer:
         extra = propagate_declensions(text, spans)
         if extra:
             spans = resolve_overlaps(spans + extra, priority=self._priority)
+        # 4th layer: LLM double-checks the surviving spans against their
+        # context and reverts obvious false positives (see review.py). Runs
+        # last, after all detectors, so it judges the final candidate set.
+        if self._review_config is not None:
+            from .review import review_spans
+
+            spans = review_spans(text, spans, self._review_config)
         mapping, span_placeholders = assign_placeholders(spans)
 
         if self._mask_all and mapping:
@@ -180,11 +191,14 @@ def build_anonymizer(
     corporate: bool = False,
     use_llm: bool = False,
     llm_config=None,
+    use_review: bool = False,
+    review_config=None,
 ) -> Anonymizer:
     """Construct an anonymizer from the layered detectors.
 
-    Layers (cheap to expensive): regex -> NER -> local LLM. Each layer is
-    independently switchable; each only adds spans, overlap resolution merges.
+    Layers (cheap to expensive): regex -> NER -> local LLM -> LLM review. Each
+    detection layer is independently switchable; each only adds spans, overlap
+    resolution merges. The review layer runs last and can only remove spans.
 
     Args:
         use_regex: Include the deterministic regex detectors (contacts + RU
@@ -199,6 +213,11 @@ def build_anonymizer(
             regex-based but controlled separately from ``use_regex``.
         use_llm: Append the local-LLM gap-filler. Requires LM Studio / Ollama.
         llm_config: Optional :class:`anonymizer.llm.LLMConfig`.
+        use_review: Add the LLM review layer (see ``review.py``): double-checks
+            the final span list against context and reverts obvious detector
+            mistakes (common words, product names, legal abbreviations...)
+            before placeholders are assigned. Requires LM Studio / Ollama.
+        review_config: Optional :class:`anonymizer.review.ReviewConfig`.
 
     Returns:
         A configured :class:`Anonymizer`.
@@ -226,7 +245,13 @@ def build_anonymizer(
         if corporate:  # the LLM (not regex) handles organizations and money sums
             cfg = replace(cfg, allowed_labels=cfg.allowed_labels | {"ORG", "AMOUNT"})
         detectors.append(LLMDetector(cfg))
-    return Anonymizer(detectors)
+
+    review_cfg = None
+    if use_review:
+        from .review import ReviewConfig
+
+        review_cfg = review_config or ReviewConfig()
+    return Anonymizer(detectors, review_config=review_cfg)
 
 
 _default = Anonymizer()

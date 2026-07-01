@@ -3,7 +3,7 @@
 import JSZip from "jszip";
 import { useCallback, useMemo, useRef, useState } from "react";
 
-type StageKey = "regex" | "corporate" | "ner" | "llm";
+type StageKey = "regex" | "corporate" | "ner" | "llm" | "review";
 
 type AnonResult = {
   filename: string;
@@ -30,6 +30,7 @@ const STAGE_LABELS: Record<StageKey, string> = {
   corporate: "Корпоративные (суммы/договоры)",
   ner: "GLiNER (ФИО, города, организации)",
   llm: "LLM (сложные случаи)",
+  review: "LLM-проверка (отсеивает ложные срабатывания)",
 };
 
 function base64ToBuffer(b64: string): ArrayBuffer {
@@ -64,11 +65,13 @@ export default function Home() {
     corporate: true,
     ner: true,
     llm: true,
+    review: true,
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnonResult | null>(null);
   const [drag, setDrag] = useState(false);
+  const [stagesOpen, setStagesOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // --- Deanonymize state ---
@@ -246,18 +249,41 @@ export default function Home() {
           </div>
 
           <div className="card">
-            <h2>2. Этапы обработки</h2>
-            <div className="stages">
-              {(Object.keys(STAGE_LABELS) as StageKey[]).map((k) => (
-                <label className="stage" key={k}>
-                  <input type="checkbox" checked={stages[k]} onChange={() => toggle(k)} />
-                  {STAGE_LABELS[k]}
-                </label>
-              ))}
+            <div
+              className="card-toggle"
+              role="button"
+              tabIndex={0}
+              aria-expanded={stagesOpen}
+              onClick={() => setStagesOpen((v) => !v)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setStagesOpen((v) => !v);
+                }
+              }}
+            >
+              <h2 style={{ margin: 0 }}>2. Этапы обработки</h2>
+              <span className={`chevron${stagesOpen ? " open" : ""}`}>▾</span>
             </div>
-            <p className="note" style={{ marginBottom: 0, marginTop: 12 }}>
-              Можно отключить любой слой — например, оставить только GLiNER.
-            </p>
+            {stagesOpen && (
+              <>
+                <div className="stages" style={{ marginTop: 14 }}>
+                  {(Object.keys(STAGE_LABELS) as StageKey[]).map((k) => (
+                    <label className="stage" key={k}>
+                      <input type="checkbox" checked={stages[k]} onChange={() => toggle(k)} />
+                      {STAGE_LABELS[k]}
+                    </label>
+                  ))}
+                </div>
+                <p className="note" style={{ marginBottom: 0, marginTop: 12 }}>
+                  Можно отключить любой слой — например, оставить только GLiNER.
+                  LLM-проверка — финальный слой: пересматривает уже найденные
+                  сущности и снимает маскирование с очевидных ошибок (обычные
+                  слова, названия продуктов и т.п.); работает, только если
+                  бэкенд запущен с флагом --review.
+                </p>
+              </>
+            )}
           </div>
 
           <div className="card">

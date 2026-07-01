@@ -15,13 +15,16 @@ and clients authenticate with the JupyterHub Bearer token.
 
 API:
     GET  /health           -> {"status": "ok", ...}
-    POST /anonymize  {text, regex?, corporate?, ner?, llm?}
+    POST /anonymize  {text, regex?, corporate?, ner?, llm?, review?}
          -> {anonymized_text, mapping, summary, spans:[{start,end,label,text}], stages}
 
-Each pipeline stage (regex / corporate / ner / llm) can be toggled per request
-via optional booleans in the POST body; omitted flags fall back to the server's
-start-up defaults. This lets the UI try e.g. "GLiNER only, no regex" without a
-redeploy.
+Each pipeline stage (regex / corporate / ner / llm / review) can be toggled
+per request via optional booleans in the POST body; omitted flags fall back
+to the server's start-up defaults. This lets the UI try e.g. "GLiNER only, no
+regex" without a redeploy. ``review`` is the 4th, last layer: it re-checks the
+spans produced by the other layers against their context and un-masks obvious
+false positives (see ``review.py``); it only has any effect if the server was
+started with ``--review``.
 """
 
 from __future__ import annotations
@@ -40,8 +43,11 @@ from anonymizer.engine import Anonymizer  # noqa: E402
 _DETECTORS: dict = {}    # stage name -> list of detector objects (built once)
 _DEFAULTS: dict = {}     # stage name -> bool (start-up default on/off)
 _GLINER_CFG = None       # base GLiNERConfig, for per-request threshold overrides
+_REVIEW_CFG = None       # ReviewConfig for the LLM review layer, or None if disabled
 _INFO: dict = {}
 _LOCK = threading.Lock()  # serialize model calls: torch/GLiNER is not thread-safe
+
+_STAGE_NAMES = ("regex", "corporate", "ner", "llm", "review")
 
 
 def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
@@ -66,7 +72,12 @@ def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
             dets.append(GLiNERDetector(replace(_GLINER_CFG, threshold=float(ner_threshold))))
         else:
             dets.extend(_DETECTORS[name])
-    return Anonymizer(dets)
+
+    review_on = stages.get("review")
+    if review_on is None:
+        review_on = _DEFAULTS.get("review", False)
+    review_cfg = _REVIEW_CFG if (review_on and _REVIEW_CFG is not None) else None
+    return Anonymizer(dets, review_config=review_cfg)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -119,11 +130,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = self._read_json()
             text = data.get("text", "")
-            stages = {k: data[k] for k in ("regex", "corporate", "ner", "llm") if k in data}
+            stages = {k: data[k] for k in _STAGE_NAMES if k in data}
             with _LOCK:  # one model call at a time (torch is not thread-safe)
                 anon = _compose(stages, data.get("ner_threshold"))
                 res = anon.anonymize(text)
-            used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in ("regex", "corporate", "ner", "llm")}
+            used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
             self._send(200, {
                 "anonymized_text": res.anonymized_text,
                 "mapping": res.mapping,
@@ -160,7 +171,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, {"error": "file_base64 is required"})
                 return
             raw = base64.b64decode(b64)
-            stages = {k: data[k] for k in ("regex", "corporate", "ner", "llm") if k in data}
+            stages = {k: data[k] for k in _STAGE_NAMES if k in data}
 
             is_docx = filename.lower().endswith(".docx")
             text = read_text_from_bytes(filename, raw)
@@ -179,7 +190,7 @@ class Handler(BaseHTTPRequestHandler):
                 doc_name = f"{stem}.anon.txt"
                 doc_mime = "text/plain"
 
-            used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in ("regex", "corporate", "ner", "llm")}
+            used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
             self._send(200, {
                 "filename": filename,
                 "is_docx": is_docx,
@@ -270,9 +281,17 @@ def main() -> None:
     ap.add_argument("--llm-base-url", default="http://127.0.0.1:11433/v1")
     ap.add_argument("--llm-model", default="qwen3.5:9b")
     ap.add_argument("--llm-no-think", action="store_true")
+    ap.add_argument(
+        "--review", action="store_true",
+        help="4th layer: LLM double-checks the final mapping and reverts obvious "
+             "false positives (e.g. common words mislabeled as PERSON/ORG).",
+    )
+    ap.add_argument("--review-base-url", default=None, help="Defaults to --llm-base-url")
+    ap.add_argument("--review-model", default=None, help="Defaults to --llm-model")
+    ap.add_argument("--review-no-think", action="store_true")
     args = ap.parse_args()
 
-    global _INFO, _GLINER_CFG
+    global _INFO, _GLINER_CFG, _REVIEW_CFG
     print("Загружаю модели…", flush=True)
 
     from anonymizer.detectors import CORPORATE_DETECTORS, DEFAULT_DETECTORS
@@ -302,12 +321,23 @@ def main() -> None:
             lconf = replace(lconf, allowed_labels=lconf.allowed_labels | {"ORG", "AMOUNT"})
         _DETECTORS["llm"] = [LLMDetector(lconf)]
 
+    if args.review:
+        from anonymizer.review import ReviewConfig
+
+        review_extra = {"reasoning_effort": "none"} if args.review_no_think else {}
+        _REVIEW_CFG = ReviewConfig(
+            base_url=args.review_base_url or args.llm_base_url,
+            model=args.review_model or args.llm_model,
+            extra_body=review_extra,
+        )
+
     # Start-up defaults: a stage is ON if it was loaded / requested.
     _DEFAULTS.update(
         regex=True,
         corporate=args.corporate,
         ner=args.ner != "none",
         llm=args.llm,
+        review=args.review,
     )
 
     # Warm up the pipeline. A transient LLM outage must NOT prevent the server
@@ -320,6 +350,8 @@ def main() -> None:
         "ner": args.ner, "device": args.device,
         "corporate": args.corporate, "llm": args.llm,
         "llm_model": args.llm_model if args.llm else None,
+        "review": args.review,
+        "review_model": _REVIEW_CFG.model if _REVIEW_CFG else None,
         "stages": dict(_DEFAULTS), "toggleable": True,
         "ner_threshold": _GLINER_CFG.threshold if _GLINER_CFG else None,
     }

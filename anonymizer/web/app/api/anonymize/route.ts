@@ -8,7 +8,7 @@ const BACKEND_URL =
   process.env.ANONYMIZER_BACKEND_URL?.replace(/\/$/, "") || "http://127.0.0.1:8000";
 const BACKEND_KEY = process.env.ANONYMIZER_BACKEND_KEY || "";
 
-type Stages = Partial<Record<"regex" | "corporate" | "ner" | "llm", boolean>>;
+type Stages = Partial<Record<"regex" | "corporate" | "ner" | "llm" | "review", boolean>>;
 
 /**
  * Proxy: browser uploads a file here; we base64-encode it and forward to the

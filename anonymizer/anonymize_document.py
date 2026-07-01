@@ -38,6 +38,15 @@ def main() -> None:
     parser.add_argument("--llm-api-key", default="not-needed")
     parser.add_argument("--llm-no-think", action="store_true",
                         help="Disable reasoning (reasoning_effort=none — for Ollama Qwen)")
+    parser.add_argument(
+        "--review", action="store_true",
+        help="Add the LLM review layer: double-checks the final mapping and "
+             "reverts obvious false positives (e.g. common words mislabeled "
+             "as PERSON/ORG)",
+    )
+    parser.add_argument("--review-base-url", default=None, help="Defaults to --llm-base-url")
+    parser.add_argument("--review-model", default=None, help="Defaults to --llm-model")
+    parser.add_argument("--review-no-think", action="store_true")
     parser.add_argument("--preview", type=int, default=1500, help="Chars of anonymized preview")
     args = parser.parse_args()
 
@@ -61,6 +70,17 @@ def main() -> None:
             base_url=args.llm_base_url, model=args.llm_model,
             api_key=args.llm_api_key, extra_body=extra,
         )
+    review_config = None
+    if args.review:
+        from anonymizer.review import ReviewConfig
+
+        review_extra = {"reasoning_effort": "none"} if args.review_no_think else {}
+        review_config = ReviewConfig(
+            base_url=args.review_base_url or args.llm_base_url,
+            model=args.review_model or args.llm_model,
+            api_key=args.llm_api_key,
+            extra_body=review_extra,
+        )
     anon = build_anonymizer(
         use_regex=not args.no_regex,
         use_ner=not args.no_ner,
@@ -69,14 +89,19 @@ def main() -> None:
         gliner_config=gliner_config,
         use_llm=args.llm,
         llm_config=llm_config,
+        use_review=args.review,
+        review_config=review_config,
     )
     import time
 
     ner_desc = "выкл" if args.no_ner else f"{ner_backend} (device={args.device})"
     llm_desc = f"вкл — {args.llm_model} @ {args.llm_base_url}" if args.llm else "выкл"
+    review_desc = (
+        f"вкл — {review_config.model} @ {review_config.base_url}" if args.review else "выкл"
+    )
     print(
         f"Конфигурация: NER={ner_desc} | corporate={'да' if args.corporate else 'нет'} "
-        f"| LLM={llm_desc}",
+        f"| LLM={llm_desc} | review={review_desc}",
         file=sys.stderr,
     )
 
@@ -101,6 +126,7 @@ def main() -> None:
     print(f"  NER:       {ner_desc}")
     print(f"  corporate: {'да' if args.corporate else 'нет'}")
     print(f"  LLM:       {llm_desc}")
+    print(f"  review:    {review_desc}")
     print("СКОРОСТЬ:")
     print(f"  время обработки: {elapsed:.1f} c")
     print(f"  символов:        {len(text)}  ({len(text)/elapsed:.0f} симв/с)")
