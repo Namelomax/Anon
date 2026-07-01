@@ -1,0 +1,276 @@
+:root {
+  --bg: #0b1020;
+  --panel: #141b2e;
+  --panel-2: #1b2440;
+  --border: #2a3350;
+  --text: #e8ecf5;
+  --muted: #9aa4bf;
+  --accent: #4f7cff;
+  --accent-2: #2bd4a8;
+  --danger: #ff6b6b;
+  --radius: 12px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.wrap {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 32px 20px 80px;
+}
+
+header h1 {
+  margin: 0 0 4px;
+  font-size: 26px;
+  letter-spacing: -0.01em;
+}
+
+header p {
+  margin: 0 0 24px;
+  color: var(--muted);
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.tab {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 18px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tab.active {
+  background: var(--panel-2);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.card h2 {
+  margin: 0 0 14px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.drop {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 28px;
+  text-align: center;
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.drop:hover,
+.drop.drag {
+  border-color: var(--accent);
+  background: var(--panel-2);
+}
+
+.drop strong {
+  color: var(--text);
+}
+
+.file-name {
+  margin-top: 12px;
+  color: var(--accent-2);
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.stage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 7px 14px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 14px;
+}
+
+.stage input {
+  accent-color: var(--accent);
+}
+
+button.primary {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  padding: 12px 22px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button.primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button.ghost {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 16px;
+  font-size: 14px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+
+button.ghost:hover {
+  border-color: var(--accent);
+}
+
+.row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.metrics {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.metric {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  min-width: 120px;
+}
+
+.metric .v {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.metric .k {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+pre.preview {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  max-height: 340px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  margin: 0;
+}
+
+table.map {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+table.map th,
+table.map td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+table.map th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+table.map code {
+  color: var(--accent-2);
+}
+
+.tag {
+  display: inline-block;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 7px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.error {
+  background: rgba(255, 107, 107, 0.12);
+  border: 1px solid var(--danger);
+  color: #ffd5d5;
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+.note {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.spin {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  vertical-align: -3px;
+  margin-right: 8px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.scroll-tbl {
+  max-height: 360px;
+  overflow: auto;
+}

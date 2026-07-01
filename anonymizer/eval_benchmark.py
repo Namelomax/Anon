@@ -328,10 +328,12 @@ def _make_anon(args):
     if getattr(args, "remote_url", ""):
         from anonymizer.remote_client import RemoteAnonymizer
 
-        stages = None
+        stages: dict = {}
         if getattr(args, "no_regex", False):
-            stages = {"regex": False}
-        return RemoteAnonymizer(args.remote_url, args.remote_key, stages=stages)
+            stages["regex"] = False
+        if getattr(args, "gliner_threshold", None) is not None:
+            stages["ner_threshold"] = args.gliner_threshold
+        return RemoteAnonymizer(args.remote_url, args.remote_key, stages=stages or None)
     return build_anonymizer(
         use_regex=not getattr(args, "no_regex", False),
         use_ner=not args.no_ner, ner_backend=_backend(args),

@@ -36,7 +36,11 @@ class RegexDetector:
         group: Capture group whose span is reported. ``0`` is the whole match;
             use a named/numbered group to redact only part of a keyword-anchored
             match (e.g. the digits after "ИНН").
-        flags: Extra regex flags (``IGNORECASE | UNICODE`` are always applied).
+        flags: Extra regex flags (``UNICODE`` is always applied).
+        ignorecase: If True (default) ``re.IGNORECASE`` is added — right for
+            keyword-anchored document detectors. Set False for case-sensitive
+            patterns (e.g. Russian name detectors that rely on capitalization to
+            tell a name from a common lowercase word like «условно»).
         strip: Characters trimmed from both ends of each match before reporting.
     """
 
@@ -47,12 +51,15 @@ class RegexDetector:
         *,
         group: int | str = 0,
         flags: int = 0,
+        ignorecase: bool = True,
         strip: str = " \t.,;:!?)(»«\"'=|/\\_-",
     ) -> None:
         self.label = label
         self.group = group
         self._strip = strip
-        self._re = re.compile(pattern, flags | re.IGNORECASE | re.UNICODE)
+        if ignorecase:
+            flags |= re.IGNORECASE
+        self._re = re.compile(pattern, flags | re.UNICODE)
 
     def find(self, text: str) -> list[Span]:
         spans: list[Span] = []
@@ -149,9 +156,13 @@ PHONE = RegexDetector(
 
 _GAP = r"\D{0,25}?"  # short non-greedy gap of non-digit chars after a keyword
 
+# The keyword must be a standalone word: without the boundaries, IGNORECASE
+# makes "ИНН" match the "инн" inside words like "дл-инн-ое"/"стар-инн-ый" and
+# then grab any nearby digit ("(5 и более слов)" -> a bogus INN "5").
 INN = RegexDetector(
     "INN",
-    r"(?:ИНН|налогоплательщик\w*)" + _GAP + r"(" + _BLOB + r")",
+    r"(?<![А-Яа-яЁёA-Za-z])(?:ИНН(?![А-Яа-яЁёA-Za-z])|налогоплательщик\w*)"
+    + _GAP + r"(" + _BLOB + r")",
     group=1,
 )
 
@@ -219,11 +230,14 @@ class BirthCertificateDetector:
 
 BIRTH_CERTIFICATE_SPLIT = BirthCertificateDetector()
 
-# Military id: 2 cyrillic letters + 6-7 digits, with messy separators. Not
-# preceded by a roman numeral (that's a birth certificate series).
+# Military id: 2 UPPERCASE cyrillic letters + 6-7 digits, with messy separators.
+# (?-i:...) keeps the letters uppercase-only despite the detector's global
+# IGNORECASE — otherwise lowercase function words like "до"/"от 500 000" match
+# and money gets mislabeled as a military id. Not preceded by a roman numeral
+# (that's a birth-certificate series).
 MILITARY_FMT = RegexDetector(
     "MILITARY_ID",
-    r"(?<![А-ЯЁA-Z])(?<![IVXLC] )[А-ЯЁ]{2}[ \t\-_()]*\d(?:[\d \t\-_()]{4,6}\d)(?!\d)",
+    r"(?<![А-ЯЁA-Z])(?<![IVXLC] )(?-i:[А-ЯЁ]{2})[ \t\-_()]*\d(?:[\d \t\-_()]{4,6}\d)(?!\d)",
 )
 
 # Military id by keyword, allowing a split "серия МЗ, номер 0045678".
@@ -233,6 +247,37 @@ MILITARY_KW = RegexDetector(
     group=1,
 )
 
+
+class MilitarySeriesDetector:
+    """Detect a 2-letter military series + (often split) 6-7 digit number.
+
+    The benchmark frequently writes military ids as a bare "серия XX … номер
+    NNNNNNN" WITHOUT the «военный билет» keyword nearby, sometimes quoted
+    (»АА«), with the series and number as separate spans. Case-sensitive: the
+    series is two UPPERCASE Cyrillic letters (distinguishes from lowercase
+    function words). A roman numeral before the letters means a birth
+    certificate, not a military id, so it naturally doesn't match (roman = Latin
+    I/V/X, not in the Cyrillic class).
+    """
+
+    _RE = re.compile(
+        r"сери[ияю]\s*[№:\-]*\s*[«»\"]?\s*([А-ЯЁ]{2})\s*[«»\"]?"
+        r"(?:.{0,20}?(?:номер|№)\s*[№:\-]*\s*[«»\"]?\s*(\d{6,7})\b)?",
+        re.UNICODE,  # NOT IGNORECASE — series is uppercase
+    )
+
+    def find(self, text: str) -> list[Span]:
+        spans: list[Span] = []
+        for m in self._RE.finditer(text):
+            for grp in (1, 2):
+                if m.group(grp):
+                    s, e = m.span(grp)
+                    spans.append(Span(s, e, "MILITARY_ID", text[s:e], source="regex"))
+        return spans
+
+
+MILITARY_SERIES = MilitarySeriesDetector()
+
 # Surname + initials (and reverse): "Носов Д.В.", "Д.В. Носов", "Стрельцов И. И."
 # Very common in Russian documents (signatures, "Ответственный: ..."), often
 # missed by NER. Distinctive enough to flag directly.
@@ -240,6 +285,7 @@ PERSON_INITIALS = RegexDetector(
     "PERSON",
     r"[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.\s?[А-ЯЁ]\.(?!\w)"
     r"|(?<!\w)[А-ЯЁ]\.\s?[А-ЯЁ]\.\s+[А-ЯЁ][а-яё]+",
+    ignorecase=False,  # capitalization distinguishes a name from "т.д. Слово"
 )
 
 # Full name anchored on a Russian patronymic, in ANY grammatical case — catches
@@ -251,6 +297,9 @@ _PATRONYMIC = r"[А-ЯЁ][а-яё]+(?:вич(?:[ауеё]|ем)?|вн[аеоуы
 PERSON_PATRONYMIC = RegexDetector(
     "PERSON",
     r"(?:[А-ЯЁ][а-яё]+\s+){1,2}" + _PATRONYMIC + r"(?![а-яё])",
+    # Case-sensitive: without this, IGNORECASE makes the «-вно/-вне» suffix match
+    # common lowercase adverbs («условно», «оперативно», «всё равно», «вовне»).
+    ignorecase=False,
 )
 
 
@@ -297,15 +346,20 @@ AMOUNT = RegexDetector(
     "AMOUNT",
     _AMOUNT_NUM + _SCALE + r"\s*" + _CUR + r"?"          # 4,7 миллиарда рублей
     + r"|" + _AMOUNT_NUM + r"\s*" + _CUR                  # 500 рублей
-    + r"|" + r"\d[\d.,]*\s*%(?:\s*годовых)?"              # 18,5% годовых
-    + r"|" + _AMOUNT_NUM + r"(?:человек|сотрудник[а-я]*|чел\.?)",  # 1 200 человек
+    # Percentages: only financial ones — annual rates or precise decimals.
+    # Plain integer percents ("точность 97%", "30—40% времени") are NOT money.
+    + r"|" + r"\d[\d.,]*\s*%\s*годовых"                   # 18% годовых
+    + r"|" + r"\d+,\d+\s*%",                              # 18,5% (decimal share)
 )
 
 # Contract/document reference numbers: "№ ЧЕБ-2026-01", "№ 47-П". Requires a
 # letter or dash in the token so plain "№ 1" (protocol number) is not grabbed.
+# The negative lookahead skips template placeholders ("Протокол № номер от дата")
+# and bare trigger words so they aren't masked as a contract id.
 CONTRACT = RegexDetector(
     "CONTRACT",
-    r"№\s*(?=[^\s]*[A-Za-zА-Яа-яЁё\-])[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9\-/_]{2,}",
+    r"№\s*(?!(?:номер|дата|договор\w*|приказ\w*|протокол\w*)(?![A-Za-zА-Яа-яЁё0-9\-/_]))"
+    r"(?=[^\s]*[A-Za-zА-Яа-яЁё\-])[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9\-/_]{2,}",
 )
 
 _MONTH = r"(?:январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)[а-я]*"
@@ -329,7 +383,10 @@ FILE = RegexDetector(
     r"[«\"]?[A-Za-zА-Яа-яЁё0-9_\-]+\.(?:xlsx?|docx?|pdf|csv|txt|pptx?|zip|rar|jpg|png)[»\"]?",
 )
 
-CORPORATE_DETECTORS: tuple[Detector, ...] = (AMOUNT, CONTRACT, DATE, ORG_LEGAL, FILE)
+# NOTE: AMOUNT is intentionally NOT here. Monetary sums are semantic, not a
+# strict format — they're handled by the LLM layer (see LLMConfig.allowed_labels
+# in corporate mode), keeping regex focused on deterministic identifiers.
+CORPORATE_DETECTORS: tuple[Detector, ...] = (CONTRACT, DATE, ORG_LEGAL, FILE)
 
 
 # Order matters only as a default registry; overlap resolution decides winners.
@@ -348,6 +405,7 @@ DEFAULT_DETECTORS: tuple[Detector, ...] = (
     BIRTH_CERTIFICATE_SPLIT,
     MILITARY_FMT,
     MILITARY_KW,
+    MILITARY_SERIES,
     PERSON_INITIALS,
     PERSON_PATRONYMIC,
     PHONE,
@@ -492,6 +550,45 @@ def is_stopword_entity(text: str, label: str) -> bool:
     if len(low) <= 1:
         return True
     return low in _ENTITY_STOPWORDS
+
+
+_MONEY_CUES = (
+    "руб", "рубл", "₽", "$", "€", "долл", "евро",
+    "млн", "млрд", "тыс", "миллион", "миллиард", "тысяч", "копе", "цент",
+)
+
+
+def is_money_amount(text: str) -> bool:
+    """True if an AMOUNT span actually looks monetary.
+
+    The LLM over-tags AMOUNT (dates, deadlines, headcounts, "22 ТС", bare
+    numbers). A real money sum carries a currency word/symbol or a scale word
+    (млн/млрд/тыс…), or is an annual rate ("18% годовых"). Everything else is
+    dropped so AMOUNT means money — dates are still caught by the DATE detector.
+    """
+    low = text.lower()
+    if "%" in low and "годов" in low:
+        return True
+    return any(cue in low for cue in _MONEY_CUES)
+
+
+def is_generic_entity(text: str, label: str) -> bool:
+    """True for an ORG/LOCATION span that is a lowercase common-noun phrase.
+
+    NER/LLM at low thresholds tag generic nouns as organizations/places
+    ("новой системы", "казначейство", "финансового блока", "4 банками"). Real
+    proper names carry a capital letter, a quote («…»), or a legal form, so a
+    span with NONE of those is dropped. Orgs/places aren't personal data, so this
+    is a safe precision win (it won't drop a real ФИО). Latin acronyms with a
+    capital (e.g. "IT-инфраструктуры") survive — raise the GLiNER threshold for
+    those.
+    """
+    if label not in ("ORG", "LOCATION"):
+        return False
+    t = text.strip()
+    if "«" in t or "»" in t or '"' in t:
+        return False
+    return not any(ch.isupper() for ch in t)
 
 
 # --- Precision noise filter ------------------------------------------------

@@ -11,6 +11,8 @@ from .detectors import (
     DEFAULT_DETECTORS,
     DEFAULT_PRIORITY,
     Detector,
+    is_generic_entity,
+    is_money_amount,
     is_non_pii,
     is_noise_span,
     is_stopword_entity,
@@ -83,6 +85,8 @@ class Anonymizer:
             and not (s.label in _TITLE_FILTER_LABELS and is_non_pii(s.text))
             and not is_stopword_entity(s.text, s.label)
             and not is_noise_span(s.text, s.label)
+            and not is_generic_entity(s.text, s.label)
+            and not (s.label == "AMOUNT" and not is_money_amount(s.text))
         ]
         spans = resolve_overlaps(raw, priority=self._priority)
         # Mask declined case-forms of detected entities (e.g. "Лентой" given "Лента").
@@ -219,8 +223,8 @@ def build_anonymizer(
         from .llm import LLMConfig, LLMDetector
 
         cfg = llm_config or LLMConfig()
-        if corporate:  # let the LLM also return organization names
-            cfg = replace(cfg, allowed_labels=cfg.allowed_labels | {"ORG"})
+        if corporate:  # the LLM (not regex) handles organizations and money sums
+            cfg = replace(cfg, allowed_labels=cfg.allowed_labels | {"ORG", "AMOUNT"})
         detectors.append(LLMDetector(cfg))
     return Anonymizer(detectors)
 

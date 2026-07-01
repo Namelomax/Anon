@@ -50,12 +50,17 @@ _TYPE_MAP: dict[str, str] = {
     "ORGANIZATION": "ORG",
     "COMPANY": "ORG",
     "ORG": "ORG",
+    "AMOUNT": "AMOUNT",
+    "MONEY": "AMOUNT",
+    "SUM": "AMOUNT",
+    "PRICE": "AMOUNT",
 }
 
 def _build_system_prompt(allowed_labels: frozenset) -> str:
     """System prompt listing exactly the types the model is allowed to emit."""
     types = ", ".join(sorted(allowed_labels))
     org_on = "ORG" in allowed_labels
+    amount_on = "AMOUNT" in allowed_labels
     # When ORG is requested we DO want organization names; otherwise we tell the
     # model to skip them (keeps PII-only mode precise).
     org_rule = (
@@ -63,6 +68,16 @@ def _build_system_prompt(allowed_labels: frozenset) -> str:
         "падеже).\n"
         if org_on else
         "НЕ помечай названия организаций и компаний.\n"
+    )
+    # In corporate mode the LLM (not regex) is responsible for monetary sums.
+    amount_rule = (
+        "Тип AMOUNT — ТОЛЬКО денежные суммы и цены в валюте (рубли, руб., ₽, $, "
+        "€), например «4,7 млрд руб.», «500 000 рублей», «18% годовых», «$1000», "
+        "в том числе записанные словами. "
+        "НЕ помечай как AMOUNT: даты и сроки, время (10:00–12:30), количества "
+        "(штук, человек, заказов, ТС, Мбит), номера и голые числа без валюты, "
+        "проценты без денежного смысла.\n"
+        if amount_on else ""
     )
     return (
         "Ты — детектор персональных данных (PII) в русском тексте. "
@@ -76,7 +91,7 @@ def _build_system_prompt(allowed_labels: frozenset) -> str:
         f"Допустимые типы (используй ТОЛЬКО их): {types}.\n"
         "Поле text должно ДОСЛОВНО совпадать с фрагментом исходного текста "
         "(те же символы, регистр и пробелы). Не перефразируй, не нормализуй числа.\n"
-        + org_rule +
+        + org_rule + amount_rule +
         "НЕ помечай: слова-категории сами по себе (паспорт, СНИЛС, ИНН, полис, "
         "серия, номер, телефон, почта, адрес); должности и роли (директор, "
         "фрилансер, бухгалтер); даты; обычные слова и глаголы. Помечай только "

@@ -96,6 +96,12 @@ stage_regex = st.sidebar.checkbox("Правила (regex)", value=True,
                                   help="Телефоны, email, ИНН, паспорта, даты…")
 stage_corporate = st.sidebar.checkbox("Корпоративные (суммы/договоры)", value=True)
 stage_ner = st.sidebar.checkbox("GLiNER (ФИО, города, организации)", value=True)
+ner_threshold = st.sidebar.slider(
+    "Чувствительность GLiNER", min_value=0.20, max_value=0.70, value=0.45, step=0.05,
+    disabled=not stage_ner,
+    help="Ниже порог → больше находок (выше полнота, но и больше лишнего). "
+         "Выше → строже (меньше ложных срабатываний).",
+)
 stage_llm = st.sidebar.checkbox("LLM (добивание сложных случаев)", value=True)
 STAGES = {
     "regex": stage_regex,
@@ -103,7 +109,9 @@ STAGES = {
     "ner": stage_ner,
     "llm": stage_llm,
 }
-if not any(STAGES.values()):
+if stage_ner:
+    STAGES["ner_threshold"] = ner_threshold
+if not any(STAGES.get(k) for k in ("regex", "corporate", "ner", "llm")):
     st.sidebar.error("Включите хотя бы один этап.")
 
 st.title("🛡️ Анонимизатор персональных данных")
