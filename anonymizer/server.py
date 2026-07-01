@@ -310,7 +310,12 @@ def main() -> None:
         llm=args.llm,
     )
 
-    _compose(_DEFAULTS).anonymize("Иван Иванов из Москвы, ИНН 7707083893.")  # warm up
+    # Warm up the pipeline. A transient LLM outage must NOT prevent the server
+    # from starting — regex/GLiNER still work, and the LLM can come back later.
+    try:
+        _compose(_DEFAULTS).anonymize("Иван Иванов из Москвы, ИНН 7707083893.")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] прогрев не удался (сервер всё равно поднят): {exc}", flush=True)
     _INFO = {
         "ner": args.ner, "device": args.device,
         "corporate": args.corporate, "llm": args.llm,

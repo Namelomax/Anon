@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { describeError } from "../_shared";
 
 export const runtime = "nodejs";
 export const maxDuration = 300; // long pipeline (GLiNER + LLM)
@@ -52,10 +53,8 @@ export async function POST(req: NextRequest) {
     const data = await resp.json().catch(() => ({ error: "Некорректный ответ бэкенда" }));
     return NextResponse.json(data, { status: resp.status });
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    const hint = msg.includes("fetch")
-      ? `${msg} — проверьте, что бэкенд доступен по ANONYMIZER_BACKEND_URL (${BACKEND_URL})`
-      : msg;
-    return NextResponse.json({ error: hint }, { status: 502 });
+    const msg = describeError(e, BACKEND_URL);
+    console.error("[/api/anonymize] backend fetch failed:", msg, e);
+    return NextResponse.json({ error: msg }, { status: 502 });
   }
 }
