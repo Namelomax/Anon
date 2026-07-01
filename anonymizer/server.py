@@ -33,6 +33,7 @@ import argparse
 import json
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -131,9 +132,11 @@ class Handler(BaseHTTPRequestHandler):
             data = self._read_json()
             text = data.get("text", "")
             stages = {k: data[k] for k in _STAGE_NAMES if k in data}
+            t0 = time.time()
             with _LOCK:  # one model call at a time (torch is not thread-safe)
                 anon = _compose(stages, data.get("ner_threshold"))
                 res = anon.anonymize(text)
+            elapsed = time.time() - t0
             used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
             self._send(200, {
                 "anonymized_text": res.anonymized_text,
@@ -144,6 +147,8 @@ class Handler(BaseHTTPRequestHandler):
                     for s in res.spans
                 ],
                 "stages": used,
+                "elapsed_seconds": round(elapsed, 2),
+                "preexisting_placeholders": res.preexisting_placeholders,
             })
         except Exception as exc:  # noqa: BLE001
             self._send(500, {"error": str(exc)})
@@ -176,9 +181,11 @@ class Handler(BaseHTTPRequestHandler):
             is_docx = filename.lower().endswith(".docx")
             text = read_text_from_bytes(filename, raw)
 
+            t0 = time.time()
             with _LOCK:  # torch is not thread-safe
                 anon = _compose(stages, data.get("ner_threshold"))
                 res = anon.anonymize(text)
+            elapsed = time.time() - t0
 
             stem = PurePosixPath(filename).stem or "document"
             if is_docx:
@@ -202,6 +209,8 @@ class Handler(BaseHTTPRequestHandler):
                     for s in res.spans
                 ],
                 "stages": used,
+                "elapsed_seconds": round(elapsed, 2),
+                "preexisting_placeholders": res.preexisting_placeholders,
                 "document_base64": base64.b64encode(doc_bytes).decode("ascii"),
                 "document_name": doc_name,
                 "document_mime": doc_mime,

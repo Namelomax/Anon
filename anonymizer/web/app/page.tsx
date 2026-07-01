@@ -11,6 +11,8 @@ type AnonResult = {
   anonymized_text: string;
   mapping: Record<string, string>;
   summary: Record<string, number>;
+  elapsed_seconds?: number;
+  preexisting_placeholders?: number;
   document_base64: string;
   document_name: string;
   document_mime: string;
@@ -262,7 +264,7 @@ export default function Home() {
                 }
               }}
             >
-              <h2 style={{ margin: 0 }}>2. Этапы обработки</h2>
+              <h2 style={{ margin: 0 }}>2. Экспериментальные настройки</h2>
               <span className={`chevron${stagesOpen ? " open" : ""}`}>▾</span>
             </div>
             {stagesOpen && (
@@ -315,6 +317,13 @@ export default function Home() {
             <>
               <div className="card">
                 <h2>Результат</h2>
+                {!!result.preexisting_placeholders && (
+                  <div className="error" style={{ marginBottom: 14 }}>
+                    ⚠️ В файле уже было {result.preexisting_placeholders} плейсхолдеров вида
+                    [PERSON_1] — похоже, это уже обезличенный документ. Они защищены и не
+                    трогались повторно, но проверьте, не загрузили ли вы .anon-файл по ошибке.
+                  </div>
+                )}
                 <div className="metrics">
                   <div className="metric">
                     <div className="v">{entityCount}</div>
@@ -329,12 +338,22 @@ export default function Home() {
                     <div className="k">Формат</div>
                   </div>
                 </div>
-                {Object.keys(result.summary).length > 0 && (
+                {(Object.keys(result.summary).length > 0 || result.elapsed_seconds != null) && (
                   <p className="note" style={{ marginTop: 14, marginBottom: 0 }}>
-                    По типам:{" "}
-                    {Object.entries(result.summary)
-                      .map(([k, v]) => `${k}: ${v}`)
-                      .join(" · ")}
+                    {Object.keys(result.summary).length > 0 && (
+                      <>
+                        По типам:{" "}
+                        {Object.entries(result.summary)
+                          .map(([k, v]) => `${k}: ${v}`)
+                          .join(" · ")}
+                      </>
+                    )}
+                    {result.elapsed_seconds != null && (
+                      <>
+                        {Object.keys(result.summary).length > 0 ? " · " : ""}
+                        Время обработки: {result.elapsed_seconds.toFixed(1)} с
+                      </>
+                    )}
                   </p>
                 )}
               </div>

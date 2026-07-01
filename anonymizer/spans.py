@@ -15,6 +15,17 @@ class Span:
         label: Entity type, e.g. ``"PASSPORT"`` or ``"FIRST_NAME"``.
         text: The exact substring covered by the span.
         source: Which detector produced the span (``"regex"``, ``"ner"``...).
+        merge_key: Optional override for placeholder grouping. Normally two
+            spans share a placeholder only if they have the same label and
+            identical (case-folded) text. The review layer (``review.py``)
+            sets this when it decides two *differently worded* mentions are
+            the same real-world entity (e.g. "Капитан Яков" and "Вайгус") —
+            both get the same ``merge_key`` so ``assign_placeholders`` groups
+            them under one placeholder despite the differing surface text.
+        canonical_text: Optional override for the value recorded in the
+            output mapping when ``merge_key`` is set (all merged spans keep
+            their own original ``text`` for in-document masking, but the
+            mapping needs one canonical spelling to restore).
     """
 
     start: int
@@ -22,6 +33,8 @@ class Span:
     label: str
     text: str
     source: str = "regex"
+    merge_key: str | None = None
+    canonical_text: str | None = None
 
     def __post_init__(self) -> None:
         if self.start < 0 or self.end < self.start:

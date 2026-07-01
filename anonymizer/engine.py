@@ -22,7 +22,7 @@ from .detectors import (
 
 # Labels for which a job-title surface form should be left unmasked.
 _TITLE_FILTER_LABELS = frozenset({"PERSON", "ORG"})
-from .mapping import Mapping, assign_placeholders
+from .mapping import Mapping, assign_placeholders, find_placeholder_spans
 from .spans import Span, resolve_overlaps
 
 
@@ -41,6 +41,11 @@ class AnonymizationResult:
     anonymized_text: str
     mapping: Mapping
     spans: tuple[Span, ...] = field(default_factory=tuple)
+    # How many ``[LABEL_123]``-shaped tokens were already present in the input
+    # (before any detection ran). Non-zero almost always means the document was
+    # anonymized before — re-uploading an already-anonymized file. Surfaced so
+    # a caller/UI can warn instead of the mapping silently filling with junk.
+    preexisting_placeholders: int = 0
 
     @property
     def summary(self) -> dict[str, int]:
@@ -82,6 +87,13 @@ class Anonymizer:
         occurrence (when ``mask_all_occurrences``), so a repeat the detectors
         missed (common in multi-paragraph documents) can't leak.
         """
+        # Guard against re-anonymizing an already-anonymized document: existing
+        # "[LABEL_123]" tokens must never be treated as detectable entities —
+        # otherwise GLiNER/regex "re-discover" them (they look like capitalized
+        # identifiers) and wrap them again, producing garbage like
+        # "[[PERSON_1]]" and a mapping full of broken placeholder fragments.
+        protected = find_placeholder_spans(text)
+
         raw = run_detectors(text, self._detectors)
         raw = [
             s for s in raw
@@ -91,11 +103,13 @@ class Anonymizer:
             and not is_noise_span(s.text, s.label)
             and not is_generic_entity(s.text, s.label)
             and not (s.label == "AMOUNT" and not is_money_amount(s.text))
+            and not _overlaps_any(s, protected)
         ]
         spans = resolve_overlaps(raw, priority=self._priority)
         # Mask declined case-forms of detected entities (e.g. "Лентой" given "Лента").
         extra = propagate_declensions(text, spans)
         if extra:
+            extra = [e for e in extra if not _overlaps_any(e, protected)]
             spans = resolve_overlaps(spans + extra, priority=self._priority)
         # 4th layer: LLM double-checks the surviving spans against their
         # context and reverts obvious false positives (see review.py). Runs
@@ -107,7 +121,7 @@ class Anonymizer:
         mapping, span_placeholders = assign_placeholders(spans)
 
         if self._mask_all and mapping:
-            anonymized, spans = _apply_all_occurrences(text, mapping)
+            anonymized, spans = _apply_all_occurrences(text, spans, span_placeholders)
         else:
             anonymized = _apply(text, spans, span_placeholders)
 
@@ -116,7 +130,12 @@ class Anonymizer:
             anonymized_text=anonymized,
             mapping=mapping,
             spans=tuple(spans),
+            preexisting_placeholders=len(protected),
         )
+
+
+def _overlaps_any(span: Span, ranges: list[tuple[int, int]]) -> bool:
+    return any(span.start < e and st < span.end for st, e in ranges)
 
 
 def _has_alnum(text: str) -> bool:
@@ -146,25 +165,38 @@ def _bounded(orig: str) -> str:
     return pre + esc + post
 
 
-def _apply_all_occurrences(text: str, mapping: Mapping) -> tuple[str, tuple[Span, ...]]:
-    """Replace every exact occurrence of each mapped value with its placeholder.
+def _apply_all_occurrences(
+    text: str, spans: list[Span], span_placeholders: dict[int, str]
+) -> tuple[str, tuple[Span, ...]]:
+    """Replace every exact occurrence of each span's own surface text with its placeholder.
+
+    Built from ``spans`` (not the ``mapping`` dict) so a merged entity — one
+    that the review layer decided is the same real-world person/org under
+    *different* wordings (e.g. "Капитан Яков" and "Вайгус", see review.py) —
+    is masked correctly: each surface form is matched by its own exact text,
+    but both point at the same placeholder (``span_placeholders`` already
+    reflects the merge via ``Span.merge_key``). This also still catches
+    repeats of any surface form the detectors missed elsewhere in the document.
 
     Originals are matched longest-first so a value containing a shorter one wins.
     Matching is whole-token (word-boundary aware) so a placeholder is never
     spliced into the middle of an unrelated word. Returns the anonymized text and
     the spans of all replaced occurrences.
     """
-    items = sorted(mapping.items(), key=lambda kv: len(kv[1]), reverse=True)
-    inverse = {orig: ph for ph, orig in items}
-    pattern = re.compile("|".join(_bounded(orig) for _, orig in items))
+    surface_to_ph: dict[str, str] = {}
+    for span in spans:
+        surface_to_ph.setdefault(span.text, span_placeholders[id(span)])
 
-    spans: list[Span] = []
+    items = sorted(surface_to_ph.items(), key=lambda kv: len(kv[0]), reverse=True)
+    pattern = re.compile("|".join(_bounded(orig) for orig, _ in items))
+
+    result: list[Span] = []
     for m in pattern.finditer(text):
-        ph = inverse[m.group(0)]
-        spans.append(Span(m.start(), m.end(), _label_of(ph), m.group(0)))
-    anonymized = pattern.sub(lambda m: inverse[m.group(0)], text)
-    spans.sort(key=lambda s: s.start)
-    return anonymized, tuple(spans)
+        ph = surface_to_ph[m.group(0)]
+        result.append(Span(m.start(), m.end(), _label_of(ph), m.group(0)))
+    anonymized = pattern.sub(lambda m: surface_to_ph[m.group(0)], text)
+    result.sort(key=lambda s: s.start)
+    return anonymized, tuple(result)
 
 
 def _apply(text: str, spans: list[Span], span_placeholders: dict[int, str]) -> str:

@@ -29,15 +29,22 @@ def placeholder_for(label: str, index: int) -> str:
     return f"[{label}_{index}]"
 
 
-def _normalize(label: str, text: str) -> str:
+def _normalize(span: Span) -> str:
     """Group key for deciding whether two spans are the *same* entity.
 
     Whitespace is collapsed so that "812 987" and "812  987" share a placeholder.
     Case is folded for names/locations but kept for structured ids where it is
     not meaningful anyway.
+
+    A span can override this via ``merge_key`` (set by the LLM review layer,
+    see ``review.py``) to force grouping with a *differently worded* mention
+    of the same real-world entity — e.g. "Капитан Яков" and "Вайгус" turning
+    out to be the same person by context.
     """
-    collapsed = " ".join(text.split())
-    return f"{label}\x00{collapsed.casefold()}"
+    if span.merge_key is not None:
+        return span.merge_key
+    collapsed = " ".join(span.text.split())
+    return f"{span.label}\x00{collapsed.casefold()}"
 
 
 def assign_placeholders(spans: list[Span]) -> tuple[Mapping, dict[int, str]]:
@@ -58,13 +65,13 @@ def assign_placeholders(spans: list[Span]) -> tuple[Mapping, dict[int, str]]:
     span_placeholders: dict[int, str] = {}
 
     for span in spans:
-        key = _normalize(span.label, span.text)
+        key = _normalize(span)
         placeholder = by_key.get(key)
         if placeholder is None:
             counters[span.label] = counters.get(span.label, 0) + 1
             placeholder = placeholder_for(span.label, counters[span.label])
             by_key[key] = placeholder
-            mapping[placeholder] = span.text
+            mapping[placeholder] = span.canonical_text if span.canonical_text is not None else span.text
         span_placeholders[id(span)] = placeholder
 
     return mapping, span_placeholders
@@ -73,6 +80,20 @@ def assign_placeholders(spans: list[Span]) -> tuple[Mapping, dict[int, str]]:
 def is_placeholder(token: str) -> bool:
     """Return True if ``token`` looks like a generated placeholder."""
     return bool(_PLACEHOLDER_RE.fullmatch(token))
+
+
+def find_placeholder_spans(text: str) -> list[tuple[int, int]]:
+    """Locate every ``[LABEL_123]``-shaped substring already present in ``text``.
+
+    Used to make anonymization idempotent: if a document was anonymized once
+    already (e.g. someone re-uploads the ``.anon.docx`` output by mistake),
+    detectors must never touch these regions. Without this guard, GLiNER/regex
+    happily treat placeholder tokens as brand-new "entities" (they look like
+    capitalized identifiers) and re-wrap them, producing garbage like
+    ``[[PERSON_1]]`` or a mapping whose values are themselves broken
+    placeholders (``"[ORG_2]": "[ORG_1"``) instead of real data.
+    """
+    return [m.span() for m in _PLACEHOLDER_RE.finditer(text)]
 
 
 def save_mapping(mapping: Mapping, path: str | Path) -> None:
