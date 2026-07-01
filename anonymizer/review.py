@@ -68,13 +68,19 @@ _REVIEW_SYSTEM_PROMPT = (
     "пометил как ПДн (ФИО, организация, локация и т.п.). Для каждого дано: id, "
     "тип, само значение и фрагмент окружающего текста, где значение выделено "
     "квадратными скобками: [вот_так].\n"
-    "Для КАЖДОГО кандидата верни объект "
-    '{"id": <номер>, "keep": true|false, "trim": <опционально>, '
-    '"merge_with": <опционально>}:\n'
+    "Для КАЖДОГО кандидата, СТРОГО по порядку и БЕЗ ПРОПУСКОВ, верни объект "
+    '{"id": <номер>, "text": <значение кандидата>, "keep": true|false, '
+    '"trim": <опционально>, "merge_with": <опционально>}. Поле text должно '
+    "ДОСЛОВНО повторять значение этого кандидата — по нему проверяется, что "
+    "нумерация не сбилась. Если не уверен в решении — не пропускай кандидата: "
+    "верни его с keep=true.\n"
     "- keep=false — это ОШИБКА детектора: обычное слово, местоимение, день "
     "недели, должность, название программы/продукта (GPT, Telegram, Zoom, "
     "Битрикс, 1С), юридический термин или аббревиатура (ФЗ, НДА), обрывок "
-    "слова — значение НЕ является ПДн и должно остаться в тексте как есть.\n"
+    "слова — значение НЕ является ПДн и должно остаться в тексте как есть. "
+    "ЛЮБОЕ настоящее имя, фамилия или обращение к человеку (даже краткое, "
+    "уменьшительное или без фамилии — «Катя», «Рома», «Никита») — это keep=true, "
+    "НИКОГДА не keep=false.\n"
     "- keep=true без trim/merge_with — значение целиком ПДн, оставить как есть.\n"
     "- trim — если ПДн является лишь ЧАСТЬЮ значения (к имени приклеено "
     "звание/должность/обращение, например «Капитан Яков» — ПДн только «Яков», "
@@ -114,19 +120,24 @@ class ReviewConfig:
             candidate value, to give the model enough to judge from.
         batch_size: How many distinct candidates are sent per LLM call.
             ``merge_with`` can only link candidates within the same batch, so
-            this is kept generous (a typical meeting transcript's reviewable
-            entity count fits in one call).
+            this wants to be as large as reliably possible — but a bigger
+            batch also makes it easier for a small/fast model to lose track
+            of which verdict belongs to which id. Each verdict's ``text``
+            field is checked against the candidate it claims to be about
+            (see ``review_spans``); a mismatch is discarded rather than
+            trusted, so a moderate batch size keeps that safety net cheap to
+            trigger rarely instead of constantly.
     """
 
     base_url: str = "http://127.0.0.1:11434/v1"
     model: str = "qwen3.5:9b"
-    max_tokens: int = 6000
+    max_tokens: int = 8000
     temperature: float = 0.0
     timeout: float = 300.0
     api_key: str = "not-needed"
     extra_body: dict = field(default_factory=dict)
     context_chars: int = 60
-    batch_size: int = 60
+    batch_size: int = 35
 
 
 @dataclass
@@ -186,9 +197,23 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
     trimmed_text: dict[str, str | None] = {k: None for k in keys}
     parent = {k: k for k in keys}
 
+    def _norm(s: str) -> str:
+        return " ".join(s.split()).casefold()
+
+    dropped_ids = 0
     for idx, key in enumerate(keys):
         v = verdicts.get(idx)
         if not v:
+            continue
+        # Safety net: the model must echo back the exact candidate text for
+        # this id. A small/fast model can lose count on a long batch (skip,
+        # duplicate, or shift ids) — if what it claims to be judging doesn't
+        # match what's actually at this id, its numbering has drifted, so we
+        # ignore the verdict entirely rather than risk acting on the wrong
+        # candidate (this is what caused real names to be dropped in testing:
+        # the model's id/text pairing had silently desynced mid-batch).
+        if _norm(v.get("text", "")) != _norm(candidates[key].text):
+            dropped_ids += 1
             continue
         if v.get("keep") is False:
             keep[key] = False
@@ -202,6 +227,15 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
             target = keys[mw]
             if target != key and candidates[target].label == candidates[key].label:
                 parent[key] = target
+
+    if dropped_ids:
+        import sys
+
+        print(
+            f"[review] discarded {dropped_ids} verdict(s): id/text mismatch "
+            "(model's numbering drifted mid-batch) — affected candidates kept masked",
+            file=sys.stderr,
+        )
 
     def find_root(k: str) -> str:
         seen: set[str] = set()
@@ -327,10 +361,10 @@ def _parse_verdicts(content: str) -> dict[int, dict]:
     for obj in data if isinstance(data, list) else []:
         if not isinstance(obj, dict):
             continue
-        i, k = obj.get("id"), obj.get("keep")
-        if not (isinstance(i, int) and isinstance(k, bool)):
+        i, k, t = obj.get("id"), obj.get("keep"), obj.get("text")
+        if not (isinstance(i, int) and isinstance(k, bool) and isinstance(t, str)):
             continue
-        verdict: dict = {"keep": k}
+        verdict: dict = {"keep": k, "text": t}
         trim = obj.get("trim")
         if isinstance(trim, str) and trim.strip():
             verdict["trim"] = trim.strip()
