@@ -178,9 +178,13 @@ SNILS_FMT = RegexDetector(
     r"(?<!\d)\d{3}[.\- ]\d{3}[.\- ]\d{3}[.\- ]?\d{2}(?!\d)",
 )
 
+# Word boundaries are required: with IGNORECASE a bare "ОМС" matches the "омс"
+# inside words like "прОМСвязь", and then grabs any nearby digits as a policy
+# number. "поо?лис" covers the common "полис"/"поолис" typo forms.
 OMS_KW = RegexDetector(
     "OMS",
-    r"(?:по{1,2}лис|ОМС)" + _GAP + r"(" + _BLOB + r")",
+    r"(?<![А-Яа-яЁёA-Za-z])(?:поо?лис\w*|ОМС)(?![А-Яа-яЁёA-Za-z])"
+    + _GAP + r"(" + _BLOB + r")",
     group=1,
 )
 
@@ -377,10 +381,12 @@ ORG_LEGAL = RegexDetector(
     r"(?:ООО|ОАО|ЗАО|ПАО|АО|ГК|НКО|АНО|ИП)\s*[«\"][^»\"\n]{1,60}[»\"]",
 )
 
-# File names with an extension: «Управленка_2026.xlsx», report.docx
+# File names with an extension: «Управленка_2026.xlsx», report.docx,
+# Запись_Встреча_2026.mp4 (meeting recordings often embed names/orgs).
 FILE = RegexDetector(
     "FILE",
-    r"[«\"]?[A-Za-zА-Яа-яЁё0-9_\-]+\.(?:xlsx?|docx?|pdf|csv|txt|pptx?|zip|rar|jpg|png)[»\"]?",
+    r"[«\"]?[A-Za-zА-Яа-яЁё0-9_\-]+\.(?:xlsx?|docx?|pdf|csv|txt|pptx?|zip|rar|jpg|jpeg|png"
+    r"|mp[34]|wav|m4a|aac|ogg|avi|mkv|mov|webm)[»\"]?",
 )
 
 # NOTE: AMOUNT is intentionally NOT here. Monetary sums are semantic, not a

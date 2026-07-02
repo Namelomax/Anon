@@ -1,4 +1,8 @@
-"""Anonymization engine: text + detectors -> redacted text + reversible mapping."""
+"""Anonymization engine: text + detectors -> redacted text + reversible mapping.
+
+Layers: regex/NER/LLM detection -> optional LLM second-pass leak check ->
+optional LLM review -> placeholder assignment -> masking.
+"""
 
 from __future__ import annotations
 
@@ -76,6 +80,7 @@ class Anonymizer:
         priority: dict[str, int] | None = None,
         mask_all_occurrences: bool = True,
         review_config=None,
+        second_pass_detectors: Iterable[Detector] | None = None,
     ) -> None:
         self._detectors = tuple(detectors) if detectors is not None else DEFAULT_DETECTORS
         self._priority = priority if priority is not None else DEFAULT_PRIORITY
@@ -83,6 +88,17 @@ class Anonymizer:
         # Optional 4th layer: an LLM double-checks the surviving spans and
         # reverts obvious false positives (see review.py). None = skip it.
         self._review_config = review_config
+        # Optional leak check: after the first masking pass these detectors
+        # (typically just the LLM detector) re-scan the INTERIM anonymized text.
+        # Whatever they still find is real PII the first pass missed — a bare
+        # first name next to a masked full name, a standalone surname, an org
+        # without a legal form. Found values are located back in the original
+        # text and join the span list BEFORE the review layer, so the reviewer
+        # can also merge e.g. "Никита" with "[Никита Иванов]" into one
+        # placeholder. Model-driven recall, no hardcoded word lists.
+        self._second_pass_detectors = (
+            tuple(second_pass_detectors) if second_pass_detectors else ()
+        )
 
     def anonymize(self, text: str) -> AnonymizationResult:
         """Detect sensitive spans and replace them with reversible placeholders.
@@ -98,23 +114,34 @@ class Anonymizer:
         # "[[PERSON_1]]" and a mapping full of broken placeholder fragments.
         protected = find_placeholder_spans(text)
 
+        def passes_filters(s: Span) -> bool:
+            return (
+                _has_alnum(s.text)
+                and not (s.label in _TITLE_FILTER_LABELS and is_non_pii(s.text))
+                and not is_stopword_entity(s.text, s.label)
+                and not is_noise_span(s.text, s.label)
+                and not is_generic_entity(s.text, s.label)
+                and not (s.label == "AMOUNT" and not is_money_amount(s.text))
+                and not _overlaps_any(s, protected)
+            )
+
         raw = run_detectors(text, self._detectors)
-        raw = [
-            s for s in raw
-            if _has_alnum(s.text)
-            and not (s.label in _TITLE_FILTER_LABELS and is_non_pii(s.text))
-            and not is_stopword_entity(s.text, s.label)
-            and not is_noise_span(s.text, s.label)
-            and not is_generic_entity(s.text, s.label)
-            and not (s.label == "AMOUNT" and not is_money_amount(s.text))
-            and not _overlaps_any(s, protected)
-        ]
+        raw = [s for s in raw if passes_filters(s)]
         spans = resolve_overlaps(raw, priority=self._priority)
         # Mask declined case-forms of detected entities (e.g. "Лентой" given "Лента").
         extra = propagate_declensions(text, spans)
         if extra:
             extra = [e for e in extra if not _overlaps_any(e, protected)]
             spans = resolve_overlaps(spans + extra, priority=self._priority)
+        # Leak check (see __init__): re-scan the interim-anonymized text with
+        # the second-pass detectors; anything still readable there is a miss.
+        # Runs BEFORE review so the new candidates are judged (and can be
+        # merged with existing ones) in the same review call.
+        if self._second_pass_detectors:
+            leaked = self._find_leaked_spans(text, spans, protected)
+            leaked = [s for s in leaked if passes_filters(s)]
+            if leaked:
+                spans = resolve_overlaps(spans + leaked, priority=self._priority)
         # 4th layer: LLM double-checks the surviving spans against their
         # context and reverts obvious false positives (see review.py). Runs
         # last, after all detectors, so it judges the final candidate set.
@@ -137,9 +164,62 @@ class Anonymizer:
             preexisting_placeholders=len(protected),
         )
 
+    def _find_leaked_spans(
+        self, text: str, spans: list[Span], protected: list[tuple[int, int]]
+    ) -> list[Span]:
+        """Mask the text with the current spans, re-scan the result, and map
+        every value the second-pass detectors still see back onto the ORIGINAL
+        text as new spans.
+
+        The interim mask hides everything already caught, so the detector's
+        full attention lands on what slipped through. Detections that overlap
+        a placeholder token are skipped (the model occasionally tags the
+        ``[PERSON_1]`` tokens themselves); the rest are located verbatim in the
+        original text — a value we cannot find verbatim is never masked.
+        """
+        if spans:
+            _, span_placeholders = assign_placeholders(spans)
+            interim, _ = _apply_all_occurrences(text, spans, span_placeholders)
+        else:
+            interim = text
+
+        hits = run_detectors(interim, self._second_pass_detectors)
+        placeholder_ranges = find_placeholder_spans(interim)
+
+        surfaces: set[tuple[str, str]] = set()
+        for hit in hits:
+            if _overlaps_any(hit, placeholder_ranges):
+                continue
+            value = hit.text.strip()
+            if value:
+                surfaces.add((hit.label, value))
+
+        taken = [(s.start, s.end) for s in spans] + list(protected)
+        leaked: list[Span] = []
+        for label, value in surfaces:
+            for a, b in _find_occurrences(text, value):
+                if any(a < e and st < b for st, e in taken):
+                    continue
+                leaked.append(Span(a, b, label, text[a:b], source="llm2"))
+                taken.append((a, b))
+        return leaked
+
 
 def _overlaps_any(span: Span, ranges: list[tuple[int, int]]) -> bool:
     return any(span.start < e and st < span.end for st, e in ranges)
+
+
+def _find_occurrences(text: str, value: str) -> list[tuple[int, int]]:
+    """Every non-overlapping exact occurrence of ``value`` in ``text``."""
+    out: list[tuple[int, int]] = []
+    start = 0
+    while True:
+        idx = text.find(value, start)
+        if idx < 0:
+            break
+        out.append((idx, idx + len(value)))
+        start = idx + len(value)
+    return out
 
 
 def _has_alnum(text: str) -> bool:
@@ -229,6 +309,7 @@ def build_anonymizer(
     llm_config=None,
     use_review: bool = False,
     review_config=None,
+    use_second_pass: bool = False,
 ) -> Anonymizer:
     """Construct an anonymizer from the layered detectors.
 
@@ -259,6 +340,7 @@ def build_anonymizer(
         A configured :class:`Anonymizer`.
     """
     detectors: list[Detector] = list(DEFAULT_DETECTORS) if use_regex else []
+    second_pass: list[Detector] = []
     if corporate:
         detectors.extend(CORPORATE_DETECTORS)
     if use_ner:
@@ -280,14 +362,19 @@ def build_anonymizer(
         cfg = llm_config or LLMConfig()
         if corporate:  # the LLM (not regex) handles organizations and money sums
             cfg = replace(cfg, allowed_labels=cfg.allowed_labels | {"ORG", "AMOUNT"})
-        detectors.append(LLMDetector(cfg))
+        llm_detector = LLMDetector(cfg)
+        detectors.append(llm_detector)
+        if use_second_pass:  # leak check re-uses the same LLM detector
+            second_pass.append(llm_detector)
 
     review_cfg = None
     if use_review:
         from .review import ReviewConfig
 
         review_cfg = review_config or ReviewConfig()
-    return Anonymizer(detectors, review_config=review_cfg)
+    return Anonymizer(
+        detectors, review_config=review_cfg, second_pass_detectors=second_pass
+    )
 
 
 _default = Anonymizer()

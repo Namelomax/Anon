@@ -34,6 +34,9 @@ from .spans import Span
 _DEFAULT_LABEL_MAP: dict[str, str] = {
     "person": "PERSON",
     "name": "PERSON",
+    "first name": "PERSON",
+    "last name": "PERSON",
+    "nickname": "PERSON",
     "location": "LOCATION",
     "address": "LOCATION",
     "city": "LOCATION",
@@ -93,7 +96,13 @@ class GLiNERConfig:
     # Recall-oriented default: the goal is minimal misses (mislabeling is OK).
     # "address"/"organization" widen coverage (streets, house numbers, company
     # names) at some precision cost — acceptable for anonymization.
-    labels: tuple[str, ...] = ("person", "location", "organization")
+    # "first name"/"last name"/"nickname" boost recall on BARE first names,
+    # standalone surnames and callsigns in meeting transcripts ("Никита,
+    # добрый день") that the coarse "person" label often misses; the review
+    # LLM layer filters the extra false positives this brings.
+    labels: tuple[str, ...] = (
+        "person", "first name", "last name", "nickname", "location", "organization",
+    )
     threshold: float = 0.45
     device: str = "cpu"
     label_map: dict = field(default_factory=lambda: dict(_DEFAULT_LABEL_MAP))

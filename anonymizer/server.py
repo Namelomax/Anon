@@ -48,7 +48,7 @@ _REVIEW_CFG = None       # ReviewConfig for the LLM review layer, or None if dis
 _INFO: dict = {}
 _LOCK = threading.Lock()  # serialize model calls: torch/GLiNER is not thread-safe
 
-_STAGE_NAMES = ("regex", "corporate", "ner", "llm", "review")
+_STAGE_NAMES = ("regex", "corporate", "ner", "llm", "review", "second_pass")
 
 
 def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
@@ -78,7 +78,16 @@ def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
     if review_on is None:
         review_on = _DEFAULTS.get("review", False)
     review_cfg = _REVIEW_CFG if (review_on and _REVIEW_CFG is not None) else None
-    return Anonymizer(dets, review_config=review_cfg)
+
+    # Leak check: re-scan the interim-anonymized text with the LLM detector and
+    # mask whatever it still finds (bare first names, standalone surnames...).
+    # Model-driven recall; costs roughly one extra LLM sweep of the document.
+    sp_on = stages.get("second_pass")
+    if sp_on is None:
+        sp_on = _DEFAULTS.get("second_pass", False)
+    second_pass = _DETECTORS.get("llm", []) if sp_on else []
+
+    return Anonymizer(dets, review_config=review_cfg, second_pass_detectors=second_pass)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -295,6 +304,13 @@ def main() -> None:
         help="4th layer: LLM double-checks the final mapping and reverts obvious "
              "false positives (e.g. common words mislabeled as PERSON/ORG).",
     )
+    ap.add_argument(
+        "--second-pass", action="store_true",
+        help="Leak check: after the first masking pass, re-scan the anonymized "
+             "text with the LLM detector and mask what it still finds (bare "
+             "first names, standalone surnames, orgs without a legal form). "
+             "Requires --llm. Adds roughly one extra LLM sweep per document.",
+    )
     ap.add_argument("--review-base-url", default=None, help="Defaults to --llm-base-url")
     ap.add_argument("--review-model", default=None, help="Defaults to --llm-model")
     ap.add_argument("--review-no-think", action="store_true")
@@ -347,6 +363,7 @@ def main() -> None:
         ner=args.ner != "none",
         llm=args.llm,
         review=args.review,
+        second_pass=args.second_pass and args.llm,
     )
 
     # Warm up the pipeline. A transient LLM outage must NOT prevent the server
@@ -361,6 +378,7 @@ def main() -> None:
         "llm_model": args.llm_model if args.llm else None,
         "review": args.review,
         "review_model": _REVIEW_CFG.model if _REVIEW_CFG else None,
+        "second_pass": _DEFAULTS.get("second_pass", False),
         "stages": dict(_DEFAULTS), "toggleable": True,
         "ner_threshold": _GLINER_CFG.threshold if _GLINER_CFG else None,
     }
