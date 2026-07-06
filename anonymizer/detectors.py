@@ -125,7 +125,11 @@ IP_ADDRESS = RegexDetector(
         (?:\d{1,3}\.){3}\d{1,3}                       # IPv4
       | (?:[0-9a-fA-F]{1,4}:){3,7}[0-9a-fA-F]{1,4}    # IPv6 (>=4 groups; not HH:MM:SS)
     )
-    (?![\w.:])
+    # Not followed by a word char/colon, or a "." that continues the number
+    # (an extra octet). A plain sentence-ending "." must NOT block the match —
+    # "...192.168.1.45." (very common phrasing) was leaking completely before
+    # this fix because the old (?![\w.:]) rejected ANY trailing dot.
+    (?![\w:])(?!\.\d)
     """,
     flags=re.VERBOSE,
 )
@@ -251,9 +255,15 @@ MILITARY_FMT = RegexDetector(
 )
 
 # Military id by keyword, allowing a split "серия МЗ, номер 0045678".
+# (?-i:...) keeps the series letters uppercase-only: without it, IGNORECASE
+# lets the non-greedy gap latch onto a lowercase substring INSIDE "серия"
+# itself (matching "ри" as the "series"), which produces a span starting
+# mid-word — _apply_all_occurrences then refuses to splice a placeholder into
+# the middle of a word, so the whole id (including the real digits) silently
+# stays unmasked in the output.
 MILITARY_KW = RegexDetector(
     "MILITARY_ID",
-    r"воен\w*\s+билет\w*" + _GAP + r"([А-ЯЁ]{2}\D{0,12}?\d{6,7})",
+    r"воен\w*\s+билет\w*" + _GAP + r"((?-i:[А-ЯЁ]{2})\D{0,12}?\d{6,7})",
     group=1,
 )
 
@@ -322,7 +332,10 @@ class SeriesNumberDetector:
     """
 
     _RE = re.compile(
-        r"(?:сери[ияю]|паспорт\w*)\s*[№:\-]*\s*(\d{2}[ \t]?\d{2})"
+        # Триггер: «серия»/«паспорт», либо «водительское удостоверение» без
+        # слова «серия» перед номером — частая формулировка в кадровых
+        # документах («Водительское удостоверение 66 14 887766»).
+        r"(?:сери[ияю]|паспорт\w*|водительск\w*\s+удостоверени\w*)\s*[№:\-]*\s*(\d{2}[ \t]?\d{2})"
         # Номер: либо после слова «номер»/«№», либо просто следом за серией —
         # «паспорт 2518 445566» без ключевого слова (иначе 6 цифр утекали).
         r"(?:(?:\D{0,18}?(?:номер|№)\s*[№:\-]*\s*|[ \t]+)(\d{3}[ \t]?[-]?[ \t]?\d{3}|\d{6}))?",
@@ -468,9 +481,14 @@ CORPORATE_DETECTORS: tuple[Detector, ...] = (
 # abbreviations) so it stays high-precision — "с Иваном" (preposition) won't
 # match because bare "с" needs a following dot.
 _CITY_KW = r"(?:г|гор|пгт|дер|пос|с)\.|(?:город|деревн\w+|село|посёлок|посел\w+|станиц\w+)"
+# [ \t]* (not \s*) keeps the gap on the same line — a trailing "...2026г."
+# from a date must not reach across a paragraph break into the next
+# capitalized word. (?-i:[А-ЯЁ]) keeps the name's first letter case-sensitive
+# despite the detector's global IGNORECASE — otherwise "20.01.2026г. по ..."
+# matches the lowercase "по" as if it were a place name.
 CITY = RegexDetector(
     "LOCATION",
-    r"(?<![А-Яа-яЁёA-Za-z])(?:" + _CITY_KW + r")\s*[А-ЯЁ][А-Яа-яё\-]+",
+    r"(?<![А-Яа-яЁёA-Za-z])(?:" + _CITY_KW + r")[ \t]*(?-i:[А-ЯЁ])[А-Яа-яё\-]+",
 )
 
 DEFAULT_DETECTORS: tuple[Detector, ...] = (
