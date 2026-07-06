@@ -158,6 +158,7 @@ class Handler(BaseHTTPRequestHandler):
                 "stages": used,
                 "elapsed_seconds": round(elapsed, 2),
                 "preexisting_placeholders": res.preexisting_placeholders,
+                "warnings": list(res.warnings),
             })
         except Exception as exc:  # noqa: BLE001
             self._send(500, {"error": str(exc)})
@@ -220,6 +221,7 @@ class Handler(BaseHTTPRequestHandler):
                 "stages": used,
                 "elapsed_seconds": round(elapsed, 2),
                 "preexisting_placeholders": res.preexisting_placeholders,
+                "warnings": list(res.warnings),
                 "document_base64": base64.b64encode(doc_bytes).decode("ascii"),
                 "document_name": doc_name,
                 "document_mime": doc_mime,

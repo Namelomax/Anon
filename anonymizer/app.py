@@ -122,7 +122,10 @@ tab_anon, tab_deanon = st.tabs(["🔒 Анонимизация", "🔑 Деан�
 with tab_anon:
     st.subheader("Исходный документ")
     col_in1, col_in2 = st.columns(2)
-    uploaded = col_in1.file_uploader("Загрузить файл (.docx / .txt)", type=["docx", "txt"])
+    uploaded = col_in1.file_uploader(
+        "Загрузить файл (.docx/.pdf/.xlsx/.xml/.rtf/.odt/.txt)",
+        type=["docx", "pdf", "xlsx", "xlsm", "xml", "rtf", "odt", "txt", "csv", "md"],
+    )
     pasted = col_in2.text_area("…или вставить текст", height=160, placeholder="Вставьте текст здесь")
 
     if st.button("🔒 Обезличить", type="primary"):

@@ -101,7 +101,8 @@ class GLiNERConfig:
     # добрый день") that the coarse "person" label often misses; the review
     # LLM layer filters the extra false positives this brings.
     labels: tuple[str, ...] = (
-        "person", "first name", "last name", "nickname", "location", "organization",
+        "person", "first name", "last name", "nickname",
+        "location", "address", "organization",
     )
     threshold: float = 0.45
     device: str = "cpu"

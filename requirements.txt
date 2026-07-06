@@ -1,7 +1,12 @@
 # --- Anonymizer dependencies ---
 # Core (always needed):
 gliner>=0.2          # zero-shot multilingual NER (PERSON/LOCATION/ORG)
-python-docx>=1.0     # read/write .docx (also pulls lxml)
+python-docx>=1.0     # read/write .docx (also pulls lxml, used for .xml/.odt)
+
+# Document formats (text extraction for input):
+pypdf>=4.0           # .pdf
+openpyxl>=3.1        # .xlsx / .xlsm
+# .rtf and .odt are read with the stdlib + lxml (no extra dependency).
 
 # Optional:
 natasha>=1.6         # only for the --natasha NER backend (CPU, numpy)

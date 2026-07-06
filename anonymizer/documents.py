@@ -1,8 +1,11 @@
 """Read documents, anonymize them as a whole, and write the results back.
 
-Supports ``.docx`` (paragraphs + tables) and plain ``.txt``. The whole document
-is anonymized in one pass so the same entity gets the same placeholder
-everywhere (e.g. one person -> ``[PERSON_1]`` across all paragraphs).
+Reads ``.docx`` (paragraphs + tables + headers/footers), ``.pdf``, ``.xlsx``,
+``.xml``, ``.rtf``, ``.odt`` and plain text; presentations are excluded. The
+whole document is anonymized in one pass so the same entity gets the same
+placeholder everywhere (e.g. one person -> ``[PERSON_1]`` across all paragraphs).
+Only ``.docx`` is rebuilt structure-preserving; other formats yield anonymized
+plain text.
 
 Outputs:
 * ``<name>.anon.txt``  — anonymized plain text
@@ -21,22 +24,39 @@ from .mapping import Mapping, save_mapping
 
 
 def read_text(path: str | Path) -> str:
-    """Read a .docx or .txt file into a single string (newline-joined)."""
+    """Read a document (docx/pdf/xlsx/xml/rtf/odt/txt…) into one string."""
     path = Path(path)
-    if path.suffix.lower() == ".docx":
-        return _read_docx_text(path)
-    return path.read_text(encoding="utf-8")
+    return read_text_from_bytes(path.name, path.read_bytes())
 
 
-def _iter_docx_paragraphs(document):
-    """Yield body paragraphs and all table-cell paragraphs."""
-    for para in document.paragraphs:
+def _iter_container_paragraphs(container):
+    """Yield paragraphs of a body/header/footer, including its tables."""
+    for para in container.paragraphs:
         yield para
-    for table in document.tables:
+    for table in container.tables:
         for row in table.rows:
             for cell in row.cells:
                 for para in cell.paragraphs:
                     yield para
+
+
+def _iter_docx_paragraphs(document):
+    """Yield body paragraphs, table-cell paragraphs AND header/footer paragraphs.
+
+    Headers/footers matter: в договорах реквизиты сторон и email часто вынесены
+    в колонтитулы — раньше они не читались вовсе, поэтому не анонимизировались
+    ни в тексте, ни в .docx-копии.
+    """
+    yield from _iter_container_paragraphs(document)
+    for section in document.sections:
+        for part in (
+            section.header, section.footer,
+            section.first_page_header, section.first_page_footer,
+            section.even_page_header, section.even_page_footer,
+        ):
+            if part is None or getattr(part, "is_linked_to_previous", False):
+                continue
+            yield from _iter_container_paragraphs(part)
 
 
 def _read_docx_text(path: Path) -> str:
@@ -103,16 +123,119 @@ def write_anonymized_docx(src: str | Path, dst: str | Path, mapping: Mapping) ->
     document.save(str(dst))
 
 
+# File formats we can extract text from. Presentations (.pptx/.ppt) are
+# intentionally excluded (per requirement). Anonymization runs on the extracted
+# text; the .docx path additionally rebuilds a structure-preserving copy, other
+# formats are returned as anonymized .txt.
+_TEXT_EXT = {".txt", ".csv", ".md", ".log", ".json"}
+_UNSUPPORTED = {".pptx", ".ppt"}
+
+
+def _decode(data: bytes) -> str:
+    """Best-effort decode of a plain-text/byte blob (Russian docs are often cp1251)."""
+    for enc in ("utf-8", "utf-8-sig", "cp1251", "latin-1"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _read_docx_bytes(data: bytes) -> str:
+    import io
+
+    import docx
+
+    document = docx.Document(io.BytesIO(data))
+    return "\n".join(p.text for p in _iter_docx_paragraphs(document))
+
+
+def _read_pdf_bytes(data: bytes) -> str:
+    import io
+
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(data))
+    return "\n".join((page.extract_text() or "") for page in reader.pages)
+
+
+def _read_xlsx_bytes(data: bytes) -> str:
+    import io
+
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    lines: list[str] = []
+    for ws in wb.worksheets:
+        for row in ws.iter_rows(values_only=True):
+            cells = [str(c) for c in row if c is not None and str(c).strip()]
+            if cells:
+                lines.append("\t".join(cells))
+    return "\n".join(lines)
+
+
+def _read_xml_bytes(data: bytes) -> str:
+    from lxml import etree
+
+    root = etree.fromstring(data)  # handles the encoding declaration itself
+    return "\n".join(t.strip() for t in root.itertext() if t and t.strip())
+
+
+def _read_odt_bytes(data: bytes) -> str:
+    import io
+    import zipfile
+
+    from lxml import etree
+
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        content = z.read("content.xml")
+    root = etree.fromstring(content)
+    # One line per paragraph/heading element (tags end with "}p" / "}h").
+    lines: list[str] = []
+    for el in root.iter():
+        tag = etree.QName(el).localname if isinstance(el.tag, str) else ""
+        if tag in ("p", "h"):
+            txt = "".join(el.itertext()).strip()
+            if txt:
+                lines.append(txt)
+    return "\n".join(lines)
+
+
+def _read_rtf_bytes(data: bytes) -> str:
+    """Minimal RTF -> text: enough to extract content for anonymization."""
+    text = data.decode("latin-1", errors="ignore")
+    text = re.sub(r"\\'([0-9a-fA-F]{2})",
+                  lambda m: bytes([int(m.group(1), 16)]).decode("cp1251", "ignore"), text)
+    text = re.sub(r"\\u(-?\d+)\??", lambda m: chr(int(m.group(1)) % 0x10000), text)
+    text = re.sub(r"\\(?:par|line|pard|sect)\b", "\n", text)
+    text = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", text)  # drop remaining control words
+    text = text.replace("{", "").replace("}", "")
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 def read_text_from_bytes(name: str, data: bytes) -> str:
-    """Read .docx/.txt content from in-memory bytes (no temp file)."""
-    if name.lower().endswith(".docx"):
-        import io
+    """Extract plain text from in-memory document bytes (no temp file).
 
-        import docx
-
-        document = docx.Document(io.BytesIO(data))
-        return "\n".join(p.text for p in _iter_docx_paragraphs(document))
-    return data.decode("utf-8")
+    Supported: .docx .pdf .xlsx/.xlsm .xml .rtf .odt and plain text (.txt/.csv/…).
+    Presentations (.pptx/.ppt) are rejected. Unknown extensions fall back to a
+    best-effort text decode so nothing silently returns empty.
+    """
+    ext = Path(name).suffix.lower()
+    if ext in _UNSUPPORTED:
+        raise ValueError(f"Формат {ext} не поддерживается (презентации исключены).")
+    if ext == ".docx":
+        return _read_docx_bytes(data)
+    if ext == ".pdf":
+        return _read_pdf_bytes(data)
+    if ext in (".xlsx", ".xlsm"):
+        return _read_xlsx_bytes(data)
+    if ext == ".xml":
+        return _read_xml_bytes(data)
+    if ext == ".odt":
+        return _read_odt_bytes(data)
+    if ext == ".rtf":
+        return _read_rtf_bytes(data)
+    return _decode(data)
 
 
 def anonymized_docx_bytes(src_data: bytes, mapping: Mapping) -> bytes:

@@ -93,10 +93,14 @@ _DIGSEP = r"[ \t.\-:;=|/\\_]"
 _BLOB = r"\d(?:" + _DIGSEP + r"*\d)*"
 
 # Email tolerant of spaces around "@" and "." (benchmark: "n . makarov@aol . com").
+# Cyrillic local parts / domains / .рф are legal and appear in RU contracts.
+# ВАЖНО: разделитель [ \t]?, а не \s? — иначе матч перепрыгивает перенос строки
+# и заглатывает следующее слово («…edu.\nСогласовано»).
 EMAIL = RegexDetector(
     "EMAIL",
-    r"[A-Za-z0-9_%+\-]+(?:\s?\.\s?[A-Za-z0-9_%+\-]+)*"
-    r"\s?@\s?[A-Za-z0-9\-]+(?:\s?\.\s?[A-Za-z0-9\-]+)*\s?\.\s?[A-Za-z]{2,}",
+    r"[A-Za-zА-Яа-яЁё0-9_%+\-]+(?:[ \t]?\.[ \t]?[A-Za-zА-Яа-яЁё0-9_%+\-]+)*"
+    r"[ \t]?@[ \t]?[A-Za-zА-Яа-яЁё0-9\-]+(?:[ \t]?\.[ \t]?[A-Za-zА-Яа-яЁё0-9\-]+)*"
+    r"[ \t]?\.[ \t]?[A-Za-zА-Яа-яЁё]{2,}",
 )
 
 # Common TLDs used to recognize bare domains (no http/www), e.g. "lamoda.ru/login".
@@ -142,6 +146,7 @@ PHONE = RegexDetector(
         \+\d{1,3}[ \t\-]*\(?\d{1,4}\)?(?:[ \t\-]*\d{2,4}){2,5}   # +7..., +81 96 2008 6712
       | [78][ \t\-]*\(?\d{3,4}\)?(?:[ \t\-]*\d{2,4}){2,4}        # 8(812)4095642, 8-998-237-66-62
       | \(?\d{3}\)?-\d{2,3}-\d{2}-\d{2}                          # 861-296-11-12 (dash-locked)
+      | \(\d{3,5}\)[ \t]*\d{2,3}(?:[ \t\-]\d{2,3}){1,2}          # (3952) 405-000 — городской с кодом
     )
     (?![\w])
     """,
@@ -172,10 +177,11 @@ SNILS_KW = RegexDetector(
     group=1,
 )
 
-# SNILS canonical grouping (3-3-3 2) even without a keyword.
+# SNILS canonical grouping (3-3-3 2) even without a keyword. Separators up to
+# 3 chars: documents often have double spaces before the check digits.
 SNILS_FMT = RegexDetector(
     "SNILS",
-    r"(?<!\d)\d{3}[.\- ]\d{3}[.\- ]\d{3}[.\- ]?\d{2}(?!\d)",
+    r"(?<!\d)\d{3}[.\- ]{1,3}\d{3}[.\- ]{1,3}\d{3}[.\- ]{0,3}\d{2}(?!\d)",
 )
 
 # Word boundaries are required: with IGNORECASE a bare "ОМС" matches the "омс"
@@ -317,7 +323,9 @@ class SeriesNumberDetector:
 
     _RE = re.compile(
         r"(?:сери[ияю]|паспорт\w*)\s*[№:\-]*\s*(\d{2}[ \t]?\d{2})"
-        r"(?:\D{0,18}?(?:номер|№)\s*[№:\-]*\s*(\d{3}[ \t]?[-]?[ \t]?\d{3}|\d{6}))?",
+        # Номер: либо после слова «номер»/«№», либо просто следом за серией —
+        # «паспорт 2518 445566» без ключевого слова (иначе 6 цифр утекали).
+        r"(?:(?:\D{0,18}?(?:номер|№)\s*[№:\-]*\s*|[ \t]+)(\d{3}[ \t]?[-]?[ \t]?\d{3}|\d{6}))?",
         re.IGNORECASE | re.UNICODE,
     )
     _DRIVER = re.compile(r"водительс|удостоверени|\bВУ\b|\bправ", re.IGNORECASE | re.UNICODE)
@@ -346,10 +354,15 @@ _AMOUNT_NUM = r"\d[\d.,  ]*"
 _SCALE = r"(?:тысяч[а-я]*|тыс\.?|миллиард[а-я]*|млрд\.?|миллион[а-я]*|млн\.?)"
 _CUR = r"(?:рубл[а-я]*|руб\.?|₽|долл[а-я]*|\$|евро)"
 
+# Сумма прописью в скобках между числом и валютой — стандарт договоров:
+# «49 500 (сорок девять тысяч пятьсот) рублей 00 копеек».
+_SPELLED = r"(?:\([^)\n]{3,90}\)\s*)?"
+
 AMOUNT = RegexDetector(
     "AMOUNT",
     _AMOUNT_NUM + _SCALE + r"\s*" + _CUR + r"?"          # 4,7 миллиарда рублей
-    + r"|" + _AMOUNT_NUM + r"\s*" + _CUR                  # 500 рублей
+    + r"|" + _AMOUNT_NUM + _SPELLED + _CUR                # 500 рублей; 49 500 (…) рублей
+    + r"(?:[,\s]*\d{2}\s*копе[а-я]*)?"                    # …, 00 копеек
     # Percentages: only financial ones — annual rates or precise decimals.
     # Plain integer percents ("точность 97%", "30—40% времени") are NOT money.
     + r"|" + r"\d[\d.,]*\s*%\s*годовых"                   # 18% годовых
@@ -371,7 +384,9 @@ DATE = RegexDetector(
     "DATE",
     r"\b\d{1,2}\s+" + _MONTH + r"(?:\s+\d{4})?(?:\s*(?:года|г\.?))?"  # 1 апреля 2026 года
     + r"|" + _MONTH + r"\s+\d{4}"                                     # июнь 2026
-    + r"|" + r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b",                        # 12.03.2015
+    # 12.03.2015, в т.ч. с приклеенным «г.» без пробела («30.09.2024г.») — из-за
+    # него \b на границе цифра/буква не срабатывал и дата не маскировалась.
+    + r"|" + r"\b\d{1,2}\.\d{1,2}\.\d{2,4}(?:\s*г\.)?(?![0-9])",
 )
 
 # Organization with a legal form + quoted name: ООО «Чебурашка-Логистика»,
@@ -381,6 +396,55 @@ ORG_LEGAL = RegexDetector(
     r"(?:ООО|ОАО|ЗАО|ПАО|АО|ГК|НКО|АНО|ИП)\s*[«\"][^»\"\n]{1,60}[»\"]",
 )
 
+# --- Реквизиты договоров (страница реквизитов сторон) ----------------------
+# Форматно-детерминированные идентификаторы: правила здесь надёжнее ML.
+
+# КПП: ровно 9 цифр после ключевого слова.
+KPP = RegexDetector(
+    "KPP",
+    r"(?<![А-Яа-яЁёA-Za-z])КПП(?![А-Яа-яЁёA-Za-z])" + _GAP + r"(\d{9})(?!\d)",
+    group=1,
+)
+
+# ОГРН — 13 цифр, ОГРНИП — 15 цифр (по ключевому слову).
+OGRN = RegexDetector(
+    "OGRN",
+    r"(?<![А-Яа-яЁёA-Za-z])ОГРН(?:ИП)?(?![А-Яа-яЁёA-Za-z])" + _GAP + r"(\d{13}|\d{15})(?!\d)",
+    group=1,
+)
+
+# БИК банка — 9 цифр (по ключевому слову).
+BIK = RegexDetector(
+    "BIK",
+    r"(?<![А-Яа-яЁёA-Za-z])БИК(?![А-Яа-яЁёA-Za-z])" + _GAP + r"(\d{9})(?!\d)",
+    group=1,
+)
+
+# ОКПО — 8 или 10 цифр (по ключевому слову).
+OKPO = RegexDetector(
+    "OKPO",
+    r"(?<![А-Яа-яЁёA-Za-z])ОКПО(?![А-Яа-яЁёA-Za-z])" + _GAP + r"(\d{8}|\d{10})(?!\d)",
+    group=1,
+)
+
+# Банковские счета: расчётный/корреспондентский/лицевой — 20 цифр, допускаем
+# пробельную группировку. Ключевые слова: «р/с», «к/с», «расчётный счёт», «счёт №».
+BANK_ACCOUNT_KW = RegexDetector(
+    "BANK_ACCOUNT",
+    r"(?:расч[её]тн\w*|корреспондентск\w*|лицев\w*)?\s*"
+    r"(?:сч[её]т\w*|р\s*[/\\.]\s*с|к\s*[/\\.]\s*с)\s*[№:\-]*\s*"
+    r"((?:\d[ \t]?){20})(?!\d)",
+    group=1,
+)
+
+# Голые 20 цифр подряд — в деловом тексте это почти всегда номер счёта.
+BANK_ACCOUNT_FMT = RegexDetector(
+    "BANK_ACCOUNT",
+    r"(?<!\d)\d{20}(?!\d)",
+)
+
+REQUISITES_DETECTORS: tuple[Detector, ...] = (KPP, OGRN, BIK, OKPO, BANK_ACCOUNT_KW, BANK_ACCOUNT_FMT)
+
 # File names with an extension: «Управленка_2026.xlsx», report.docx,
 # Запись_Встреча_2026.mp4 (meeting recordings often embed names/orgs).
 FILE = RegexDetector(
@@ -389,16 +453,30 @@ FILE = RegexDetector(
     r"|mp[34]|wav|m4a|aac|ogg|avi|mkv|mov|webm)[»\"]?",
 )
 
-# NOTE: AMOUNT is intentionally NOT here. Monetary sums are semantic, not a
-# strict format — they're handled by the LLM layer (see LLMConfig.allowed_labels
-# in corporate mode), keeping regex focused on deterministic identifiers.
-CORPORATE_DETECTORS: tuple[Detector, ...] = (CONTRACT, DATE, ORG_LEGAL, FILE)
+# AMOUNT included: на договорах LLM-слой стабильно пропускает суммы (отзыв
+# заказчика — «нигде не убрал цены»), а денежные форматы детерминированы;
+# ложные срабатывания дополнительно режет is_money_amount в engine.
+CORPORATE_DETECTORS: tuple[Detector, ...] = (
+    CONTRACT, DATE, ORG_LEGAL, FILE, AMOUNT, *REQUISITES_DETECTORS,
+)
 
 
 # Order matters only as a default registry; overlap resolution decides winners.
+# City / settlement by a keyword abbreviation + a capitalized name — catches
+# "г. Иркутск", "пгт. Листвянка", "с. Оёк" that NER sometimes misses in the
+# address block of a contract. Keyword-anchored (dot required for 1-letter
+# abbreviations) so it stays high-precision — "с Иваном" (preposition) won't
+# match because bare "с" needs a following dot.
+_CITY_KW = r"(?:г|гор|пгт|дер|пос|с)\.|(?:город|деревн\w+|село|посёлок|посел\w+|станиц\w+)"
+CITY = RegexDetector(
+    "LOCATION",
+    r"(?<![А-Яа-яЁёA-Za-z])(?:" + _CITY_KW + r")\s*[А-ЯЁ][А-Яа-яё\-]+",
+)
+
 DEFAULT_DETECTORS: tuple[Detector, ...] = (
     EMAIL,
     URL,
+    CITY,
     IP_ADDRESS,
     CREDIT_CARD,
     INN,
@@ -431,6 +509,11 @@ DEFAULT_PRIORITY: dict[str, int] = {
     "MILITARY_ID": 80,
     "BIRTH_CERTIFICATE": 80,
     "CREDIT_CARD": 70,
+    "BANK_ACCOUNT": 82,
+    "KPP": 80,
+    "OGRN": 80,
+    "BIK": 78,
+    "OKPO": 78,
     "CONTRACT": 65,
     "ORG": 62,
     "FILE": 58,
@@ -684,7 +767,9 @@ def is_noise_span(text: str, label: str) -> bool:
             for t in toks
         ):
             return True
-        if len(toks) == 1 and low in _COMMON_NOUN_EXACT:
+        # По токену, а не по сырой строке: «“Заказчик”» в кавычках из преамбулы
+        # договора иначе проскакивал мимо списка и маскировался как PERSON.
+        if len(toks) == 1 and toks[0] in _COMMON_NOUN_EXACT:
             return True
         return False
 
@@ -703,6 +788,55 @@ def is_noise_span(text: str, label: str) -> bool:
         return False
 
     return False
+
+
+def propagate_entity_aliases(text: str, spans: list[Span]) -> list[Span]:
+    """Mask standalone mentions derived from already-detected entities.
+
+    Two generic derivations (no word lists):
+    * multi-word PERSON («Иванов Никита Петрович») -> each capitalized part
+      (>=3 chars) is masked wherever it appears alone («Никита, добрый день»);
+    * ORG with a quoted name (ООО «Ромашка») -> the inner name («Ромашка») is
+      masked where it appears without the legal form («далее — Ромашка»).
+
+    Fixes the "каталог поверхностей" gap of mask-all: the full form is caught,
+    but its bare fragments elsewhere in the document leak. New spans inherit
+    the source span's label; overlaps with existing spans are skipped.
+    """
+    existing = [(s.start, s.end) for s in spans]
+    seen: set[tuple[str, str]] = set()
+    extra: list[Span] = []
+
+    for s in spans:
+        aliases: list[str] = []
+        if s.label == "PERSON":
+            parts = [
+                p for p in re.split(r"[\s,.]+", s.text)
+                if len(p) >= 3 and p[0].isupper() and not p.endswith(".")
+            ]
+            if len(parts) >= 2:  # только у многословных ФИО есть что выделять
+                aliases = parts
+        elif s.label == "ORG":
+            m = re.search(r"[«\"]([^»\"\n]{3,60})[»\"]", s.text)
+            if m:
+                aliases = [m.group(1).strip()]
+
+        for alias in aliases:
+            key = (s.label, alias.casefold())
+            if key in seen or alias.casefold() == s.text.strip().casefold():
+                continue
+            seen.add(key)
+            pattern = re.compile(
+                r"(?<![А-Яа-яЁёA-Za-z0-9])" + re.escape(alias) + r"(?![А-Яа-яЁёA-Za-z0-9])"
+            )
+            for m2 in pattern.finditer(text):
+                a, b = m2.start(), m2.end()
+                if any(a < e and st < b for st, e in existing):
+                    continue
+                if any(a < e2 and st2 < b for st2, e2 in ((x.start, x.end) for x in extra)):
+                    continue
+                extra.append(Span(a, b, s.label, text[a:b], source="alias"))
+    return extra
 
 
 _DECLENSION_LABELS = frozenset({"PERSON", "LOCATION", "ORG"})

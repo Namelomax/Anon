@@ -21,6 +21,7 @@ from .detectors import (
     is_noise_span,
     is_stopword_entity,
     propagate_declensions,
+    propagate_entity_aliases,
     run_detectors,
 )
 from .detectors import _SOFT_LABELS
@@ -54,6 +55,10 @@ class AnonymizationResult:
     # anonymized before — re-uploading an already-anonymized file. Surfaced so
     # a caller/UI can warn instead of the mapping silently filling with junk.
     preexisting_placeholders: int = 0
+    # Post-anonymization leak scan (see verify.scan_residual_pii): PII-looking
+    # fragments still present in ``anonymized_text`` (long digit runs, emails).
+    # A checklist for the human, not a hard error — turns silent misses visible.
+    warnings: tuple[dict, ...] = field(default_factory=tuple)
 
     @property
     def summary(self) -> dict[str, int]:
@@ -128,6 +133,14 @@ class Anonymizer:
         raw = run_detectors(text, self._detectors)
         raw = [s for s in raw if passes_filters(s)]
         spans = resolve_overlaps(raw, priority=self._priority)
+        # Производные упоминания: голые части многословных ФИО («Никита» при
+        # пойманном «Иванов Никита») и имена ORG без правовой формы («Ромашка»
+        # при «ООО "Ромашка"»). До склонений — чтобы алиасы получили и падежи.
+        aliases = propagate_entity_aliases(text, spans)
+        if aliases:
+            aliases = [a for a in aliases if passes_filters(a)]
+            if aliases:
+                spans = resolve_overlaps(spans + aliases, priority=self._priority)
         # Mask declined case-forms of detected entities (e.g. "Лентой" given "Лента").
         extra = propagate_declensions(text, spans)
         if extra:
@@ -156,12 +169,15 @@ class Anonymizer:
         else:
             anonymized = _apply(text, spans, span_placeholders)
 
+        from .verify import scan_residual_pii
+
         return AnonymizationResult(
             text=text,
             anonymized_text=anonymized,
             mapping=mapping,
             spans=tuple(spans),
             preexisting_placeholders=len(protected),
+            warnings=tuple(scan_residual_pii(anonymized)),
         )
 
     def _find_leaked_spans(

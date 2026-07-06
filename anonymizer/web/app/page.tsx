@@ -13,6 +13,7 @@ type AnonResult = {
   summary: Record<string, number>;
   elapsed_seconds?: number;
   preexisting_placeholders?: number;
+  warnings?: { kind: string; value: string; context: string }[];
   document_base64: string;
   document_name: string;
   document_mime: string;
@@ -107,8 +108,8 @@ export default function Home() {
 
   const onPick = (f: File | null | undefined) => {
     if (!f) return;
-    if (!/\.(docx|txt)$/i.test(f.name)) {
-      setError("Поддерживаются только файлы .docx и .txt");
+    if (!/\.(docx|pdf|xlsx|xlsm|xml|rtf|odt|txt|csv|md)$/i.test(f.name)) {
+      setError("Поддерживаются .docx, .pdf, .xlsx, .xml, .rtf, .odt, .txt (кроме презентаций)");
       return;
     }
     setError(null);
@@ -316,13 +317,13 @@ export default function Home() {
               }}
             >
               <strong>Перетащите файл сюда</strong> или нажмите, чтобы выбрать
-              <div className="note">Поддерживаются .docx и .txt</div>
+              <div className="note">.docx, .pdf, .xlsx, .xml, .rtf, .odt, .txt (кроме презентаций)</div>
               {file && <div className="file-name">📄 {file.name}</div>}
             </div>
             <input
               ref={inputRef}
               type="file"
-              accept=".docx,.txt"
+              accept=".docx,.pdf,.xlsx,.xlsm,.xml,.rtf,.odt,.txt,.csv,.md"
               style={{ display: "none" }}
               onChange={(e) => onPick(e.target.files?.[0])}
             />
@@ -435,6 +436,42 @@ export default function Home() {
                   </p>
                 )}
               </div>
+
+              {result.warnings && result.warnings.length > 0 && (
+                <div className="card" style={{ borderColor: "#e0a800", background: "#fff9e6" }}>
+                  <h2 style={{ marginTop: 0 }}>⚠️ Проверьте вручную — возможно, не скрыто</h2>
+                  <p className="note" style={{ marginTop: 0 }}>
+                    Автопроверка нашла в результате фрагменты, похожие на неанонимизированные
+                    данные (длинные числа — счета/ОГРН/ИНН/телефоны, адреса эл. почты). Если это
+                    действительно ПДн — фрагмент пропустили детекторы; сообщите, какой это тип, или
+                    отредактируйте документ вручную.
+                  </p>
+                  <div className="scroll-tbl">
+                    <table className="map">
+                      <thead>
+                        <tr>
+                          <th>Тип</th>
+                          <th>Значение</th>
+                          <th>Контекст</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {result.warnings.map((w, i) => (
+                          <tr key={i}>
+                            <td>
+                              <span className="tag">{w.kind}</span>
+                            </td>
+                            <td>
+                              <code>{w.value}</code>
+                            </td>
+                            <td style={{ fontSize: 13, opacity: 0.8 }}>{w.context}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
 
               <div className="card">
                 <h2>📦 Скачать</h2>
