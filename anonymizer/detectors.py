@@ -458,6 +458,62 @@ BANK_ACCOUNT_FMT = RegexDetector(
 
 REQUISITES_DETECTORS: tuple[Detector, ...] = (KPP, OGRN, BIK, OKPO, BANK_ACCOUNT_KW, BANK_ACCOUNT_FMT)
 
+# --- Внутренние коды учреждения (структура/КОСГУ/субконто/шифр/штамп) ------
+# Формат этих кодов не стандартизован (в отличие от ОГРН/ОКПО) — цифры сами по
+# себе могут быть как значимым внутренним идентификатором организации, так и
+# безобидным номером страницы/пункта. Поэтому, в отличие от остальных
+# детекторов этого файла, ADMIN_CODE не считается автоматически безопасным для
+# маскировки формата — он единственный из "жёстких" детекторов помечен как
+# ``_REVIEWABLE_LABELS`` в review.py: LLM смотрит на код вместе с контекстом и
+# решает, оставить маску или вернуть как безобидное число.
+ADMIN_CODE_STRUCT_KW = RegexDetector(
+    "ADMIN_CODE",
+    r"код\s+(?:структур\w*|учреждени\w*|подразделени\w*|бюджетополучател\w*)"
+    + _GAP + r"(" + _BLOB + r")",
+    group=1,
+)
+
+ADMIN_CODE_KOSGU = RegexDetector(
+    "ADMIN_CODE",
+    r"(?<![А-Яа-яЁёA-Za-z])КОСГУ(?![А-Яа-яЁёA-Za-z])" + _GAP + r"(" + _BLOB + r")",
+    group=1,
+)
+
+ADMIN_CODE_SUBCONTO = RegexDetector(
+    "ADMIN_CODE",
+    r"субконт\w*" + _GAP + r"(" + _BLOB + r")",
+    group=1,
+)
+
+ADMIN_CODE_SHIFR = RegexDetector(
+    "ADMIN_CODE",
+    r"(?<![А-Яа-яЁёA-Za-z])шифр\w*(?![А-Яа-яЁёA-Za-z])" + _GAP + r"(" + _BLOB + r")",
+    group=1,
+)
+
+ADMIN_CODE_REG_NUMBER = RegexDetector(
+    "ADMIN_CODE",
+    r"рег(?:истрационн\w*)?\.?\s*номер\w*" + _GAP + r"(" + _BLOB + r")",
+    group=1,
+)
+
+# «Штамп ... (И-118):» — код в скобках после слова «штамп», может отделяться
+# от ключевого слова длинным названием организации, поэтому окно шире _GAP.
+ADMIN_CODE_STAMP = RegexDetector(
+    "ADMIN_CODE",
+    r"штамп\w*[^()\n]{0,80}\(([A-ZА-ЯЁ0-9][A-ZА-ЯЁ0-9\-./]{0,14})\)",
+    group=1,
+)
+
+ADMIN_CODE_DETECTORS: tuple[Detector, ...] = (
+    ADMIN_CODE_STRUCT_KW,
+    ADMIN_CODE_KOSGU,
+    ADMIN_CODE_SUBCONTO,
+    ADMIN_CODE_SHIFR,
+    ADMIN_CODE_REG_NUMBER,
+    ADMIN_CODE_STAMP,
+)
+
 # File names with an extension: «Управленка_2026.xlsx», report.docx,
 # Запись_Встреча_2026.mp4 (meeting recordings often embed names/orgs).
 FILE = RegexDetector(
@@ -470,7 +526,7 @@ FILE = RegexDetector(
 # заказчика — «нигде не убрал цены»), а денежные форматы детерминированы;
 # ложные срабатывания дополнительно режет is_money_amount в engine.
 CORPORATE_DETECTORS: tuple[Detector, ...] = (
-    CONTRACT, DATE, ORG_LEGAL, FILE, AMOUNT, *REQUISITES_DETECTORS,
+    CONTRACT, DATE, ORG_LEGAL, FILE, AMOUNT, *REQUISITES_DETECTORS, *ADMIN_CODE_DETECTORS,
 )
 
 
@@ -534,6 +590,7 @@ DEFAULT_PRIORITY: dict[str, int] = {
     "OKPO": 78,
     "CONTRACT": 65,
     "ORG": 62,
+    "ADMIN_CODE": 60,
     "FILE": 58,
     "AMOUNT": 55,
     "DATE": 45,

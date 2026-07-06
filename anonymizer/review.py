@@ -55,11 +55,17 @@ from .llm import _extract_json_array  # reuse the same tolerant JSON-array scann
 from .spans import Span
 
 # Only these labels are second-guessed. Structured/format-driven identifiers
-# are deliberately excluded — see module docstring.
+# are deliberately excluded — see module docstring. ADMIN_CODE is the one
+# exception to "format detectors are always trusted": unlike an INN/SNILS/
+# passport number, a bare institutional code's format alone doesn't tell you
+# whether it's a real identifying code (an org's internal structure/accounting
+# code) or a harmless number the keyword-anchored detector over-caught — that
+# needs the surrounding context, which is exactly what this layer supplies.
 _REVIEWABLE_LABELS = frozenset({
     "PERSON", "ORG", "LOCATION", "CITY", "REGION", "COUNTRY",
     "DISTRICT", "STREET", "HOUSE", "ADDRESS",
     "FIRST_NAME", "LAST_NAME", "MIDDLE_NAME",
+    "ADMIN_CODE",
 })
 
 _REVIEW_SYSTEM_PROMPT = (
@@ -97,6 +103,17 @@ _REVIEW_SYSTEM_PROMPT = (
     "Подрядчик, студенты, сотрудники, участники), термин или аббревиатура "
     "документа (ТЗ, АКТ, МП, КОСГУ, приказ, раздел), либо продукт/ПО — но "
     "НИКОГДА не настоящее название организации.\n"
+    "Для типа ADMIN_CODE кандидат — это число/шифр рядом со словом вроде «код "
+    "структуры», «КОСГУ», «субконто», «шифр», «рег. номер», «штамп». Формат "
+    "таких кодов не стандартизован, поэтому решай по смыслу: keep=true — если "
+    "это внутренний идентификатор УЧРЕЖДЕНИЯ/ПОДРАЗДЕЛЕНИЯ/ДОКУМЕНТА, по "
+    "которому его можно узнать или привязать к конкретной организации/записи "
+    "(код структуры, код учреждения, бюджетная классификация, номер печати/"
+    "штампа, субконто) — такие коды нужно скрывать, как и реквизиты. "
+    "keep=false — только если детектор явно ошибся: захватил число, которое "
+    "на самом деле не код (случайный счётчик, номер строки/пункта, дата, "
+    "процент), т.е. само значение не выглядит как осмысленный шифр. Если не "
+    "уверен — keep=true (эти коды почти всегда стоит скрывать).\n"
     "- keep=true без trim/merge_with — значение целиком ПДн, оставить как есть.\n"
     "- trim — если ПДн является лишь ЧАСТЬЮ значения (к имени приклеено "
     "звание/должность/обращение, например «Капитан Яков» — ПДн только «Яков», "

@@ -341,9 +341,12 @@ def build_anonymizer(
             higher recall on Cyrillic / Latin names / streets).
         include_org: Natasha-only — also redact organizations.
         gliner_config: Optional :class:`anonymizer.gliner_ner.GLiNERConfig`.
-        corporate: Add business detectors (AMOUNT/CONTRACT/DATE) for business
-            documents. Off by default (not part of the PII taxonomy). These are
-            regex-based but controlled separately from ``use_regex``.
+        corporate: Add business detectors (AMOUNT/CONTRACT/DATE/requisites/
+            ADMIN_CODE) for business documents. Off by default (not part of the
+            PII taxonomy). These are regex-based but controlled separately
+            from ``use_regex``. ADMIN_CODE (structure/КОСГУ/subconto/stamp
+            codes) is additionally reviewed by the LLM layer if enabled — see
+            ``review.py`` — since its format alone doesn't prove sensitivity.
         use_llm: Append the local-LLM gap-filler. Requires LM Studio / Ollama.
         llm_config: Optional :class:`anonymizer.llm.LLMConfig`.
         use_review: Add the LLM review layer (see ``review.py``): double-checks
