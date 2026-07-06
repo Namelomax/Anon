@@ -801,8 +801,6 @@ def is_noise_span(text: str, label: str) -> bool:
             return True
         if toks and all(_is_noise_token(t) for t in toks):
             return True
-        if len(toks) >= 5:  # длинная фраза — не название
-            return True
         return False
 
     return False
