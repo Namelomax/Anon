@@ -73,7 +73,14 @@ _REVIEW_SYSTEM_PROMPT = (
     "тексте. Тебе присылают пронумерованный список кандидатов, которые детектор "
     "пометил как ПДн (ФИО, организация, локация и т.п.). Для каждого дано: id, "
     "тип, само значение и фрагмент окружающего текста, где значение выделено "
-    "квадратными скобками: [вот_так].\n"
+    "квадратными скобками: [вот_так]. Если значение встречается в документе "
+    "несколько раз, тебе показаны НЕСКОЛЬКО таких фрагментов подряд, разделённых "
+    "« | » — это разные места документа, а не один и тот же фрагмент. Суди по "
+    "ВСЕМ показанным фрагментам сразу: если хотя бы в одном из них значение явно "
+    "выглядит как настоящее ПДн (реальное обращение к человеку, название "
+    "организации и т.п.), верни keep=true, даже если другие фрагменты выглядят "
+    "более обыденно или неоднозначно — двусмысленность в одном месте не отменяет "
+    "явную ПДн в другом.\n"
     "Для КАЖДОГО кандидата, СТРОГО по порядку и БЕЗ ПРОПУСКОВ, верни объект "
     '{"id": <номер>, "text": <значение кандидата>, "keep": true|false, '
     '"trim": <опционально>, "merge_with": <опционально>}. Поле text должно '
@@ -188,6 +195,20 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
     value repeated many times (``mask_all_occurrences``) is judged once and
     dropped/kept/trimmed as a whole. Only labels in ``_REVIEWABLE_LABELS`` are
     ever sent to the model; everything else passes through untouched.
+
+    CAUTION this grouping implies: judging a repeated value from only ONE
+    occurrence's context means one bad call on an ambiguous mention (e.g.
+    "Никита, добрый день" read as a generic greeting rather than someone's
+    real name) silently drops EVERY occurrence of that value in the whole
+    document — confirmed by reproducing it directly (a forced keep=false on
+    one grouped candidate deleted all N spans sharing its key). Repetition
+    alone is NOT proof a value is real PII, though — a mislabeled common word
+    can repeat just as easily, and permanently trusting repeated values
+    without review would leave those stuck masked with no way to correct them.
+    So instead of special-casing repeat count, ``_group_candidates`` samples
+    UP TO 3 spread-out occurrences (first/middle/last) and shows the model ALL
+    of them for one value — richer, more representative evidence beats a
+    single roll of the dice on whichever mention happened to come first.
 
     Returns the filtered/adjusted span list. On any error talking to the LLM
     (or if it returns unparsable output) the affected spans are left masked,
@@ -340,18 +361,49 @@ def _key_of(span: Span) -> str:
     return f"{span.label}\x00{' '.join(span.text.split()).casefold()}"
 
 
-def _group_candidates(text: str, spans: list[Span], context_chars: int) -> dict[str, _Candidate]:
-    groups: dict[str, _Candidate] = {}
+def _group_candidates(
+    text: str, spans: list[Span], context_chars: int
+) -> dict[str, _Candidate]:
+    """Group reviewable spans by value, sampling up to 3 spread-out occurrences
+    (first/middle/last) per value instead of just the first.
+
+    A value mentioned many times can look ambiguous in one spot and completely
+    unambiguous in another ("Никита, добрый день" vs. "Я правильно говорю,
+    Никита?") — judging from a single occurrence risks the model reading too
+    much into whichever one happened to be first. Spreading the sample across
+    the document (not just taking the first N, which could all cluster in one
+    ambiguous passage) gives the model a fair cross-section of how the value is
+    actually used before it decides.
+    """
+    by_key: dict[str, list[Span]] = {}
+    order: list[str] = []
     for span in spans:
         if span.label not in _REVIEWABLE_LABELS:
             continue
         key = _key_of(span)
-        if key in groups:
-            continue  # first occurrence's context is enough
-        start = max(0, span.start - context_chars)
-        end = min(len(text), span.end + context_chars)
-        ctx = f"{text[start:span.start]}[{span.text}]{text[span.end:end]}"
-        groups[key] = _Candidate(label=span.label, text=span.text, context=" ".join(ctx.split()))
+        if key not in by_key:
+            by_key[key] = []
+            order.append(key)
+        by_key[key].append(span)
+
+    groups: dict[str, _Candidate] = {}
+    for key in order:
+        occurrences = by_key[key]
+        if len(occurrences) <= 3:
+            sample = occurrences
+        else:
+            last = len(occurrences) - 1
+            sample = [occurrences[0], occurrences[last // 2], occurrences[last]]
+        snippets = []
+        for span in sample:
+            start = max(0, span.start - context_chars)
+            end = min(len(text), span.end + context_chars)
+            ctx = f"{text[start:span.start]}[{span.text}]{text[span.end:end]}"
+            snippets.append(" ".join(ctx.split()))
+        first = occurrences[0]
+        groups[key] = _Candidate(
+            label=first.label, text=first.text, context=" | ".join(dict.fromkeys(snippets))
+        )
     return groups
 
 
