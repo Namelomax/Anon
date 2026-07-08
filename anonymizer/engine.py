@@ -32,6 +32,7 @@ from .detectors import _SOFT_LABELS
 # Kept intentionally small + generic; document-specific brands/slang are the
 # review layer's job (no hardcoded per-document value lists).
 _TITLE_FILTER_LABELS = _SOFT_LABELS
+from .canonicalize import canonicalize_entities
 from .mapping import Mapping, assign_placeholders, find_placeholder_spans
 from .spans import Span, resolve_overlaps
 
@@ -163,6 +164,9 @@ class Anonymizer:
             from .review import review_spans
 
             spans = review_spans(text, spans, self._review_config)
+        # Схлопываем падежные/меточные варианты одной ORG/LOCATION-сущности в
+        # один плейсхолдер («Форус»/«Форуса», «Телеграме» как ORG и LOCATION).
+        spans = canonicalize_entities(spans)
         mapping, span_placeholders = assign_placeholders(spans)
 
         if self._mask_all and mapping:
