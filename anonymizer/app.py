@@ -95,6 +95,11 @@ st.sidebar.caption("Можно отключить любой слой — нап
 stage_regex = st.sidebar.checkbox("Правила (regex)", value=True,
                                   help="Телефоны, email, ИНН, паспорта, даты…")
 stage_corporate = st.sidebar.checkbox("Корпоративные (суммы/договоры)", value=True)
+stage_glossary = st.sidebar.checkbox(
+    "Пользовательский словарь", value=True,
+    help="Свои термины (аббревиатуры, внутренние прозвища), которые всегда "
+         "маскируются — редактируется в anonymizer/custom_terms.txt на сервере.",
+)
 stage_ner = st.sidebar.checkbox("GLiNER (ФИО, города, организации)", value=True)
 ner_threshold = st.sidebar.slider(
     "Чувствительность GLiNER", min_value=0.20, max_value=0.70, value=0.45, step=0.05,
@@ -106,12 +111,13 @@ stage_llm = st.sidebar.checkbox("LLM (добивание сложных случ
 STAGES = {
     "regex": stage_regex,
     "corporate": stage_corporate,
+    "glossary": stage_glossary,
     "ner": stage_ner,
     "llm": stage_llm,
 }
 if stage_ner:
     STAGES["ner_threshold"] = ner_threshold
-if not any(STAGES.get(k) for k in ("regex", "corporate", "ner", "llm")):
+if not any(STAGES.get(k) for k in ("regex", "corporate", "glossary", "ner", "llm")):
     st.sidebar.error("Включите хотя бы один этап.")
 
 st.title("🛡️ Анонимизатор персональных данных")

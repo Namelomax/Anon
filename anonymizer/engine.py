@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable
 
 from .detectors import (
@@ -326,6 +327,7 @@ def build_anonymizer(
     use_review: bool = False,
     review_config=None,
     use_second_pass: bool = False,
+    custom_terms: str | Path | Iterable | None = "auto",
 ) -> Anonymizer:
     """Construct an anonymizer from the layered detectors.
 
@@ -354,6 +356,15 @@ def build_anonymizer(
             mistakes (common words, product names, legal abbreviations...)
             before placeholders are assigned. Requires LM Studio / Ollama.
         review_config: Optional :class:`anonymizer.review.ReviewConfig`.
+        custom_terms: User glossary of always-mask terms (see ``glossary.py``)
+            — abbreviations/nicknames no NER/LLM would recognize as sensitive
+            on their own. ``"auto"`` (default) loads
+            ``anonymizer/custom_terms.txt`` if that file exists, silently
+            skipped if it doesn't. Pass ``None`` to disable, a path to use a
+            different file, or an iterable of
+            :class:`anonymizer.glossary.GlossaryEntry` directly. Always
+            trusted — bypasses the noise filters and the LLM review layer,
+            since a human curated the list rather than a model scoring it.
 
     Returns:
         A configured :class:`Anonymizer`.
@@ -362,6 +373,17 @@ def build_anonymizer(
     second_pass: list[Detector] = []
     if corporate:
         detectors.extend(CORPORATE_DETECTORS)
+    if custom_terms is not None:
+        from .glossary import DEFAULT_GLOSSARY_PATH, GlossaryDetector, load_glossary
+
+        if custom_terms == "auto":
+            entries = load_glossary(DEFAULT_GLOSSARY_PATH)
+        elif isinstance(custom_terms, (str, Path)):
+            entries = load_glossary(custom_terms)
+        else:
+            entries = tuple(custom_terms)
+        if entries:
+            detectors.append(GlossaryDetector(entries))
     if use_ner:
         if ner_backend == "gliner":
             from .gliner_ner import GLiNERDetector

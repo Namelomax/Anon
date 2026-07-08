@@ -572,6 +572,9 @@ DEFAULT_DETECTORS: tuple[Detector, ...] = (
 # Higher weight wins when spans overlap. Specific document/contact types beat
 # the broad PHONE/CREDIT_CARD digit runs that can swallow them.
 DEFAULT_PRIORITY: dict[str, int] = {
+    # User-curated glossary terms are ground truth, not a guess — should win
+    # over any NER/regex span at the same position.
+    "CUSTOM_TERM": 95,
     "EMAIL": 90,
     "URL": 90,
     "IP_ADDRESS": 90,
@@ -914,32 +917,59 @@ def propagate_entity_aliases(text: str, spans: list[Span]) -> list[Span]:
 
 _DECLENSION_LABELS = frozenset({"PERSON", "LOCATION", "ORG"})
 
+# Common Russian singular noun case endings, longest first (so a 3-char match
+# is tried before a 1-char one that's merely a substring of it). Deliberately
+# EXCLUDES "ов"/"ев"/"й": those are frequent endings of the NOMINATIVE itself
+# (surnames like "Иванов", names like "Виталий") — stripping them would wrongly
+# shrink a real base name into a different, shorter one.
+_DECL_SUFFIXES = (
+    "иями", "иях", "ами", "ями", "ах", "ях", "ом", "ем", "ём", "ой", "ей",
+    "им", "ым", "у", "ю", "е", "и", "ы", "а", "я",
+)
+
+
+def _decl_stem(val: str) -> str:
+    """Best-effort stem: strip the longest known case ending that still
+    leaves >=4 chars; fall back to chopping one trailing char (old behaviour,
+    right for a nominative that itself ends in a plain vowel like "Никита")."""
+    for suf in _DECL_SUFFIXES:
+        if val.endswith(suf) and len(val) - len(suf) >= 4:
+            return val[: -len(suf)]
+    return val[:-1]
+
 
 def propagate_declensions(text: str, spans: list[Span]) -> list[Span]:
     """Find declined case-forms of already-detected single-word entities.
 
-    NER/LLM may catch "Лента"/"Москва" (nominative) but miss "Лентой"/"Москве"
-    (oblique cases), especially on large chunks. For each detected single-word
-    PERSON/LOCATION/ORG, this scans for `<stem><russian-ending>` occurrences and
-    returns them as NEW spans (each keeps its own surface text, so the mapping
-    stays reversible). Returns only spans not overlapping the existing ones.
+    NER/LLM may catch a value in WHATEVER case it happened to appear in first
+    — not necessarily nominative (a transcript might say "с Мингосом" before
+    it ever says bare "Мингос") — and miss the other case-forms elsewhere in
+    the document. This derives a common stem via ``_decl_stem`` (strips a
+    known case ending rather than blindly chopping one character, so an
+    instrumental first-catch like "Мингосом" still yields the true stem
+    "Мингос", not the useless "Мингосо") and searches for
+    `<stem><known ending or nothing>`, returning matches as NEW spans (each
+    keeps its own surface text, so the mapping stays reversible). Returns only
+    spans not overlapping the existing ones.
     """
     existing = [(s.start, s.end) for s in spans]
     seen_stems: set[str] = set()
     extra: list[Span] = []
+    suffix_alt = "|".join(sorted((re.escape(s) for s in _DECL_SUFFIXES), key=len, reverse=True))
     for s in spans:
         if s.label not in _DECLENSION_LABELS:
             continue
         val = s.text.strip()
         if " " in val or len(val) < 5 or not val[0].isupper():
             continue
-        stem = val[:-1]
+        stem = _decl_stem(val)
         key = (s.label, stem.casefold())
         if key in seen_stems or len(stem) < 4:
             continue
         seen_stems.add(key)
         pattern = re.compile(
-            r"(?<![А-Яа-яЁёA-Za-z])" + re.escape(stem) + r"[а-яё]{0,3}(?![А-Яа-яЁёA-Za-z])"
+            r"(?<![А-Яа-яЁёA-Za-z])" + re.escape(stem) + r"(?:" + suffix_alt + r")?"
+            r"(?![А-Яа-яЁёA-Za-z])"
         )
         for m in pattern.finditer(text):
             a, b = m.start(), m.end()

@@ -48,7 +48,7 @@ _REVIEW_CFG = None       # ReviewConfig for the LLM review layer, or None if dis
 _INFO: dict = {}
 _LOCK = threading.Lock()  # serialize model calls: torch/GLiNER is not thread-safe
 
-_STAGE_NAMES = ("regex", "corporate", "ner", "llm", "review", "second_pass")
+_STAGE_NAMES = ("regex", "corporate", "glossary", "ner", "llm", "review", "second_pass")
 
 
 def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
@@ -59,7 +59,7 @@ def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
     so a per-request detector with a different threshold is cheap.
     """
     dets: list = []
-    for name in ("regex", "corporate", "ner", "llm"):
+    for name in ("regex", "corporate", "glossary", "ner", "llm"):
         on = stages.get(name)
         if on is None:
             on = _DEFAULTS.get(name, False)
@@ -316,15 +316,25 @@ def main() -> None:
     ap.add_argument("--review-base-url", default=None, help="Defaults to --llm-base-url")
     ap.add_argument("--review-model", default=None, help="Defaults to --llm-model")
     ap.add_argument("--review-no-think", action="store_true")
+    ap.add_argument(
+        "--custom-terms", default=None,
+        help="Path to a glossary file of always-mask terms (see glossary.py). "
+             "Defaults to anonymizer/custom_terms.txt if it exists.",
+    )
     args = ap.parse_args()
 
     global _INFO, _GLINER_CFG, _REVIEW_CFG
     print("Загружаю модели…", flush=True)
 
     from anonymizer.detectors import CORPORATE_DETECTORS, DEFAULT_DETECTORS
+    from anonymizer.glossary import DEFAULT_GLOSSARY_PATH, GlossaryDetector, load_glossary
 
     _DETECTORS["regex"] = list(DEFAULT_DETECTORS)
     _DETECTORS["corporate"] = list(CORPORATE_DETECTORS)
+
+    glossary_entries = load_glossary(args.custom_terms or DEFAULT_GLOSSARY_PATH)
+    if glossary_entries:
+        _DETECTORS["glossary"] = [GlossaryDetector(glossary_entries)]
 
     if args.ner != "none":
         if args.ner == "gliner":
@@ -362,6 +372,7 @@ def main() -> None:
     _DEFAULTS.update(
         regex=True,
         corporate=args.corporate,
+        glossary=bool(_DETECTORS.get("glossary")),
         ner=args.ner != "none",
         llm=args.llm,
         review=args.review,
@@ -378,6 +389,7 @@ def main() -> None:
         "ner": args.ner, "device": args.device,
         "corporate": args.corporate, "llm": args.llm,
         "llm_model": args.llm_model if args.llm else None,
+        "glossary_terms": len(glossary_entries),
         "review": args.review,
         "review_model": _REVIEW_CFG.model if _REVIEW_CFG else None,
         "second_pass": _DEFAULTS.get("second_pass", False),
