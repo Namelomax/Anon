@@ -317,6 +317,14 @@ def main() -> None:
     ap.add_argument("--review-model", default=None, help="Defaults to --llm-model")
     ap.add_argument("--review-no-think", action="store_true")
     ap.add_argument(
+        "--llm-recall", action="store_true",
+        help="Recall-проход: после маскирования показать LLM уже обезличенный "
+             "текст (с плейсхолдерами в контексте) и ДОБРАТЬ пропущенные ПДн "
+             "(номер договора/филиала, коды, редкие форматы). Требует --review. "
+             "Один доп. вызов LLM на документ; склонен перемаскировать (безопасно). "
+             "Также включается переменной окружения ANONYMIZER_LLM_RECALL=1.",
+    )
+    ap.add_argument(
         "--custom-terms", default=None,
         help="Path to a glossary file of always-mask terms (see glossary.py). "
              "Defaults to anonymizer/custom_terms.txt if it exists.",
@@ -362,11 +370,16 @@ def main() -> None:
         from anonymizer.review import ReviewConfig
 
         review_extra = {"reasoning_effort": "none"} if args.review_no_think else {}
-        _REVIEW_CFG = ReviewConfig(
+        review_kwargs = dict(
             base_url=args.review_base_url or args.llm_base_url,
             model=args.review_model or args.llm_model,
             extra_body=review_extra,
         )
+        # Флаг переопределяет env-дефолт; без флага recall берётся из
+        # ANONYMIZER_LLM_RECALL (default_factory в ReviewConfig).
+        if args.llm_recall:
+            review_kwargs["recall"] = True
+        _REVIEW_CFG = ReviewConfig(**review_kwargs)
 
     # Start-up defaults: a stage is ON if it was loaded / requested.
     _DEFAULTS.update(
@@ -392,6 +405,7 @@ def main() -> None:
         "glossary_terms": len(glossary_entries),
         "review": args.review,
         "review_model": _REVIEW_CFG.model if _REVIEW_CFG else None,
+        "llm_recall": bool(_REVIEW_CFG and _REVIEW_CFG.recall),
         "second_pass": _DEFAULTS.get("second_pass", False),
         "stages": dict(_DEFAULTS), "toggleable": True,
         "ner_threshold": _GLINER_CFG.threshold if _GLINER_CFG else None,
