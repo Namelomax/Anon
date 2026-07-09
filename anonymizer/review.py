@@ -442,7 +442,10 @@ def recall_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
 
     try:
         found = _ask_recall(interim, cfg)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        import sys
+
+        print(f"[recall] LLM-запрос упал: {exc}", file=sys.stderr)
         return []
 
     taken = [(s.start, s.end) for s in spans]
@@ -463,6 +466,13 @@ def recall_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
                 continue
             out.append(Span(a, b, label, text[a:b], source="llm-recall"))
             taken.append((a, b))
+    import sys
+
+    print(
+        f"[recall] модель вернула {len(found)} кандидат(ов), добавлено спанов: {len(out)}"
+        + (f" — примеры: {[v for v, _ in found[:8]]}" if found else ""),
+        file=sys.stderr,
+    )
     return out
 
 
@@ -494,6 +504,9 @@ def _ask_recall(interim_text: str, cfg: ReviewConfig) -> list[tuple[str, str]]:
         data = json.load(resp)
     msg = data["choices"][0]["message"]
     content = msg.get("content") or msg.get("reasoning_content") or ""
+    import sys
+
+    print(f"[recall] сырой ответ LLM ({len(content)} симв.): {content[:600]!r}", file=sys.stderr)
     return _parse_recall(content)
 
 

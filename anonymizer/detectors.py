@@ -392,6 +392,16 @@ CONTRACT = RegexDetector(
     r"(?=[^\s]*[A-Za-zА-Яа-яЁё\-])[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9\-/_]{2,}",
 )
 
+# Чисто цифровой номер договора: «№ 77/2026», «№42 от 01.07.2026», «№ 123-45/2026».
+# CONTRACT (выше) требует букву в номере, поэтому голые цифры после «№» пропускал.
+# Здесь ловим ТОЛЬКО «договорные» формы (с «/»/«-» ИЛИ вида «№N от <дата>»), чтобы
+# не задеть номера разделов/приложений/пунктов («Приложение № 1», «п. № 5»).
+CONTRACT_NUM = RegexDetector(
+    "CONTRACT",
+    r"№\s*\d{1,6}[/\-]\d{1,6}(?:[/\-]\d{1,6})?(?![\d/\-])"
+    r"|№\s*\d{1,6}(?=\s*от\s+[«\"]?\d)",
+)
+
 _MONTH = r"(?:январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)[а-я]*"
 DATE = RegexDetector(
     "DATE",
@@ -552,7 +562,8 @@ FILE = RegexDetector(
 # заказчика — «нигде не убрал цены»), а денежные форматы детерминированы;
 # ложные срабатывания дополнительно режет is_money_amount в engine.
 CORPORATE_DETECTORS: tuple[Detector, ...] = (
-    CONTRACT, DATE, ORG_LEGAL, FILE, AMOUNT, *REQUISITES_DETECTORS, *ADMIN_CODE_DETECTORS,
+    CONTRACT, CONTRACT_NUM, DATE, ORG_LEGAL, FILE, AMOUNT,
+    *REQUISITES_DETECTORS, *ADMIN_CODE_DETECTORS,
 )
 
 

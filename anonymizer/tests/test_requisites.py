@@ -44,3 +44,12 @@ def test_bank_branch_unknown_name():
 
 def test_bank_no_false_positive():
     assert BANK.find('обычный банковский день прошёл') == []
+
+
+def test_contract_numeric_number_masked():
+    from anonymizer.detectors import CONTRACT_NUM
+    assert any(s.text == '№ 77/2026' for s in CONTRACT_NUM.find('ДОГОВОР № 77/2026 от'))
+    assert any(s.text == '№42' for s in CONTRACT_NUM.find('Договор №42 от 01.07.2026'))
+    # разделы/приложения/пункты НЕ трогаем
+    assert CONTRACT_NUM.find('Приложение № 1 к настоящему Договору') == []
+    assert CONTRACT_NUM.find('п. № 5 договора') == []
