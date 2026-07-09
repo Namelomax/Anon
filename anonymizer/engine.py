@@ -164,6 +164,19 @@ class Anonymizer:
             from .review import review_spans
 
             spans = review_spans(text, spans, self._review_config)
+        # Recall-проход (опционально, review_config.recall): показываем LLM уже
+        # замаскированный текст и добираем ПДн, которые детекторы пропустили.
+        # Новые кандидаты проходят те же фильтры и разрешение перекрытий.
+        if self._review_config is not None and getattr(self._review_config, "recall", False):
+            from .review import recall_spans
+
+            recalled = recall_spans(text, spans, self._review_config)
+            recalled = [
+                s for s in recalled
+                if passes_filters(s) and not _overlaps_any(s, protected)
+            ]
+            if recalled:
+                spans = resolve_overlaps(spans + recalled, priority=self._priority)
         # Схлопываем падежные/меточные варианты одной ORG/LOCATION-сущности в
         # один плейсхолдер («Форус»/«Форуса», «Телеграме» как ORG и LOCATION).
         spans = canonicalize_entities(spans)

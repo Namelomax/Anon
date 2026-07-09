@@ -47,6 +47,7 @@ Design contract, mirroring ``llm.py``:
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
@@ -178,6 +179,15 @@ class ReviewConfig:
     extra_body: dict = field(default_factory=dict)
     context_chars: int = 60
     batch_size: int = 35
+    # Включает дополнительный recall-проход (см. recall_spans): один вызов LLM по
+    # уже-замаскированному тексту, чтобы ДОБРАТЬ ПДн, которые детекторы пропустили.
+    # По умолчанию берётся из окружения ANONYMIZER_LLM_RECALL (1/true/yes/on) —
+    # можно включить на сервере без правки кода. Лишний вызов + склонность к
+    # перемаскировке; но перемаскировать безопаснее, чем пропустить.
+    recall: bool = field(
+        default_factory=lambda: os.getenv("ANONYMIZER_LLM_RECALL", "").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
 
 
 @dataclass
@@ -354,6 +364,154 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
         if key in merge_key_for:
             s = replace(s, merge_key=merge_key_for[key], canonical_text=canonical_for[key])
         out.append(s)
+    return out
+
+
+# --- Recall-проход: добор пропущенного через LLM -----------------------------
+# Метки, которые LLM разрешено «дорисовать». Незнакомый тип → SENSITIVE.
+_RECALL_LABELS = frozenset({
+    "PERSON", "ORG", "LOCATION", "ADDRESS", "CITY", "REGION", "STREET", "HOUSE",
+    "DATE", "PHONE", "EMAIL", "URL", "IP_ADDRESS", "AMOUNT",
+    "INN", "SNILS", "OGRN", "OKPO", "KPP", "BIK", "BANK_ACCOUNT",
+    "CONTRACT", "PASSPORT", "MILITARY_ID", "CREDIT_CARD", "ADMIN_CODE",
+    "OMS", "DRIVER_LICENSE", "BIRTH_CERTIFICATE",
+})
+
+_RECALL_SYSTEM_PROMPT = (
+    "Ты — контролёр ПОЛНОТЫ обезличивания. Ниже текст, где часть персональных и "
+    "конфиденциальных данных УЖЕ заменена на плейсхолдеры вида [ТИП_НОМЕР] "
+    "(например [PERSON_1], [ORG_2], [DATE_1], [BANK_ACCOUNT_1]). Найди значения, "
+    "которые ОСТАЛИСЬ ВИДНЫ и ещё НЕ заменены плейсхолдером: ФИО и обращения к "
+    "людям; организации, банки, госорганы, стороны договора; адреса; телефоны; "
+    "e-mail; даты; номера и коды (счёт, ИНН, ОГРН, ОКПО, КПП, БИК, номер договора, "
+    "номер филиала/отделения, паспорт, СНИЛС и т.п.); денежные суммы.\n"
+    "НЕ трогай уже существующие плейсхолдеры [ТИП_НОМЕР]. НЕ включай обычные "
+    "слова, роли (Заказчик, Исполнитель, Сторона) и термины. Если сомневаешься, "
+    "конфиденциально ли значение — ЛУЧШЕ включи его (перемаскировать безопаснее, "
+    "чем пропустить).\n"
+    "Верни ТОЛЬКО JSON-массив объектов {\"text\": \"<точная подстрока из текста>\", "
+    "\"type\": \"<ТИП>\"}. Поле text должно ДОСЛОВНО (те же символы) совпадать с "
+    "фрагментом текста. Если всё уже замаскировано — верни []. Без пояснений."
+)
+
+
+def _splice_placeholders(text: str, spans: list[Span], span_ph: dict[int, str]) -> str:
+    """Собирает промежуточный анонимизированный текст (плейсхолдеры на местах)."""
+    ordered = sorted(spans, key=lambda s: s.start)
+    pieces: list[str] = []
+    cursor = 0
+    for s in ordered:
+        if s.start < cursor:  # перекрытие — пропускаем (не должно случаться)
+            continue
+        pieces.append(text[cursor:s.start])
+        pieces.append(span_ph.get(id(s), text[s.start:s.end]))
+        cursor = s.end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _occurrences(text: str, value: str) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    start = 0
+    while True:
+        i = text.find(value, start)
+        if i < 0:
+            break
+        out.append((i, i + len(value)))
+        start = i + len(value)
+    return out
+
+
+def recall_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = None) -> list[Span]:
+    """LLM-проход на ПОЛНОТУ: показываем модели уже-замаскированный текст (с
+    плейсхолдерами в контексте) и просим найти оставшиеся ВИДНЫМИ ПДн. Найденные
+    значения размещаем ДЕТЕРМИНИРОВАННО — ищем точную подстроку в оригинале и
+    заводим новый спан только на непересекающихся местах. Модель НЕ двигает
+    существующие плейсхолдеры и не переписывает текст — только называет
+    пропущенные значения; расстановку делает код (безопасно от галлюцинаций
+    смещений). Fail-safe: любая ошибка LLM → пустой список (поведение не меняется)."""
+    if not spans and not text.strip():
+        return []
+    cfg = config or ReviewConfig()
+
+    from .mapping import assign_placeholders
+
+    ordered = sorted(spans, key=lambda s: s.start)
+    _, span_ph = assign_placeholders(ordered)
+    interim = _splice_placeholders(text, ordered, span_ph)
+
+    try:
+        found = _ask_recall(interim, cfg)
+    except Exception:
+        return []
+
+    taken = [(s.start, s.end) for s in spans]
+    out: list[Span] = []
+    for value, typ in found:
+        val = value.strip()
+        if len(val) < 3:
+            continue
+        if _PLACEHOLDER_LIKE.search(val):  # модель вернула плейсхолдер — игнор
+            continue
+        occ = _occurrences(text, val)
+        # Слишком много вхождений — вероятно, это обычное слово; не перемаскировываем.
+        if not occ or len(occ) > 40:
+            continue
+        label = typ if typ in _RECALL_LABELS else "SENSITIVE"
+        for a, b in occ:
+            if any(a < e and st < b for st, e in taken):
+                continue
+            out.append(Span(a, b, label, text[a:b], source="llm-recall"))
+            taken.append((a, b))
+    return out
+
+
+import re as _re
+
+_PLACEHOLDER_LIKE = _re.compile(r"\[[A-Z_]+_\d+\]")
+
+
+def _ask_recall(interim_text: str, cfg: ReviewConfig) -> list[tuple[str, str]]:
+    payload = {
+        "model": cfg.model,
+        "messages": [
+            {"role": "system", "content": _RECALL_SYSTEM_PROMPT},
+            {"role": "user", "content": interim_text},
+        ],
+        "temperature": cfg.temperature,
+        "max_tokens": cfg.max_tokens,
+        **cfg.extra_body,
+    }
+    req = urllib.request.Request(
+        cfg.base_url.rstrip("/") + "/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {cfg.api_key}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
+        data = json.load(resp)
+    msg = data["choices"][0]["message"]
+    content = msg.get("content") or msg.get("reasoning_content") or ""
+    return _parse_recall(content)
+
+
+def _parse_recall(content: str) -> list[tuple[str, str]]:
+    blob = _extract_json_array(content)
+    if blob is None:
+        return []
+    try:
+        data = json.loads(blob)
+    except json.JSONDecodeError:
+        return []
+    out: list[tuple[str, str]] = []
+    for obj in data if isinstance(data, list) else []:
+        if not isinstance(obj, dict):
+            continue
+        t, ty = obj.get("text"), obj.get("type")
+        if isinstance(t, str) and t.strip():
+            out.append((t, str(ty or "SENSITIVE").strip().upper()))
     return out
 
 

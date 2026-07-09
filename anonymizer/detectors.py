@@ -622,6 +622,9 @@ DEFAULT_PRIORITY: dict[str, int] = {
     "OKPO": 85,
     "CONTRACT": 65,
     "ORG": 62,
+    # Общий класс для добора recall-проходом LLM (см. review.recall_spans),
+    # когда конкретный тип не распознан.
+    "SENSITIVE": 55,
     "ADMIN_CODE": 60,
     "FILE": 58,
     "AMOUNT": 55,
