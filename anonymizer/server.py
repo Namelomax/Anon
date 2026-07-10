@@ -5,9 +5,14 @@ local clients (the Streamlit UI, the benchmark) just POST text and get back the
 anonymized text, mapping and spans. This is the "thin client + remote GPU
 backend" setup for demos.
 
-Run on the hub:
-    python anonymizer/server.py --port 8000 --device cuda --corporate \
-        --llm --llm-base-url http://127.0.0.1:11433/v1 --llm-model qwen3.5:9b --llm-no-think
+Run on the hub (полный конвейер включён по умолчанию — флаги НЕ нужны):
+    python anonymizer/server.py
+    # или через обёртку с CUDA_VISIBLE_DEVICES=0:  bash anonymizer/run.sh
+
+Флаги нужны только чтобы что-то ОТКЛЮЧИТЬ, например:
+    python anonymizer/server.py --no-review          # без слоя проверки
+    python anonymizer/server.py --no-llm --ner none   # только regex-детекторы
+    python anonymizer/server.py --think               # включить reasoning LLM
 
 Expose it through JupyterHub's proxy (like Ollama): the URL becomes
     https://<hub>/user/<id>/proxy/8000/
@@ -296,34 +301,44 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--ner", default="gliner", choices=["gliner", "natasha", "none"])
     ap.add_argument("--device", default="cuda", help="GLiNER device: cpu | cuda | dml")
-    ap.add_argument("--corporate", action="store_true")
-    ap.add_argument("--llm", action="store_true")
-    ap.add_argument("--llm-base-url", default="http://127.0.0.1:11433/v1")
-    ap.add_argument("--llm-model", default="qwen3.5:9b")
-    ap.add_argument("--llm-no-think", action="store_true")
+    # Весь конвейер включён ПО УМОЛЧАНИЮ — просто `python server.py` поднимает
+    # полный корпоративный режим (regex + GLiNER + LLM + review + second-pass +
+    # recall). Флаги нужны ТОЛЬКО чтобы что-то ОТКЛЮЧИТЬ: --no-llm, --no-review,
+    # --no-second-pass, --no-recall, --no-corporate, --ner none.
+    _Bool = argparse.BooleanOptionalAction
     ap.add_argument(
-        "--review", action="store_true",
-        help="4th layer: LLM double-checks the final mapping and reverts obvious "
-             "false positives (e.g. common words mislabeled as PERSON/ORG).",
+        "--corporate", action=_Bool, default=True,
+        help="Корпоративные детекторы (суммы, договоры, реквизиты, VIN/госномер). "
+             "По умолчанию ВКЛ. Отключить: --no-corporate.",
     )
     ap.add_argument(
-        "--second-pass", action="store_true",
-        help="Leak check: after the first masking pass, re-scan the anonymized "
-             "text with the LLM detector and mask what it still finds (bare "
-             "first names, standalone surnames, orgs without a legal form). "
-             "Requires --llm. Adds roughly one extra LLM sweep per document.",
+        "--llm", action=_Bool, default=True,
+        help="LLM-слой добора сложных ПДн. По умолчанию ВКЛ. Отключить: --no-llm.",
+    )
+    ap.add_argument("--llm-base-url", default="http://127.0.0.1:11433/v1")
+    ap.add_argument("--llm-model", default="qwen3.5:9b")
+    ap.add_argument(
+        "--review", action=_Bool, default=True,
+        help="4-й слой: LLM перепроверяет итоговый список и снимает очевидные "
+             "ложные срабатывания. По умолчанию ВКЛ. Отключить: --no-review.",
+    )
+    ap.add_argument(
+        "--second-pass", action=_Bool, default=True,
+        help="Повторная проверка на утечки: после маскирования ещё раз сканирует "
+             "текст LLM-детектором. По умолчанию ВКЛ. Отключить: --no-second-pass.",
+    )
+    ap.add_argument(
+        "--recall", action=_Bool, default=True,
+        help="Recall-проход: добор пропущенных ПДн по уже замаскированному тексту "
+             "(требует review). По умолчанию ВКЛ. Отключить: --no-recall.",
+    )
+    ap.add_argument(
+        "--think", action=_Bool, default=False,
+        help="Размышления (reasoning) LLM в детекции и проверке. По умолчанию "
+             "ВЫКЛ (быстрее). Включить: --think.",
     )
     ap.add_argument("--review-base-url", default=None, help="Defaults to --llm-base-url")
     ap.add_argument("--review-model", default=None, help="Defaults to --llm-model")
-    ap.add_argument("--review-no-think", action="store_true")
-    ap.add_argument(
-        "--llm-recall", action="store_true",
-        help="Recall-проход: после маскирования показать LLM уже обезличенный "
-             "текст (с плейсхолдерами в контексте) и ДОБРАТЬ пропущенные ПДн "
-             "(номер договора/филиала, коды, редкие форматы). Требует --review. "
-             "Один доп. вызов LLM на документ; склонен перемаскировать (безопасно). "
-             "Также включается переменной окружения ANONYMIZER_LLM_RECALL=1.",
-    )
     ap.add_argument(
         "--custom-terms", default=None,
         help="Path to a glossary file of always-mask terms (see glossary.py). "
@@ -358,7 +373,7 @@ def main() -> None:
     if args.llm:
         from anonymizer.llm import LLMConfig, LLMDetector
 
-        extra = {"reasoning_effort": "none"} if args.llm_no_think else {}
+        extra = {} if args.think else {"reasoning_effort": "none"}
         lconf = LLMConfig(base_url=args.llm_base_url, model=args.llm_model, extra_body=extra)
         if args.corporate:  # the LLM (not regex) handles organizations and money sums
             from dataclasses import replace
@@ -369,16 +384,13 @@ def main() -> None:
     if args.review:
         from anonymizer.review import ReviewConfig
 
-        review_extra = {"reasoning_effort": "none"} if args.review_no_think else {}
+        review_extra = {} if args.think else {"reasoning_effort": "none"}
         review_kwargs = dict(
             base_url=args.review_base_url or args.llm_base_url,
             model=args.review_model or args.llm_model,
             extra_body=review_extra,
+            recall=args.recall,  # recall ВКЛ по умолчанию; отключить: --no-recall
         )
-        # Флаг переопределяет env-дефолт; без флага recall берётся из
-        # ANONYMIZER_LLM_RECALL (default_factory в ReviewConfig).
-        if args.llm_recall:
-            review_kwargs["recall"] = True
         _REVIEW_CFG = ReviewConfig(**review_kwargs)
 
     # Start-up defaults: a stage is ON if it was loaded / requested.
