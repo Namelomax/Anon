@@ -145,8 +145,41 @@ class GLiNERDetector:
         return spans
 
     def _predict_batch(self, model, texts: list[str], labels: list[str]) -> list[list[dict]]:
-        """Run inference on a batch of texts; returns a list of entity-lists."""
+        """Run inference on a batch of texts; returns a list of entity-lists.
+
+        Предпочитаем современный ``model.inference`` — у relex-чекпойнтов это
+        основной API, а ``batch_predict_entities`` помечен deprecated и будет
+        удалён в будущих версиях GLiNER (из-за него в логах FutureWarning).
+        Если ``inference`` недоступен или у него иная сигнатура — безопасно
+        откатываемся на ``batch_predict_entities`` (старое поведение).
+        """
         cfg = self.config
+
+        # Современный путь: model.inference (без deprecation-warning).
+        if hasattr(model, "inference"):
+            try:
+                out = model.inference(
+                    texts=texts, labels=labels, relations=[],
+                    threshold=cfg.threshold, return_relations=False, flat_ner=cfg.flat_ner,
+                )
+                if isinstance(out, tuple):  # (entities, relations)
+                    out = out[0]
+                if out is not None:
+                    return out if out else [[] for _ in texts]
+            except TypeError:
+                # Иная сигнатура inference (не relex) — пробуем минимальный набор.
+                try:
+                    out = model.inference(texts=texts, labels=labels, threshold=cfg.threshold)
+                    if isinstance(out, tuple):
+                        out = out[0]
+                    if out is not None:
+                        return out if out else [[] for _ in texts]
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        # Легаси-путь для старых чекпойнтов без inference.
         out = None
         try:
             out = model.batch_predict_entities(
@@ -159,11 +192,6 @@ class GLiNERDetector:
                 out = None
         except Exception:
             out = None
-        if out is None:  # relex API
-            out = model.inference(
-                texts=texts, labels=labels, relations=[],
-                threshold=cfg.threshold, return_relations=False, flat_ner=cfg.flat_ner,
-            )
         if isinstance(out, tuple):  # batch_predict_entities returns (entities, relations)
             out = out[0]
         return out if out else [[] for _ in texts]

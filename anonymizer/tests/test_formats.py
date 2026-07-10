@@ -124,3 +124,39 @@ def test_glossary_terms_all_cases():
     _masked("письмо в Минфин", "Минфин")
     _masked("согласовано с Мингосом", "Мингосом")
     _masked("решение Правительства", "Правительства")
+
+
+# --- Аудит по «Реестру типов данных» чек-листа: ранее пропускавшиеся типы ----
+
+def test_zagranpassport():
+    _masked("загранпаспорт 71 1234567", "1234567")
+
+
+def test_dms_policy():
+    _masked("полис ДМС 7712345678901234", "7712345678901234")
+
+
+def test_internal_phone_extension():
+    _masked("тел. 100, доб. 1234", "доб. 1234")
+
+
+def test_postal_index():
+    _masked("индекс 664003, г. Иркутск", "664003")
+
+
+def test_telegram_handle_but_not_email():
+    _masked("пишите @ivan_petrov в телеграм", "@ivan_petrov")
+    # e-mail НЕ должен распадаться на @-хэндл — остаётся одним EMAIL
+    out = _A.anonymize("почта user@domain.ru").anonymized_text
+    assert "user@domain.ru" not in out and "@domain" not in out
+
+
+def test_card_solid_16_digits():
+    _masked("карта 4276380012345678", "4276380012345678")
+    # 20-значный счёт при этом не задет (маскируется как счёт, а не карта)
+    _masked("р/с 40702810900000012345", "40702810900000012345")
+
+
+def test_medical_icd_and_record():
+    _masked("основной диагноз J06.9", "J06.9")
+    _masked("история болезни № 12345", "12345")

@@ -138,7 +138,10 @@ IP_ADDRESS = RegexDetector(
 
 CREDIT_CARD = RegexDetector(
     "CREDIT_CARD",
-    r"(?<!\d)\d{4}(?:[ \t\-]+\d{4}){3}(?!\d)",
+    # 4+4+4+4 с разделителями ИЛИ 16 цифр подряд («4276380012345678»). Голые
+    # 16 цифр раньше утекали; 20-значные счета не задеваются (границы (?<!\d)/(?!\d)).
+    r"(?<!\d)\d{4}(?:[ \t\-]+\d{4}){3}(?!\d)"
+    r"|(?<!\d)\d{16}(?!\d)",
 )
 
 # RU phone. Deliberately NOT matching bare space-separated digit runs (those
@@ -684,9 +687,56 @@ CITY = RegexDetector(
     r"(?<![А-Яа-яЁёA-Za-z])(?:" + _CITY_KW + r")[ \t]*(?-i:[А-ЯЁ])[А-Яа-яё\-]+",
 )
 
+# --- Дополнительные типы ПДн (аудит по «Реестру типов данных» чек-листа) -----
+
+# Загранпаспорт: серия 2 цифры + номер 7 цифр, либо 9 цифр подряд (по ключу).
+ZAGRANPASSPORT = RegexDetector(
+    "PASSPORT",
+    r"(?:загранпаспорт\w*|заграничн\w*\s+паспорт\w*)" + _GAP + r"(\d{2}[ \t]?\d{7}|\d{9})(?!\d)",
+    group=1,
+)
+
+# Внутренний/добавочный телефон: «доб. 1234», «вн. 305».
+PHONE_EXT = RegexDetector(
+    "PHONE",
+    r"(?:доб\.?|вн\.?|внутр\w*)\s*[№:]?\s*(\d{2,5})(?!\d)",
+    group=1,
+)
+
+# Почтовый индекс: 6 цифр по ключевому слову (голые 6 цифр не трогаем).
+POSTAL = RegexDetector(
+    "POSTAL_CODE",
+    r"(?:почтов\w*\s+индекс|индекс)" + _GAP + r"(\d{6})(?!\d)",
+    group=1,
+)
+
+# Аккаунт-хэндл: «@ivan_petrov» (не путать с локальной частью email — перед @
+# не должно быть буквы/цифры). t.me/…-ссылки ловит URL-детектор.
+ACCOUNT = RegexDetector(
+    "ACCOUNT",
+    r"(?<![A-Za-z0-9@._/])@[A-Za-z][A-Za-z0-9_]{3,31}",
+)
+
+# Код диагноза МКБ-10: «J06.9», «I25.1» по ключевому слову (сам по себе формат
+# слишком общий, поэтому только рядом с «МКБ»/«диагноз»).
+MED_ICD = RegexDetector(
+    "MEDICAL",
+    r"(?:МКБ[-\s]?10|МКБ|диагноз\w*|код\s+диагноз\w*)" + _GAP + r"((?-i:[A-ZА-ЯЁ])\d{2}(?:\.\d{1,2})?)",
+    group=1,
+)
+
+# Номер истории болезни / мед. карты (по ключевому слову).
+MED_RECORD = RegexDetector(
+    "MEDICAL",
+    r"(?:истори\w*\s+болезн\w*|амбулаторн\w*\s+карт\w*|медицинск\w*\s+карт\w*|"
+    r"карт\w*\s+пациент\w*)" + _GAP + r"(" + _BLOB + r")",
+    group=1,
+)
+
 DEFAULT_DETECTORS: tuple[Detector, ...] = (
     EMAIL,
     URL,
+    ACCOUNT,
     CITY,
     IP_ADDRESS,
     CREDIT_CARD,
@@ -694,6 +744,7 @@ DEFAULT_DETECTORS: tuple[Detector, ...] = (
     SNILS_KW,
     SNILS_FMT,
     OMS_KW,
+    ZAGRANPASSPORT,
     SERIES_NUMBER,
     BIRTH_CERTIFICATE,
     BIRTH_CERTIFICATE_KW,
@@ -703,7 +754,11 @@ DEFAULT_DETECTORS: tuple[Detector, ...] = (
     MILITARY_SERIES,
     PERSON_INITIALS,
     PERSON_PATRONYMIC,
+    POSTAL,
+    MED_ICD,
+    MED_RECORD,
     PHONE,
+    PHONE_EXT,
 )
 
 # Higher weight wins when spans overlap. Specific document/contact types beat
@@ -715,6 +770,9 @@ DEFAULT_PRIORITY: dict[str, int] = {
     "EMAIL": 90,
     "URL": 90,
     "IP_ADDRESS": 90,
+    "ACCOUNT": 88,
+    "MEDICAL": 84,
+    "POSTAL_CODE": 52,
     "PASSPORT": 80,
     "SNILS": 80,
     "INN": 80,
