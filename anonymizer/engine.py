@@ -128,7 +128,14 @@ class Anonymizer:
                 and not is_stopword_entity(s.text, s.label)
                 and not is_noise_span(s.text, s.label)
                 and not is_generic_entity(s.text, s.label)
-                and not (s.label == "AMOUNT" and not is_money_amount(s.text))
+                # AMOUNT без денежного маркера отсекаем, КРОМЕ сумм, пойманных
+                # по ключевому слову («Цена: N», source="price_kw") — там слово
+                # уже доказывает денежный смысл, число валюты рядом не требует.
+                and not (
+                    s.label == "AMOUNT"
+                    and s.source != "price_kw"
+                    and not is_money_amount(s.text)
+                )
                 and not _overlaps_any(s, protected)
             )
 
