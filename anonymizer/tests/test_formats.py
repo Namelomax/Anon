@@ -107,6 +107,17 @@ def test_vin_plate_cadastre():
     _masked("кадастровый номер 77:01:0001001:1234", "77:01:0001001:1234")
 
 
+def test_order_number_with_inner_quote():
+    # Реальный пропуск из договора ГПХ: номер приказа с кавычкой-буквой внутри.
+    _masked("Приказом №21«А»-О от 20.01.2026", "№21«А»-О")
+
+
+def test_appendix_and_section_numbers_not_overmasked():
+    # Не должны попадать под номер договора/приказа.
+    out = _A.anonymize("Приложение № 1; п. № 5 настоящего раздела").anonymized_text
+    assert "№ 1" in out and "№ 5" in out
+
+
 # --- Глоссарий ------------------------------------------------------------
 
 def test_glossary_terms_all_cases():

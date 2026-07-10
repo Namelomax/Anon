@@ -305,8 +305,11 @@ MILITARY_SERIES = MilitarySeriesDetector()
 # missed by NER. Distinctive enough to flag directly.
 PERSON_INITIALS = RegexDetector(
     "PERSON",
-    r"[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.\s?[А-ЯЁ]\.(?!\w)"
-    r"|(?<!\w)[А-ЯЁ]\.\s?[А-ЯЁ]\.\s+[А-ЯЁ][а-яё]+",
+    # \s* (не \s?) между инициалами: в выровненном тексте договоров/отзывов
+    # между «Я.» и «М.» бывает несколько пробелов («Вайкус   Я.   М.») — прежний
+    # \s? ловил только один пробел, и такие ФИО утекали.
+    r"[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.(?!\w)"
+    r"|(?<!\w)[А-ЯЁ]\.\s*[А-ЯЁ]\.\s+[А-ЯЁ][а-яё]+",
     ignorecase=False,  # capitalization distinguishes a name from "т.д. Слово"
 )
 
@@ -422,6 +425,14 @@ CONTRACT_NUM = RegexDetector(
     "CONTRACT",
     r"№\s*\d{1,6}[/\-]\d{1,6}(?:[/\-]\d{1,6})?(?![\d/\-])"
     r"|№\s*\d{1,6}(?=\s*от\s+[«\"]?\d)",
+)
+
+# Номера приказов/актов с кавычкой-буквой ВНУТРИ: «№21«А»-О», «Приказ №5«Б»».
+# Внутренние « » не входят в символьный класс CONTRACT, поэтому номер рвался и
+# «21«А»-О» утекал (реальный пропуск из договора ГПХ). Ловим отдельным паттерном.
+CONTRACT_QUOTED = RegexDetector(
+    "CONTRACT",
+    r"№\s*\d{1,6}\s*[«\"][А-ЯЁA-Za-z]{1,3}[»\"](?:\s*[-/]\s*[А-ЯЁA-Za-z0-9]+)?",
 )
 
 _MONTH = r"(?:январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)[а-я]*"
@@ -651,8 +662,8 @@ FILE = RegexDetector(
 # заказчика — «нигде не убрал цены»), а денежные форматы детерминированы;
 # ложные срабатывания дополнительно режет is_money_amount в engine.
 CORPORATE_DETECTORS: tuple[Detector, ...] = (
-    CONTRACT, CONTRACT_NUM, DATE, DATE_RANGE, ORG_LEGAL, FILE, AMOUNT, PRICE_KW,
-    *REQUISITES_DETECTORS, *ADMIN_CODE_DETECTORS,
+    CONTRACT, CONTRACT_NUM, CONTRACT_QUOTED, DATE, DATE_RANGE, ORG_LEGAL, FILE,
+    AMOUNT, PRICE_KW, *REQUISITES_DETECTORS, *ADMIN_CODE_DETECTORS,
 )
 
 
