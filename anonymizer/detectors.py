@@ -1122,7 +1122,12 @@ def propagate_entity_aliases(text: str, spans: list[Span]) -> list[Span]:
                 p for p in re.split(r"[\s,.]+", s.text)
                 if len(p) >= 3 and p[0].isupper() and not p.endswith(".")
             ]
-            if len(parts) >= 2:  # только у многословных ФИО есть что выделять
+            if len(parts) >= 2:  # многословное ФИО — выделяем все части
+                aliases = parts
+            elif len(parts) == 1 and re.search(r"[А-ЯЁA-Z]\.", s.text):
+                # «Фамилия И.О.» / «И.О. Фамилия» — выделяем фамилию, чтобы её
+                # одиночное повторение («директор Денисов А.А. (Денисов)») не
+                # утекало голым словом в другом месте документа.
                 aliases = parts
         elif s.label == "ORG":
             m = re.search(r"[«\"]([^»\"\n]{3,60})[»\"]", s.text)
