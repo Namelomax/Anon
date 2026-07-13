@@ -160,3 +160,21 @@ def test_card_solid_16_digits():
 def test_medical_icd_and_record():
     _masked("основной диагноз J06.9", "J06.9")
     _masked("история болезни № 12345", "12345")
+
+
+def test_surname_after_patronymic_and_status_word():
+    # Порядок «Имя Отчество Фамилия» + статусное слово: фамилия не должна утекать,
+    # а «Самозанятый» не должно попасть в имя.
+    out = _A.anonymize(
+        "и Самозанятый Андрей Петрович Смирнов, именуемый «Исполнитель»"
+    ).anonymized_text
+    assert "Смирнов" not in out and "Андрей" not in out
+    assert "Самозанятый" in out  # статусное слово остаётся в тексте
+
+
+def test_section_number_not_treated_as_amount():
+    # «п. 3.1» — ссылка на пункт, не сумма (регрессия PRICE_KW).
+    out = _A.anonymize("Сумму, указанную в п. 3.1 настоящего Договора").anonymized_text
+    assert "3.1" in out
+    # но реальная цена рядом с тем же словом — маскируется
+    _masked("Цена договора: 175 000 рублей", "175 000")
