@@ -747,7 +747,15 @@ MED_RECORD = RegexDetector(
     group=1,
 )
 
+# Табельный / личный номер сотрудника (кадровый идентификатор, по ключу).
+STAFF_ID = RegexDetector(
+    "STAFF_ID",
+    r"(?:табельн\w*\s+номер\w*|личн\w*\s+номер\w*|таб\.?\s*№)" + _GAP + r"(" + _BLOB + r")",
+    group=1,
+)
+
 DEFAULT_DETECTORS: tuple[Detector, ...] = (
+    STAFF_ID,
     EMAIL,
     URL,
     ACCOUNT,
@@ -786,6 +794,7 @@ DEFAULT_PRIORITY: dict[str, int] = {
     "IP_ADDRESS": 90,
     "ACCOUNT": 88,
     "MEDICAL": 84,
+    "STAFF_ID": 78,
     "POSTAL_CODE": 52,
     "PASSPORT": 80,
     "SNILS": 80,

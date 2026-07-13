@@ -551,6 +551,14 @@ def _group_candidates(
     for span in spans:
         if span.label not in _REVIEWABLE_LABELS:
             continue
+        # Детерминированные regex-детекторы имён/организаций/локаций
+        # высокоточны (ФИО с инициалами/отчеством, ORG с правовой формой,
+        # «г. Город») — НЕ отдаём их LLM-ревью, иначе модель иногда ошибочно
+        # снимает реальное ПДн (напр. подпись «Соколова М. В.» утекала, т.к.
+        # ревьюер вернул её как «не ПДн»). ADMIN_CODE — исключение: его формат
+        # сам по себе не доказывает чувствительность, поэтому его ревьюим.
+        if span.source == "regex" and span.label != "ADMIN_CODE":
+            continue
         key = _key_of(span)
         if key not in by_key:
             by_key[key] = []
