@@ -230,12 +230,78 @@ def _read_xls_bytes(data: bytes) -> str:
     return "\n".join(lines)
 
 
-def _read_doc_bytes(data: bytes) -> str:
-    """Старый Word 97-2003 (.doc): извлекаем текст системной утилитой.
+def _read_doc_olefile(data: bytes) -> str:
+    """Чистый Python-извлекатель текста из бинарного .doc (Word 97-2003).
 
-    Чистого-python парсера для бинарного .doc нет, поэтому пробуем по очереди
-    antiword → catdoc → LibreOffice (что установлено на сервере). Если ничего
-    нет — понятная ошибка с подсказкой, а не бинарный мусор.
+    Разбираем OLE-контейнер: FIB → таблица кусков (piece table, Clx) в потоке
+    0Table/1Table → куски текста в WordDocument (cp1251 для 8-бит или UTF-16LE).
+    Работает БЕЗ системных утилит — нужен только пакет ``olefile``. По сути это
+    «нативная конвертация .doc → текст» на сервере.
+    """
+    import io
+    import struct
+
+    import olefile
+
+    ole = olefile.OleFileIO(io.BytesIO(data))
+    try:
+        wd = ole.openstream("WordDocument").read()
+        flags = struct.unpack_from("<H", wd, 0x0A)[0]
+        table_name = "1Table" if (flags & 0x0200) else "0Table"
+        if not ole.exists(table_name):
+            table_name = "0Table" if table_name == "1Table" else "1Table"
+        fc_clx = struct.unpack_from("<i", wd, 0x1A2)[0]
+        lcb_clx = struct.unpack_from("<i", wd, 0x1A6)[0]
+        clx = ole.openstream(table_name).read()[fc_clx:fc_clx + lcb_clx]
+    finally:
+        ole.close()
+
+    # Найти Pcdt (маркер 0x02) в Clx, пропустив Prc-блоки (0x01 + 2-байт длина).
+    i, plc = 0, None
+    while i < len(clx):
+        if clx[i] == 0x01:
+            cb = struct.unpack_from("<H", clx, i + 1)[0]
+            i += 3 + cb
+        elif clx[i] == 0x02:
+            lcb = struct.unpack_from("<I", clx, i + 1)[0]
+            plc = clx[i + 5:i + 5 + lcb]
+            break
+        else:
+            break
+    if not plc:
+        raise ValueError("piece table (.doc) не найдена")
+
+    n = (len(plc) - 4) // 12
+    cps = [struct.unpack_from("<I", plc, k * 4)[0] for k in range(n + 1)]
+    parts: list[str] = []
+    for k in range(n):
+        fc = struct.unpack_from("<I", plc, (n + 1) * 4 + k * 8 + 2)[0]
+        count = cps[k + 1] - cps[k]
+        if fc & 0x40000000:  # 8-битная кодировка (cp1251 для русских документов)
+            base = (fc & 0x3FFFFFFF) // 2
+            parts.append(wd[base:base + count].decode("cp1251", "replace"))
+        else:  # UTF-16LE
+            base = fc & 0x3FFFFFFF
+            parts.append(wd[base:base + count * 2].decode("utf-16-le", "replace"))
+
+    text = "".join(parts)
+    # Спецсимволы Word → обычный текст. ВАЖНО: карту применяем ПЕРВОЙ (через
+    # _map.get с fallback), иначе управляющие символы (0x0D — конец абзаца!)
+    # отсекаются условием >=0x20 раньше, чем превратятся в '\n', слова слипаются
+    # («года»+«г.» → «годаг»), и маскирование по границам слова ломается.
+    _map = {0x0D: "\n", 0x07: "\n", 0x0B: "\n", 0x0C: "\n", 0x1E: "-", 0xA0: " "}
+    return "".join(
+        _map.get(ord(c), c if (ord(c) >= 0x20 or c in "\n\t") else "") for c in text
+    )
+
+
+def _read_doc_bytes(data: bytes) -> str:
+    """Старый Word 97-2003 (.doc) → текст.
+
+    Сначала системная утилита, если она есть (лучшая точность): antiword →
+    catdoc → LibreOffice. Если их нет (типичный JupyterHub без root) — чистый
+    Python-разбор через ``_read_doc_olefile`` (пакет olefile), т.е. .doc
+    обрабатывается автоматически без установки системных пакетов.
     """
     import os
     import shutil
@@ -265,16 +331,13 @@ def _read_doc_bytes(data: bytes) -> str:
                 if f.endswith(".txt"):
                     with open(os.path.join(outdir, f), encoding="utf-8", errors="replace") as fh:
                         return fh.read()
-        raise ValueError(
-            "Не удалось прочитать .doc: на сервере нет antiword / catdoc / "
-            "LibreOffice. Проще всего пересохранить файл как .docx "
-            "(Word/LibreOffice → «Сохранить как → .docx») и загрузить заново."
-        )
     finally:
         try:
             os.unlink(path)
         except OSError:
             pass
+    # Системных утилит нет — резервный чистый-Python разбор .doc.
+    return _read_doc_olefile(data)
 
 
 def read_text_from_bytes(name: str, data: bytes) -> str:
