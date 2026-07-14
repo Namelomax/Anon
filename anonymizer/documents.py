@@ -266,8 +266,9 @@ def _read_doc_bytes(data: bytes) -> str:
                     with open(os.path.join(outdir, f), encoding="utf-8", errors="replace") as fh:
                         return fh.read()
         raise ValueError(
-            "Формат .doc требует antiword / catdoc / LibreOffice на сервере "
-            "(напр. `apt-get install antiword`) — либо сохраните файл как .docx."
+            "Не удалось прочитать .doc: на сервере нет antiword / catdoc / "
+            "LibreOffice. Проще всего пересохранить файл как .docx "
+            "(Word/LibreOffice → «Сохранить как → .docx») и загрузить заново."
         )
     finally:
         try:
