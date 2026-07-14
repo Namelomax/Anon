@@ -108,8 +108,8 @@ export default function Home() {
 
   const onPick = (f: File | null | undefined) => {
     if (!f) return;
-    if (!/\.(docx|pdf|xlsx|xlsm|xml|rtf|odt|txt|csv|md)$/i.test(f.name)) {
-      setError("Поддерживаются .docx, .pdf, .xlsx, .xml, .rtf, .odt, .txt (кроме презентаций)");
+    if (!/\.(docx?|pdf|xlsx?|xlsm|xml|rtf|odt|txt|csv|md)$/i.test(f.name)) {
+      setError("Поддерживаются .docx, .doc, .pdf, .xlsx, .xls, .xml, .rtf, .odt, .txt (кроме презентаций)");
       return;
     }
     setError(null);
@@ -317,13 +317,13 @@ export default function Home() {
               }}
             >
               <strong>Перетащите файл сюда</strong> или нажмите, чтобы выбрать
-              <div className="note">.docx, .pdf, .xlsx, .xml, .rtf, .odt, .txt (кроме презентаций)</div>
+              <div className="note">.docx, .doc, .pdf, .xlsx, .xls, .xml, .rtf, .odt, .txt (кроме презентаций)</div>
               {file && <div className="file-name">📄 {file.name}</div>}
             </div>
             <input
               ref={inputRef}
               type="file"
-              accept=".docx,.pdf,.xlsx,.xlsm,.xml,.rtf,.odt,.txt,.csv,.md"
+              accept=".docx,.doc,.pdf,.xlsx,.xls,.xlsm,.xml,.rtf,.odt,.txt,.csv,.md"
               style={{ display: "none" }}
               onChange={(e) => onPick(e.target.files?.[0])}
             />
