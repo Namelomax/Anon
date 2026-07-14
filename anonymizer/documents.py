@@ -213,10 +213,73 @@ def _read_rtf_bytes(data: bytes) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+def _read_xls_bytes(data: bytes) -> str:
+    """Старый Excel 97-2003 (.xls) через xlrd (openpyxl читает только .xlsx).
+
+    xlrd 2.x поддерживает именно .xls; ставится `pip install xlrd`.
+    """
+    import xlrd
+
+    book = xlrd.open_workbook(file_contents=data)
+    lines: list[str] = []
+    for sh in book.sheets():
+        for r in range(sh.nrows):
+            cells = [str(c.value).strip() for c in sh.row(r) if str(c.value).strip()]
+            if cells:
+                lines.append("\t".join(cells))
+    return "\n".join(lines)
+
+
+def _read_doc_bytes(data: bytes) -> str:
+    """Старый Word 97-2003 (.doc): извлекаем текст системной утилитой.
+
+    Чистого-python парсера для бинарного .doc нет, поэтому пробуем по очереди
+    antiword → catdoc → LibreOffice (что установлено на сервере). Если ничего
+    нет — понятная ошибка с подсказкой, а не бинарный мусор.
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".doc", delete=False) as tf:
+        tf.write(data)
+        path = tf.name
+    try:
+        if shutil.which("antiword"):
+            r = subprocess.run(["antiword", path], capture_output=True, timeout=60)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.decode("utf-8", "replace")
+        if shutil.which("catdoc"):
+            r = subprocess.run(["catdoc", "-d", "utf-8", path], capture_output=True, timeout=60)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.decode("utf-8", "replace")
+        soffice = shutil.which("soffice") or shutil.which("libreoffice")
+        if soffice:
+            outdir = tempfile.mkdtemp()
+            subprocess.run(
+                [soffice, "--headless", "--convert-to", "txt:Text", "--outdir", outdir, path],
+                capture_output=True, timeout=120,
+            )
+            for f in os.listdir(outdir):
+                if f.endswith(".txt"):
+                    with open(os.path.join(outdir, f), encoding="utf-8", errors="replace") as fh:
+                        return fh.read()
+        raise ValueError(
+            "Формат .doc требует antiword / catdoc / LibreOffice на сервере "
+            "(напр. `apt-get install antiword`) — либо сохраните файл как .docx."
+        )
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def read_text_from_bytes(name: str, data: bytes) -> str:
     """Extract plain text from in-memory document bytes (no temp file).
 
-    Supported: .docx .pdf .xlsx/.xlsm .xml .rtf .odt and plain text (.txt/.csv/…).
+    Supported: .docx .doc .pdf .xlsx/.xlsm .xls .xml .rtf .odt and plain text.
     Presentations (.pptx/.ppt) are rejected. Unknown extensions fall back to a
     best-effort text decode so nothing silently returns empty.
     """
@@ -225,10 +288,14 @@ def read_text_from_bytes(name: str, data: bytes) -> str:
         raise ValueError(f"Формат {ext} не поддерживается (презентации исключены).")
     if ext == ".docx":
         return _read_docx_bytes(data)
+    if ext == ".doc":
+        return _read_doc_bytes(data)
     if ext == ".pdf":
         return _read_pdf_bytes(data)
     if ext in (".xlsx", ".xlsm"):
         return _read_xlsx_bytes(data)
+    if ext == ".xls":
+        return _read_xls_bytes(data)
     if ext == ".xml":
         return _read_xml_bytes(data)
     if ext == ".odt":
