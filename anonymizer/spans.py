@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -84,3 +84,56 @@ def resolve_overlaps(
 
 def _overlaps(a: Span, b: Span) -> bool:
     return a.start < b.end and b.start < a.end
+
+
+def rebalance_quotes(text: str, span: Span) -> Span:
+    """Выравнивает непарные «ёлочки» на границах спана.
+
+    Детекторы/трим режут кавычки посимвольно и не знают о парности: DATE-регэксп
+    захватывал «12» сентября…, а `_trim` срезал ведущую «, оставляя внутри спана
+    непарную » (в тексте оставалась сирота-«). Аналогично NER возвращал
+    «Технопарка «Сколково» без закрывающей ».
+
+    Правило: если внутри спана есть непарная кавычка, а её пара стоит ВПЛОТНУЮ
+    к границе снаружи — расширяем спан на неё; если пары рядом нет, а непарная
+    кавычка стоит на краю спана — выталкиваем её из спана. Непарную кавычку в
+    СЕРЕДИНЕ спана без пары рядом не трогаем (не наша ошибка — так в тексте).
+    Прямые кавычки (") не обрабатываются: открывающая и закрывающая неотличимы.
+    """
+    start, end = rebalance_bounds(text, span.start, span.end)
+    if (start, end) == (span.start, span.end) or end <= start:
+        return span
+    return replace(span, start=start, end=end, text=text[start:end])
+
+
+# Пары, чью парность выравниваем. Прямые кавычки (") не входят: открывающая
+# и закрывающая неотличимы.
+_BALANCED_PAIRS = (("«", "»"), ("(", ")"))
+
+
+def rebalance_bounds(text: str, start: int, end: int) -> tuple[int, int]:
+    """Границы спана после выравнивания непарных «ёлочек» и скобок.
+
+    Используется и движком (NER/LLM-спаны), и RegexDetector после `_trim`
+    (трим срезал ведущую « у «12» сентября… и хвостовую ) у «Альфа-Банк (АО)»).
+    """
+    for opener, closer in _BALANCED_PAIRS:
+        while True:
+            opens = text.count(opener, start, end)
+            closes = text.count(closer, start, end)
+            # Пара стоит снаружи вплотную к границе — забираем её в спан.
+            if closes > opens and start > 0 and text[start - 1] == opener:
+                start -= 1
+                continue
+            if opens > closes and end < len(text) and text[end] == closer:
+                end += 1
+                continue
+            # Пары рядом нет — выталкиваем непарный КРАЕВОЙ символ из спана.
+            if closes > opens and end > start and text[end - 1] == closer:
+                end -= 1
+                continue
+            if opens > closes and start < end and text[start] == opener:
+                start += 1
+                continue
+            break
+    return start, end

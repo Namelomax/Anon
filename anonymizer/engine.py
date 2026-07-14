@@ -34,7 +34,7 @@ from .detectors import _SOFT_LABELS
 _TITLE_FILTER_LABELS = _SOFT_LABELS
 from .canonicalize import canonicalize_entities
 from .mapping import Mapping, assign_placeholders, find_placeholder_spans
-from .spans import Span, resolve_overlaps
+from .spans import Span, rebalance_quotes, resolve_overlaps
 
 
 @dataclass(frozen=True)
@@ -140,6 +140,9 @@ class Anonymizer:
             )
 
         raw = run_detectors(text, self._detectors)
+        # Выравниваем непарные «ёлочки» ДО фильтров: обрезанная тримом кавычка
+        # («12» сентября…, Технопарка «Сколково) оставляла в тексте сироту-«/».
+        raw = [rebalance_quotes(text, s) for s in raw]
         raw = [s for s in raw if passes_filters(s)]
         spans = resolve_overlaps(raw, priority=self._priority)
         # Производные упоминания: голые части многословных ФИО («Никита» при
@@ -151,9 +154,12 @@ class Anonymizer:
             if aliases:
                 spans = resolve_overlaps(spans + aliases, priority=self._priority)
         # Mask declined case-forms of detected entities (e.g. "Лентой" given "Лента").
+        # ОБЯЗАТЕЛЬНО через passes_filters: раньше morph-спаны шли в обход всех
+        # фильтров — один плохой seed («Заказчика» от NER) размножался по
+        # документу немаскируемым фильтрами «Заказчик»/«Заказчику».
         extra = propagate_declensions(text, spans)
         if extra:
-            extra = [e for e in extra if not _overlaps_any(e, protected)]
+            extra = [e for e in extra if passes_filters(e)]
             spans = resolve_overlaps(spans + extra, priority=self._priority)
         # Leak check (see __init__): re-scan the interim-anonymized text with
         # the second-pass detectors; anything still readable there is a miss.
@@ -161,6 +167,7 @@ class Anonymizer:
         # merged with existing ones) in the same review call.
         if self._second_pass_detectors:
             leaked = self._find_leaked_spans(text, spans, protected)
+            leaked = [rebalance_quotes(text, s) for s in leaked]
             leaked = [s for s in leaked if passes_filters(s)]
             if leaked:
                 spans = resolve_overlaps(spans + leaked, priority=self._priority)
@@ -178,6 +185,7 @@ class Anonymizer:
             from .review import recall_spans
 
             recalled = recall_spans(text, spans, self._review_config)
+            recalled = [rebalance_quotes(text, s) for s in recalled]
             recalled = [
                 s for s in recalled
                 if passes_filters(s) and not _overlaps_any(s, protected)
@@ -191,6 +199,11 @@ class Anonymizer:
 
         if self._mask_all and mapping:
             anonymized, spans = _apply_all_occurrences(text, spans, span_placeholders)
+            # Плейсхолдер мог не попасть в итоговый текст (его поверхность
+            # перекрыта более длинной или дубль другой сущности, как
+            # «КиберКубок 2025» рядом с «КиберКубок 2025» в кавычках) —
+            # мёртвые строки из маппинга убираем, чтобы не путать пользователя.
+            mapping = {ph: v for ph, v in mapping.items() if ph in anonymized}
         else:
             anonymized = _apply(text, spans, span_placeholders)
 

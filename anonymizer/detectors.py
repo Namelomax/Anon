@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from typing import Iterable, Protocol
 
-from .spans import Span
+from .spans import Span, rebalance_bounds
 
 
 class Detector(Protocol):
@@ -70,6 +70,10 @@ class RegexDetector:
             if start < 0:  # group did not participate in the match
                 continue
             start, end = _trim(text, start, end, self._strip)
+            # Трим посимвольный и не знает о парности: срезал ведущую « у
+            # «12» сентября…» и хвостовую ) у «Альфа-Банк (АО)», оставляя в
+            # тексте/спане непарные символы. Выравниваем границы по парам.
+            start, end = rebalance_bounds(text, start, end)
             if end <= start:
                 continue
             spans.append(Span(start, end, self.label, text[start:end], source=self._source))
@@ -464,6 +468,8 @@ DATE = RegexDetector(
     "DATE",
     # «12» июня 2026 года / 12 апреля 2026 г. / 1 апреля.
     # День может быть в кавычках («12», "31") — кавычки опциональны и входят в спан.
+    # strip НЕ содержит точку и кавычки: дефолтный трим срезал «.» из «г.» и
+    # ведущую « у дня в кавычках («12» сентября → 12» сентября, сирота-« в тексте).
     r"(?<!\d)[«\"]?\d{1,2}[»\"]?\s+" + _MONTH + r"(?:\s+\d{4})?" + _YR_TAIL
     + r"|" + _MONTH + r"\s+\d{4}" + _YR_TAIL                          # июнь 2026 (года)
     # 12.03.2015, в т.ч. с приклеенным «г.» без пробела и с полным словом «года».
@@ -476,6 +482,7 @@ DATE = RegexDetector(
     + r"|" + r"(?<![\d.])(?:0[1-9]|1[0-2])\.\d{4}(?![\d.])"
     # Квартал: «1 квартал 2025», «IV кв. 2025 г.».
     + r"|" + r"(?:[1-4]|I{1,3}|IV)\s*(?:квартал\w*|кв\.)\s*\d{4}" + _YR_TAIL,
+    strip=" \t,;:!?)(=|/\\_-",
 )
 
 # День.месяц БЕЗ года в диапазоне: «с 01.09 по 30.09». Голый «\d\.\d» слишком
@@ -904,6 +911,29 @@ _GENERIC_WORDS = frozenset({
 
 _WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё]+")
 
+# Слова-роли сторон договора («Заказчик», «Исполнителя», «Подрядчику»…) — НЕ ПДн
+# ни в каком падеже и ни под какой soft-меткой. Проверяем по ОСНОВЕ (startswith):
+# exact-список в именительном падеже пропускал косвенные формы — «Исполнителя»
+# уходил в [PERSON_N], а «Исполнитель» рядом оставался открытым; такая
+# непоследовательная маскировка хуже, чем ни одной.
+_CONTRACT_ROLE_STEMS = (
+    "заказчик", "исполнител", "подрядчик", "субподрядчик", "сторон",
+    "покупател", "поставщик", "продавц", "продавец", "арендатор",
+    "арендодател", "лицензиат", "лицензиар", "страховател", "страховщик",
+    "займодавц", "займодавец", "заимодавц", "заемщик", "заёмщик", "кредитор",
+    "должник", "принципал", "комитент", "комиссионер", "поверенн", "доверител",
+    "получател", "плательщик", "грузоотправител", "грузополучател",
+    "работодател", "работник", "правообладател",
+)
+
+
+def is_contract_role(text: str) -> bool:
+    """True, если значение состоит ТОЛЬКО из слов-ролей договора (любой падеж)."""
+    toks = _WORD_RE.findall(text.lower())
+    return bool(toks) and all(
+        any(t.startswith(st) for st in _CONTRACT_ROLE_STEMS) for t in toks
+    )
+
 
 # Software / methodology terms to preserve (per anonymizer.skill): product names
 # and standard abbreviations carry meaning and are not personal/commercial data.
@@ -964,12 +994,26 @@ _ENTITY_STOPWORDS = frozenset({
 })
 
 
+# Слова-метки реквизитов. GLiNER/LLM иногда маскируют САМО ключевое слово
+# («КПП» → [LOCATION_N]: модель читает его как контрольно-пропускной пункт,
+# «ОГРН» → LOCATION), хотя значение рядом уже поймано KPP/OGRN-детекторами.
+# Метка поля — не ПДн и должна оставаться в тексте.
+_REQUISITE_LABEL_WORDS = frozenset({
+    "инн", "кпп", "огрн", "огрнип", "бик", "окпо", "октмо", "окато", "оквэд",
+    "снилс", "омс", "р/с", "к/с", "л/с", "расчётный счёт", "расчетный счёт",
+    "расчетный счет", "корр. счёт", "корр. счет", "юридический адрес",
+    "реквизиты", "реквизиты банка",
+})
+
+
 def is_stopword_entity(text: str, label: str) -> bool:
     """True if a soft (NER/LLM) span is a pronoun/function word, not real PII."""
     if label not in _SOFT_LABELS:
         return False
     low = " ".join(text.split()).casefold()  # collapse nbsp/spaces
     if len(low) <= 1:
+        return True
+    if low in _REQUISITE_LABEL_WORDS:
         return True
     return low in _ENTITY_STOPWORDS
 
@@ -1104,6 +1148,10 @@ def is_noise_span(text: str, label: str) -> bool:
         # договора иначе проскакивал мимо списка и маскировался как PERSON.
         if len(toks) == 1 and toks[0] in _COMMON_NOUN_EXACT:
             return True
+        # Роли сторон договора в ЛЮБОМ падеже («Исполнителя», «Заказчику») —
+        # exact-список выше ловил только именительный, косвенные формы утекали.
+        if is_contract_role(s):
+            return True
         return False
 
     if label in (
@@ -1113,6 +1161,8 @@ def is_noise_span(text: str, label: str) -> bool:
         if _SPEAKER_RE.match(s):
             return True
         if low in _COMMON_NOUN_EXACT:
+            return True
+        if is_contract_role(s):
             return True
         if toks and all(_is_noise_token(t) for t in toks):
             return True

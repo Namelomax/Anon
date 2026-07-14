@@ -45,11 +45,17 @@ _SUFFIXES_DESC = tuple(sorted(_DECL_SUFFIXES, key=len, reverse=True))
 _MIN_STEM = 3
 
 
+# Кавычки/пунктуация на краях слов НЕ должны влиять на ключ: «КиберКубок 2025»
+# и КиберКубок 2025 — одна сущность, а раньше токен «киберкубок (с кавычкой)
+# давал другой ключ и сущность дробилась на два плейсхолдера.
+_EDGE_PUNCT = "«»\"'“”‘’.,;:!?()[]{}<>—–-№"
+
+
 def _word_stem(word: str) -> str:
     """Основа слова: снимаем известное падежное окончание, если после него
     остаётся >= 3 символа; иначе оставляем слово как есть. Так «форуса» -> «форус»
     и «форус» -> «форус» (основа на согласную не режется), «телеграме» -> «телеграм»."""
-    w = word.casefold()
+    w = word.casefold().strip(_EDGE_PUNCT)
     for suf in _SUFFIXES_DESC:
         if w.endswith(suf) and len(w) - len(suf) >= _MIN_STEM:
             return w[: -len(suf)]
@@ -57,8 +63,9 @@ def _word_stem(word: str) -> str:
 
 
 def group_key(text: str) -> str:
-    """Ключ группировки: основы всех слов через пробел (регистр не важен)."""
-    return " ".join(_word_stem(w) for w in text.split() if w)
+    """Ключ группировки: основы всех слов через пробел (регистр, кавычки и
+    краевая пунктуация не важны)."""
+    return " ".join(stem for w in text.split() if (stem := _word_stem(w)))
 
 
 def canonicalize_entities(spans: list[Span]) -> list[Span]:
