@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
@@ -107,6 +108,15 @@ _REVIEW_SYSTEM_PROMPT = (
     "ЛЮБОЕ настоящее имя, фамилия или обращение к человеку (даже краткое, "
     "уменьшительное или без фамилии — «Катя», «Рома», «Никита») — это keep=true, "
     "НИКОГДА не keep=false.\n"
+    "Для типа PERSON снимать маску (keep=false) можно ТОЛЬКО с обычных слов "
+    "русского языка, ошибочно помеченных как имя (день недели, приветствие, "
+    "роль «Спикер»/«Участник», обращение «Коллеги»/«Друзья», местоимение, "
+    "обычное существительное), либо с названий продуктов/ПО. Если слово "
+    "РЕДКОЕ, иностранное или незнакомое («Вайгус», «Смит», необычная фамилия "
+    "или позывной) — это ПДн, keep=true ВСЕГДА: незнакомость слова — признак "
+    "имени, а не ошибки. Если с этим значением здороваются, к нему обращаются "
+    "или оно стоит в перечислении рядом с другим именем (капитан, "
+    "представитель, участник команды) — это точно человек, keep=true.\n"
     "Настоящие ОРГАНИЗАЦИИ, компании, учреждения, вузы, институты, банки, "
     "госорганы, наименования сторон договора (в т.ч. длинные официальные, "
     "например «Федеральное государственное … университет», «ООО Ромашка», "
@@ -315,6 +325,25 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
             file=sys.stderr,
         )
 
+    # Детерминированная страховка: ревью НЕ имеет права снимать маску с
+    # PERSON-кандидата, чей спан стоит ВПЛОТНУЮ (пробел/запятая/тире, ≤3
+    # символов) к другому, сохранённому PERSON-спану. Такое соседство — это
+    # перечисление имён одного ряда («Капитан Яков, Вайгус» = фамилия и
+    # позывной): редкое/иностранное слово рядом с подтверждённым именем — само
+    # имя, а не мусор. Подтверждено на реальном PDF: 9B-ревьюер в батче из ~90
+    # кандидатов вернул keep=false для «Вайгус» при keep=true для соседнего
+    # «Капитан Яков» — вопреки контексту и примеру в собственном промпте.
+    _restored = _restore_adjacent_persons(text, spans, candidates, keep)
+    if _restored:
+        import sys
+
+        print(
+            f"[review] adjacency guard restored {len(_restored)} PERSON "
+            f"candidate(s) the model tried to unmask next to a kept name: "
+            + ", ".join(sorted(_restored)),
+            file=sys.stderr,
+        )
+
     def find_root(k: str) -> str:
         seen: set[str] = set()
         while parent[k] != k:
@@ -370,6 +399,55 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
             s = replace(s, merge_key=merge_key_for[key], canonical_text=canonical_for[key])
         out.append(s)
     return out
+
+
+# Зазор между соседними именами: пусто, пробелы, запятая, точка, тире —
+# но не больше 3 символов (иначе это уже не перечисление, а разные фразы).
+_ADJ_GAP_RE = re.compile(r"^[\s,.;:—–\-]{0,3}$")
+
+
+def _restore_adjacent_persons(
+    text: str,
+    spans: list[Span],
+    candidates: dict[str, "_Candidate"],
+    keep: dict[str, bool],
+) -> set[str]:
+    """Отменить keep=false для PERSON-кандидатов, примыкающих к сохранённым.
+
+    Возвращает множество восстановленных значений (для лога). Однопроходно:
+    восстанавливаем только от соседей, которых ревью само оставило (или не
+    рассматривало) — если модель отбросила ОБА имени пары, они не «спасают»
+    друг друга (обе могли быть настоящим мусором, например «Так-так, Ну-ну»).
+    """
+    person_spans = [s for s in spans if s.label == "PERSON"]
+    dropped_keys = {
+        k for k, kept_flag in keep.items()
+        if not kept_flag and k in candidates and candidates[k].label == "PERSON"
+    }
+    if not dropped_keys:
+        return set()
+
+    kept_ranges = [
+        (s.start, s.end) for s in person_spans
+        if keep.get(_key_of(s), True)  # свои спаны с keep=true ИЛИ вне ревью
+    ]
+    restored: set[str] = set()
+    for key in dropped_keys:
+        for s in person_spans:
+            if keep[key]:
+                break
+            if _key_of(s) != key:
+                continue
+            for a, b in kept_ranges:
+                if s.start >= b and _ADJ_GAP_RE.match(text[b:s.start]):
+                    keep[key] = True
+                    restored.add(candidates[key].text)
+                    break
+                if s.end <= a and _ADJ_GAP_RE.match(text[s.end:a]):
+                    keep[key] = True
+                    restored.add(candidates[key].text)
+                    break
+    return restored
 
 
 # --- Recall-проход: добор пропущенного через LLM -----------------------------
