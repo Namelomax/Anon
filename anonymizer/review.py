@@ -325,24 +325,43 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
             file=sys.stderr,
         )
 
-    # Детерминированная страховка: ревью НЕ имеет права снимать маску с
-    # PERSON-кандидата, чей спан стоит ВПЛОТНУЮ (пробел/запятая/тире, ≤3
-    # символов) к другому, сохранённому PERSON-спану. Такое соседство — это
-    # перечисление имён одного ряда («Капитан Яков, Вайгус» = фамилия и
-    # позывной): редкое/иностранное слово рядом с подтверждённым именем — само
-    # имя, а не мусор. Подтверждено на реальном PDF: 9B-ревьюер в батче из ~90
-    # кандидатов вернул keep=false для «Вайгус» при keep=true для соседнего
-    # «Капитан Яков» — вопреки контексту и примеру в собственном промпте.
-    _restored = _restore_adjacent_persons(text, spans, candidates, keep)
-    if _restored:
+    # Страховка соседства: PERSON-кандидат, которого ревью сняло, но чей спан
+    # стоит ВПЛОТНУЮ (пробел/запятая/тире, ≤3 символов) к сохранённому
+    # PERSON-спану — подозрителен: такое соседство бывает и перечислением имён
+    # («Капитан Яков, Вайгус» = фамилия и позывной; 9B-ревьюер в батче из ~90
+    # кандидатов снимал «Вайгус» вопреки контексту), и ролью, приклеенной к
+    # имени («Самозанятый Андрей Смирнов» — роль корректно снята). Слепо
+    # доверять нельзя ни большому батчу, ни жёсткому правилу, поэтому спорные
+    # случаи ЭСКАЛИРУЮТСЯ отдельным сфокусированным LLM-запросом: маленький
+    # батч + прицельный вопрос «роль или имя?» — на нём модель стабильна.
+    # Fail-safe: любой сбой/непарсируемый ответ → маска остаётся (безопасно).
+    _suspects = _adjacent_dropped_persons(text, spans, candidates, keep)
+    if _suspects:
+        try:
+            _decisions = _ask_adjacent(_suspects, cfg)
+        except Exception:
+            _decisions = {}
+        _restored, _confirmed = [], []
+        for key, _cand_text, _ctx in _suspects:
+            if _decisions.get(key, True):  # нет вердикта = маскируем
+                keep[key] = True
+                _restored.append(candidates[key].text)
+            else:
+                _confirmed.append(candidates[key].text)
         import sys
 
-        print(
-            f"[review] adjacency guard restored {len(_restored)} PERSON "
-            f"candidate(s) the model tried to unmask next to a kept name: "
-            + ", ".join(sorted(_restored)),
-            file=sys.stderr,
-        )
+        if _restored:
+            print(
+                "[review] adjacency re-check kept masked (name/callsign): "
+                + ", ".join(sorted(_restored)),
+                file=sys.stderr,
+            )
+        if _confirmed:
+            print(
+                "[review] adjacency re-check confirmed unmask (role word): "
+                + ", ".join(sorted(_confirmed)),
+                file=sys.stderr,
+            )
 
     def find_root(k: str) -> str:
         seen: set[str] = set()
@@ -405,49 +424,132 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
 # но не больше 3 символов (иначе это уже не перечисление, а разные фразы).
 _ADJ_GAP_RE = re.compile(r"^[\s,.;:—–\-]{0,3}$")
 
+_ADJACENT_SYSTEM_PROMPT = (
+    "Ты — контролёр анонимизации русских документов. Каждый кандидат ниже — "
+    "слово или фраза, стоящая ВПЛОТНУЮ к уже подтверждённому имени человека "
+    "(кандидат выделен в контексте квадратными скобками [вот_так]).\n"
+    "Для каждого кандидата реши:\n"
+    "- mask=true — кандидат САМ является частью именования человека: фамилия, "
+    "имя, отчество, позывной, ник, псевдоним. Редкое, иностранное или "
+    "незнакомое слово («Вайгус», «Смит», странный позывной) — это имя: "
+    "mask=true. Незнакомость слова — признак имени, а не ошибки.\n"
+    "- mask=false — кандидат является обычным словом русского языка: роль, "
+    "статус, должность или обращение, приклеенное к имени («Самозанятый», "
+    "«директор», «Капитан», «Исполнитель», «гражданин», «господин») — такое "
+    "слово должно остаться читаемым в тексте.\n"
+    "Если сомневаешься — mask=true (скрыть безопаснее, чем раскрыть).\n"
+    'Ответь ТОЛЬКО JSON-массивом объектов {"id": <номер>, "text": <значение '
+    "кандидата ДОСЛОВНО>, \"mask\": true|false} для ВСЕХ кандидатов по порядку."
+)
 
-def _restore_adjacent_persons(
+
+def _adjacent_dropped_persons(
     text: str,
     spans: list[Span],
     candidates: dict[str, "_Candidate"],
     keep: dict[str, bool],
-) -> set[str]:
-    """Отменить keep=false для PERSON-кандидатов, примыкающих к сохранённым.
+) -> list[tuple[str, str]]:
+    """Найти PERSON-кандидатов, снятых ревью, но примыкающих к сохранённым.
 
-    Возвращает множество восстановленных значений (для лога). Однопроходно:
-    восстанавливаем только от соседей, которых ревью само оставило (или не
-    рассматривало) — если модель отбросила ОБА имени пары, они не «спасают»
-    друг друга (обе могли быть настоящим мусором, например «Так-так, Ну-ну»).
+    Возвращает [(key, текст, контекст-с-выделением)] для эскалации в
+    сфокусированный LLM-запрос (см. ``_ask_adjacent``). Сосед должен быть
+    сохранён (или вне ревью): если модель отбросила ОБА имени пары, они не
+    «спасают» друг друга (оба могли быть настоящим мусором, «Так-так, Ну-ну»).
     """
     person_spans = [s for s in spans if s.label == "PERSON"]
-    dropped_keys = {
+    dropped_keys = [
         k for k, kept_flag in keep.items()
         if not kept_flag and k in candidates and candidates[k].label == "PERSON"
-    }
+    ]
     if not dropped_keys:
-        return set()
+        return []
 
     kept_ranges = [
         (s.start, s.end) for s in person_spans
         if keep.get(_key_of(s), True)  # свои спаны с keep=true ИЛИ вне ревью
     ]
-    restored: set[str] = set()
+    out: list[tuple[str, str, str]] = []
     for key in dropped_keys:
+        hit: Span | None = None
         for s in person_spans:
-            if keep[key]:
-                break
             if _key_of(s) != key:
                 continue
             for a, b in kept_ranges:
-                if s.start >= b and _ADJ_GAP_RE.match(text[b:s.start]):
-                    keep[key] = True
-                    restored.add(candidates[key].text)
+                if (s.start >= b and _ADJ_GAP_RE.match(text[b:s.start])) or (
+                    s.end <= a and _ADJ_GAP_RE.match(text[s.end:a])
+                ):
+                    hit = s
                     break
-                if s.end <= a and _ADJ_GAP_RE.match(text[s.end:a]):
-                    keep[key] = True
-                    restored.add(candidates[key].text)
-                    break
-    return restored
+            if hit:
+                break
+        if hit:
+            lo = max(0, hit.start - 90)
+            hi = min(len(text), hit.end + 90)
+            ctx = f"{text[lo:hit.start]}[{hit.text}]{text[hit.end:hi]}"
+            out.append((key, candidates[key].text, " ".join(ctx.split())))
+    return out
+
+
+def _ask_adjacent(
+    suspects: list[tuple[str, str, str]], cfg: "ReviewConfig"
+) -> dict[str, bool]:
+    """Сфокусированный LLM-вопрос «роль или имя?» по спорным соседям.
+
+    Возвращает key -> mask (True = оставить маску). Кандидаты, по которым
+    модель не ответила или ответ не сошёлся по тексту, в результат не попадают
+    (вызывающий код трактует отсутствие как mask=True — безопасное умолчание).
+    """
+    lines = [f'{idx}. "{cand_text}" — контекст: «{ctx}»'
+             for idx, (_key, cand_text, ctx) in enumerate(suspects)]
+    payload = {
+        "model": cfg.model,
+        "messages": [
+            {"role": "system", "content": _ADJACENT_SYSTEM_PROMPT},
+            {"role": "user", "content": "\n".join(lines)},
+        ],
+        "temperature": cfg.temperature,
+        "max_tokens": 2000,
+        **cfg.extra_body,
+    }
+    req = urllib.request.Request(
+        cfg.base_url.rstrip("/") + "/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {cfg.api_key}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
+        data = json.load(resp)
+    msg = data["choices"][0]["message"]
+    content = msg.get("content") or msg.get("reasoning_content") or ""
+    blob = _extract_json_array(content)
+    if blob is None:
+        return {}
+    try:
+        arr = json.loads(blob)
+    except json.JSONDecodeError:
+        return {}
+
+    def _norm(s: str) -> str:
+        return " ".join(s.split()).casefold()
+
+    out: dict[str, bool] = {}
+    for obj in arr if isinstance(arr, list) else []:
+        if not isinstance(obj, dict):
+            continue
+        i, m, t = obj.get("id"), obj.get("mask"), obj.get("text")
+        if not (isinstance(i, int) and isinstance(m, bool) and isinstance(t, str)):
+            continue
+        if not (0 <= i < len(suspects)):
+            continue
+        key, cand_text, _ctx = suspects[i]
+        # Тот же страховочный эхо-текст, что и в основном ревью: вердикт
+        # применяется только если модель дословно повторила значение.
+        if _norm(t) != _norm(cand_text):
+            continue
+        out[key] = m
+    return out
 
 
 # --- Recall-проход: добор пропущенного через LLM -----------------------------
