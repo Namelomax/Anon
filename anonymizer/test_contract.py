@@ -66,7 +66,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("path", help="Файл .docx или .txt")
     ap.add_argument("--llm-base-url", default="http://127.0.0.1:1234/v1")
-    ap.add_argument("--llm-model", default="qwen/qwen3.5-9b")
+    ap.add_argument("--llm-model", default="gemma4:12b")
     ap.add_argument("--no-llm", action="store_true", help="Без LLM-слоя (только regex+GLiNER)")
     ap.add_argument("--no-ner", action="store_true", help="Без GLiNER (только regex)")
     ap.add_argument("--no-review", action="store_true")

@@ -168,7 +168,7 @@ class LLMConfig:
     """
 
     base_url: str = "http://127.0.0.1:1234/v1"
-    model: str = "qwen/qwen3.5-9b"
+    model: str = "gemma4:12b"
     max_tokens: int = 8000
     temperature: float = 0.0
     timeout: float = 300.0
@@ -208,6 +208,9 @@ class LLMDetector:
             ],
             "temperature": cfg.temperature,
             "max_tokens": cfg.max_tokens,
+            # см. комментарий в review._ask
+            "presence_penalty": 0,
+            "frequency_penalty": 0,
             **cfg.extra_body,
         }
         req = urllib.request.Request(

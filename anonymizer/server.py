@@ -104,12 +104,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, code: int, obj: dict) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self._cors()
-        self.end_headers()
-        self.wfile.write(body)
+        # Клиент (Vercel, лимит 300с) может отвалиться, пока мы ещё пишем ответ —
+        # тогда send_response/end_headers/write кидают BrokenPipeError, а
+        # обработчик исключения в _handle_* пытается отправить 500 и падает
+        # ВТОРОЙ раз с того же места, удваивая трейсбек в логах. Ловим здесь и
+        # тихо выходим — отправлять уже некому.
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self._cors()
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            print(
+                f"[server] клиент отключился, не дождавшись ответа ({self.path}) — "
+                "ответ не доставлен",
+                file=sys.stderr,
+            )
 
     def do_OPTIONS(self):  # CORS preflight
         self.send_response(204)
@@ -316,7 +328,7 @@ def main() -> None:
         help="LLM-слой добора сложных ПДн. По умолчанию ВКЛ. Отключить: --no-llm.",
     )
     ap.add_argument("--llm-base-url", default="http://127.0.0.1:11433/v1")
-    ap.add_argument("--llm-model", default="qwen3.5:9b")
+    ap.add_argument("--llm-model", default="gemma4:12b")
     ap.add_argument(
         "--review", action=_Bool, default=True,
         help="4-й слой: LLM перепроверяет итоговый список и снимает очевидные "

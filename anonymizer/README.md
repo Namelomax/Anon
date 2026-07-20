@@ -90,7 +90,7 @@ from anonymizer.llm import LLMConfig
 anon = build_anonymizer(
     use_ner=True,
     use_llm=True,
-    llm_config=LLMConfig(base_url="http://127.0.0.1:1234/v1", model="qwen/qwen3.5-9b"),
+    llm_config=LLMConfig(base_url="http://127.0.0.1:1234/v1", model="gemma4:12b"),
 )
 res = anon.anonymize("Reginald Blackwell, СНИЛС семь восемь девять - два три семь.")
 # оба попадут в маппинг и обезличатся

@@ -12,7 +12,56 @@ import { request as httpRequest } from "node:http";
  * instead of `fetch`. (curl and browsers are lenient too, which is why manual
  * checks worked while the Vercel function did not.)
  */
-export function callBackend(
+// Connection-establishment error codes worth retrying: these all mean the TCP
+// handshake to the backend never completed, so nothing was sent to it and
+// retrying is trivially idempotent. Vercel's default region is far from the
+// backend VPS (jh.interfonica.cloud), which occasionally shows up as a
+// connect-phase ETIMEDOUT/ECONNREFUSED even though the backend is healthy.
+const _RETRYABLE_CONNECT_CODES = new Set([
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+]);
+const _RETRY_DELAYS_MS = [2000, 5000];
+
+function _isRetryableConnectError(err: unknown): boolean {
+  const e = err as { code?: string; syscall?: string; _responseStarted?: boolean } | undefined;
+  if (!e || e._responseStarted) return false; // response already began: never retry
+  if (e.code && _RETRYABLE_CONNECT_CODES.has(e.code)) return true;
+  return e.syscall === "connect";
+}
+
+function _sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function callBackend(
+  url: string,
+  bodyJson: string,
+  apiKey: string,
+  timeoutMs: number,
+): Promise<{ status: number; text: string }> {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await _callBackendOnce(url, bodyJson, apiKey, timeoutMs);
+    } catch (err) {
+      // Only retry pure connect-phase failures — once any response bytes/
+      // headers have arrived, `_callBackendOnce` throws a marked error that
+      // is never retried, since the backend may already have side effects
+      // (or a partially-sent body) in flight.
+      if (attempt >= _RETRY_DELAYS_MS.length || !_isRetryableConnectError(err)) {
+        throw err;
+      }
+      await _sleep(_RETRY_DELAYS_MS[attempt]);
+      attempt += 1;
+    }
+  }
+}
+
+function _callBackendOnce(
   url: string,
   bodyJson: string,
   apiKey: string,
@@ -30,6 +79,10 @@ export function callBackend(
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
   return new Promise((resolve, reject) => {
+    // Tracks whether the response callback has already fired — once it has,
+    // the connection was established (request reached the backend), so any
+    // later error must propagate as-is and must NOT be retried by the caller.
+    let responseStarted = false;
     const req = reqFn(
       {
         protocol: u.protocol,
@@ -42,6 +95,7 @@ export function callBackend(
         timeout: timeoutMs,
       },
       (res) => {
+        responseStarted = true;
         const chunks: Buffer[] = [];
         res.on("data", (c) => chunks.push(c as Buffer));
         res.on("end", () =>
@@ -50,7 +104,13 @@ export function callBackend(
       },
     );
     req.on("timeout", () => req.destroy(new Error(`Backend timeout after ${timeoutMs}ms`)));
-    req.on("error", reject);
+    req.on("error", (err) => {
+      // Flag mid-response errors so the retry loop above never retries them
+      // (see `_isRetryableConnectError`) — once headers arrived, the request
+      // reached the backend and retrying could duplicate a side effect.
+      if (responseStarted) (err as { _responseStarted?: boolean })._responseStarted = true;
+      reject(err);
+    });
     req.write(body);
     req.end();
   });

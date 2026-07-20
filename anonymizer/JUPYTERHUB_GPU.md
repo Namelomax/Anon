@@ -6,7 +6,7 @@
 задержки тянут время вверх. Поэтому: код + GLiNER (CUDA) + Ollama — всё на хабе.
 
 Найдено при проверке твоего хаба:
-- Ollama (OpenAI-совместимый) локально: `http://127.0.0.1:11433/v1`, модель **`qwen3.5:9b`**.
+- Ollama (OpenAI-совместимый) локально: `http://127.0.0.1:11433/v1`, модель **`gemma4:12b`**.
 - На 3090 скорость ~**70 ток/с** (≈×2 от локального AMD). Reasoning отключается
   параметром **`reasoning_effort=none`** (флаг `--llm-no-think`).
 - 3090 занята моделью Ollama (~15 ГБ), 3070 свободна → **GLiNER ставим на 3070**,
@@ -30,7 +30,7 @@ python -c "import torch; print('CUDA:', torch.cuda.is_available())"   # долж
 
 ```bash
 bash ~/start-ollama.sh
-curl -s http://127.0.0.1:11433/v1/models   # увидеть qwen3.5:9b
+curl -s http://127.0.0.1:11433/v1/models   # увидеть gemma4:12b
 ```
 
 ## 4. Обезличить документ (одна команда)
@@ -39,7 +39,7 @@ curl -s http://127.0.0.1:11433/v1/models   # увидеть qwen3.5:9b
 CUDA_VISIBLE_DEVICES=1 \
 python anonymizer/anonymize_document.py /path/to/doc.docx \
   --gliner --device cuda --corporate \
-  --llm --llm-base-url http://127.0.0.1:11433/v1 --llm-model qwen3.5:9b --llm-no-think \
+  --llm --llm-base-url http://127.0.0.1:11433/v1 --llm-model gemma4:12b --llm-no-think \
   --out-dir out
 ```
 - `CUDA_VISIBLE_DEVICES=1` → GLiNER на свободную 3070 (Ollama держит модель на 3090).
@@ -59,7 +59,7 @@ time CUDA_VISIBLE_DEVICES=1 python anonymizer/worker.py --in doc.txt --out g.jso
 # полный пайплайн на GPU
 time CUDA_VISIBLE_DEVICES=1 python anonymizer/worker.py --in doc.txt --out f.json \
   --ner gliner --device cuda --corporate \
-  --llm --llm-base-url http://127.0.0.1:11433/v1 --llm-model qwen3.5:9b --llm-no-think
+  --llm --llm-base-url http://127.0.0.1:11433/v1 --llm-model gemma4:12b --llm-no-think
 ```
 
 Ожидаемо на этом железе для 50 страниц: GLiNER на 3070 ~5–10 с, LLM на 3090 (без
@@ -75,7 +75,7 @@ time CUDA_VISIBLE_DEVICES=1 python anonymizer/worker.py --in doc.txt --out f.jso
 ```bash
 CUDA_VISIBLE_DEVICES=1 python anonymizer/server.py --port 8000 \
   --device cuda --corporate \
-  --llm --llm-base-url http://127.0.0.1:11433/v1 --llm-model qwen3.5:9b --llm-no-think
+  --llm --llm-base-url http://127.0.0.1:11433/v1 --llm-model gemma4:12b --llm-no-think
 ```
 Сервис поднимется на `127.0.0.1:8000`; снаружи он доступен через JupyterHub-proxy:
 `https://jh.interfonica.cloud/user/<id>/proxy/8000` (с Bearer-токеном, как у Ollama).

@@ -186,7 +186,7 @@ class ReviewConfig:
     """
 
     base_url: str = "http://127.0.0.1:11434/v1"
-    model: str = "qwen3.5:9b"
+    model: str = "gemma4:12b"
     max_tokens: int = 8000
     temperature: float = 0.0
     timeout: float = 300.0
@@ -509,6 +509,9 @@ def _ask_adjacent(
         ],
         "temperature": cfg.temperature,
         "max_tokens": 2000,
+        # см. комментарий в review._ask
+        "presence_penalty": 0,
+        "frequency_penalty": 0,
         **cfg.extra_body,
     }
     req = urllib.request.Request(
@@ -592,6 +595,10 @@ _RECALL_SYSTEM_PROMPT = (
     "слова, роли (Заказчик, Исполнитель, Сторона) и термины. Если сомневаешься, "
     "конфиденциально ли значение — ЛУЧШЕ включи его (перемаскировать безопаснее, "
     "чем пропустить).\n"
+    "Сами токены вида [ТИП_НОМЕР] (например [PERSON_1], [ORG_2], [DATE_3]) — это "
+    "УЖЕ замаскированные значения, а не текст документа: никогда не включай их "
+    "в ответ как найденное значение, сообщай только о том, что до сих пор "
+    "видно обычным текстом.\n"
     "Верни ТОЛЬКО JSON-массив объектов {\"text\": \"<точная подстрока из текста>\", "
     "\"type\": \"<ТИП>\"}. Поле text должно ДОСЛОВНО (те же символы) совпадать с "
     "фрагментом текста. Если всё уже замаскировано — верни []. Без пояснений."
@@ -693,6 +700,9 @@ def _ask_recall(interim_text: str, cfg: ReviewConfig) -> list[tuple[str, str]]:
         ],
         "temperature": cfg.temperature,
         "max_tokens": cfg.max_tokens,
+        # см. комментарий в review._ask
+        "presence_penalty": 0,
+        "frequency_penalty": 0,
         **cfg.extra_body,
     }
     req = urllib.request.Request(
@@ -804,6 +814,11 @@ def _ask(batch: list[tuple[str, _Candidate]], cfg: ReviewConfig) -> dict[int, di
         ],
         "temperature": cfg.temperature,
         "max_tokens": cfg.max_tokens,
+        # модели в Ollama могут иметь агрессивные штрафы за повторы по
+        # умолчанию (Modelfile) — а наши протоколы требуют дословного эха
+        # входного текста в ответе, штрафы за повтор им прямо мешают.
+        "presence_penalty": 0,
+        "frequency_penalty": 0,
         **cfg.extra_body,
     }
     req = urllib.request.Request(

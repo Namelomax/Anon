@@ -33,7 +33,7 @@ def main() -> None:
     ap.add_argument("--corporate", action="store_true")
     ap.add_argument("--llm", action="store_true")
     ap.add_argument("--llm-base-url", default="http://127.0.0.1:1234/v1")
-    ap.add_argument("--llm-model", default="qwen/qwen3.5-9b")
+    ap.add_argument("--llm-model", default="gemma4:12b")
     ap.add_argument("--llm-api-key", default="not-needed")
     ap.add_argument("--llm-no-think", action="store_true",
                     help="Disable reasoning (sends reasoning_effort=none — works for Ollama)")

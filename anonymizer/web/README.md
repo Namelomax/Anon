@@ -28,7 +28,7 @@ Vercel не может запускать GLiNER/PyTorch и не видит тв
 
 ## 1. Локальный тест (LM Studio + GLiNER)
 
-**Шаг 1. LM Studio** — загрузи `qwen/qwen3.5-9b`, включи сервер на
+**Шаг 1. LM Studio** — загрузи `gemma4:12b`, включи сервер на
 `http://127.0.0.1:1234`.
 
 **Шаг 2. Python-бэкенд** (из каталога `privacy-filter-main`, т.е. на уровень
@@ -39,7 +39,7 @@ python anonymizer/server.py --port 8000 \
   --ner gliner --device cuda \
   --corporate \
   --llm --llm-base-url http://127.0.0.1:1234/v1 \
-  --llm-model qwen/qwen3.5-9b --llm-no-think
+  --llm-model gemma4:12b --llm-no-think
 ```
 
 - нет GPU → `--device cpu`;

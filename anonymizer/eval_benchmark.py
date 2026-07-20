@@ -378,7 +378,7 @@ def main() -> None:
     )
     parser.add_argument("--device", default="cpu", help="GLiNER device: cpu | cuda | dml")
     parser.add_argument("--llm-base-url", default="http://127.0.0.1:1234/v1")
-    parser.add_argument("--llm-model", default="qwen/qwen3.5-9b")
+    parser.add_argument("--llm-model", default="gemma4:12b")
     parser.add_argument("--llm-api-key", default="not-needed")
     parser.add_argument("--llm-no-think", action="store_true",
                         help="Disable reasoning (reasoning_effort=none — for Ollama)")
