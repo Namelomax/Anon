@@ -20,16 +20,19 @@ and clients authenticate with the JupyterHub Bearer token.
 
 API:
     GET  /health           -> {"status": "ok", ...}
-    POST /anonymize  {text, regex?, corporate?, ner?, llm?, review?}
+    POST /anonymize  {text, regex?, corporate?, ner?, llm?, review?, subject?}
          -> {anonymized_text, mapping, summary, spans:[{start,end,label,text}], stages}
 
-Each pipeline stage (regex / corporate / ner / llm / review) can be toggled
-per request via optional booleans in the POST body; omitted flags fall back
-to the server's start-up defaults. This lets the UI try e.g. "GLiNER only, no
-regex" without a redeploy. ``review`` is the 4th, last layer: it re-checks the
-spans produced by the other layers against their context and un-masks obvious
-false positives (see ``review.py``); it only has any effect if the server was
-started with ``--review``.
+Each pipeline stage (regex / corporate / ner / llm / review / subject) can be
+toggled per request via optional booleans in the POST body; omitted flags
+fall back to the server's start-up defaults. This lets the UI try e.g.
+"GLiNER only, no regex" without a redeploy. ``review`` is the 4th, last
+layer: it re-checks the spans produced by the other layers against their
+context and un-masks obvious false positives (see ``review.py``); it only
+has any effect if the server was started with ``--review``. ``subject``
+adds the SUBJECT label (предмет договора) to the existing LLM detection
+call — no extra pass, no extra time — and only has any effect if ``llm`` is
+also on.
 """
 
 from __future__ import annotations
@@ -53,7 +56,7 @@ _REVIEW_CFG = None       # ReviewConfig for the LLM review layer, or None if dis
 _INFO: dict = {}
 _LOCK = threading.Lock()  # serialize model calls: torch/GLiNER is not thread-safe
 
-_STAGE_NAMES = ("regex", "corporate", "glossary", "ner", "llm", "review", "second_pass")
+_STAGE_NAMES = ("regex", "corporate", "glossary", "ner", "llm", "review", "second_pass", "subject")
 
 
 def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
@@ -63,6 +66,10 @@ def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
     request (lower => higher recall / more catches). The model itself is cached,
     so a per-request detector with a different threshold is cheap.
     """
+    subject_on = stages.get("subject")
+    if subject_on is None:
+        subject_on = _DEFAULTS.get("subject", False)
+
     dets: list = []
     for name in ("regex", "corporate", "glossary", "ner", "llm"):
         on = stages.get(name)
@@ -76,6 +83,17 @@ def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
             from anonymizer.gliner_ner import GLiNERDetector
 
             dets.append(GLiNERDetector(replace(_GLINER_CFG, threshold=float(ner_threshold))))
+        elif name == "llm" and subject_on:
+            # SUBJECT (предмет договора) — просто расширяем allowed_labels
+            # существующего LLM-детектора; отдельного прохода не добавляем.
+            # Если llm выключена, до этой ветки не доходим — subject молча
+            # игнорируется.
+            from dataclasses import replace
+
+            from anonymizer.llm import LLMDetector
+
+            base_cfg = _DETECTORS["llm"][0].config
+            dets.append(LLMDetector(replace(base_cfg, allowed_labels=base_cfg.allowed_labels | {"SUBJECT"})))
         else:
             dets.extend(_DETECTORS[name])
 
@@ -349,6 +367,13 @@ def main() -> None:
         help="Размышления (reasoning) LLM в детекции и проверке. По умолчанию "
              "ВЫКЛ (быстрее). Включить: --think.",
     )
+    ap.add_argument(
+        "--subject", action=_Bool, default=False,
+        help="Метка SUBJECT — предмет договора (наименования товаров/работ/услуг), "
+             "добавляется в тот же LLM-вызов детекции без доп. времени обработки. "
+             "По умолчанию ВЫКЛ и работает только вместе с --llm. Включить: "
+             "--subject.",
+    )
     ap.add_argument("--review-base-url", default=None, help="Defaults to --llm-base-url")
     ap.add_argument("--review-model", default=None, help="Defaults to --llm-model")
     ap.add_argument(
@@ -414,6 +439,7 @@ def main() -> None:
         llm=args.llm,
         review=args.review,
         second_pass=args.second_pass and args.llm,
+        subject=args.subject and args.llm,
     )
 
     # Warm up the pipeline. A transient LLM outage must NOT prevent the server
@@ -431,6 +457,7 @@ def main() -> None:
         "review_model": _REVIEW_CFG.model if _REVIEW_CFG else None,
         "llm_recall": bool(_REVIEW_CFG and _REVIEW_CFG.recall),
         "second_pass": _DEFAULTS.get("second_pass", False),
+        "subject": _DEFAULTS.get("subject", False),
         "stages": dict(_DEFAULTS), "toggleable": True,
         "ner_threshold": _GLINER_CFG.threshold if _GLINER_CFG else None,
     }

@@ -3,7 +3,7 @@
 import JSZip from "jszip";
 import { useCallback, useMemo, useRef, useState } from "react";
 
-type StageKey = "regex" | "corporate" | "ner" | "llm" | "review";
+type StageKey = "regex" | "corporate" | "ner" | "llm" | "review" | "subject";
 
 type AnonResult = {
   filename: string;
@@ -34,6 +34,7 @@ const STAGE_LABELS: Record<StageKey, string> = {
   ner: "GLiNER (ФИО, города, организации)",
   llm: "LLM (сложные случаи)",
   review: "LLM-проверка (отсеивает ложные срабатывания)",
+  subject: "Предмет договора (наименования товаров и услуг)",
 };
 
 function base64ToBuffer(b64: string): ArrayBuffer {
@@ -78,6 +79,7 @@ export default function Home() {
     ner: true,
     llm: true,
     review: true,
+    subject: false,
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -351,7 +353,12 @@ export default function Home() {
                 <div className="stages" style={{ marginTop: 14 }}>
                   {(Object.keys(STAGE_LABELS) as StageKey[]).map((k) => (
                     <label className="stage" key={k}>
-                      <input type="checkbox" checked={stages[k]} onChange={() => toggle(k)} />
+                      <input
+                        type="checkbox"
+                        checked={stages[k]}
+                        disabled={k === "subject" && !stages.llm}
+                        onChange={() => toggle(k)}
+                      />
                       {STAGE_LABELS[k]}
                     </label>
                   ))}
@@ -362,6 +369,13 @@ export default function Home() {
                   сущности и снимает маскирование с очевидных ошибок (обычные
                   слова, названия продуктов и т.п.); работает, только если
                   бэкенд запущен с флагом --review.
+                </p>
+                <p className="note" style={{ marginBottom: 0, marginTop: 8 }}>
+                  Предмет договора — маскирует наименования товаров, работ и
+                  услуг (модели, марки, номенклатуру), чтобы по ним нельзя было
+                  восстановить отрасль; добавляется в тот же LLM-вызов без
+                  доп. времени обработки. Требует включённого слоя LLM —
+                  недоступен, если LLM выключен.
                 </p>
               </>
             )}
