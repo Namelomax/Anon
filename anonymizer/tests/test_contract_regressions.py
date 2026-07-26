@@ -141,15 +141,34 @@ def test_quoted_and_bare_org_share_placeholder_and_mapping_is_clean():
 # размножил цифры по 127 местам: «[PASSPORT_1].[PASSPORT_2]. Цена…».
 
 def test_bare_digits_are_noise_under_every_label():
-    for label in ("PASSPORT", "EMAIL", "SUBJECT", "PERSON", "ORG", "SENSITIVE"):
-        assert is_noise_span("1", label), label
-        assert is_noise_span("12", label), label
+    for label in ("PASSPORT", "EMAIL", "SUBJECT", "PERSON", "ORG", "SENSITIVE",
+                  "ADMIN_CODE"):
+        for value in ("1", "12", "000"):
+            assert is_noise_span(value, label), (label, value)
 
 
 def test_meaningful_numbers_survive_the_digit_filter():
     # порог не должен задевать настоящие значения
-    for value in ("100", "2014", "000000", "50:20:123456:21"):
+    for value in ("2014", "000000", "044525225", "50:20:123456:21", "777-003"):
         assert not is_noise_span(value, "PASSPORT"), value
+
+
+def test_short_number_does_not_fragment_a_larger_identifier():
+    """«000» под ADMIN_CODE маскировалось во всех вхождениях и разрывало
+    госномер («А [ADMIN_CODE_1] АА 00») и пробег («22 [ADMIN_CODE_1] км»)."""
+
+    class FakeCode:
+        def find(self, text):
+            out, start = [], 0
+            while (i := text.find("000", start)) >= 0:
+                out.append(Span(i, i + 3, "ADMIN_CODE", "000", source="llm"))
+                start = i + 3
+            return out
+
+    text = "Государственный регистрационный номер: А 000 АА 00. Пробег: 22 000 км."
+    res = Anonymizer([FakeCode()]).anonymize(text)
+    assert res.anonymized_text == text, res.anonymized_text
+    assert res.mapping == {}, res.mapping
 
 
 def test_clause_numbering_survives_a_bogus_passport_digit():
