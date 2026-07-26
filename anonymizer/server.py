@@ -389,13 +389,13 @@ def main() -> None:
              "ВЫКЛ (быстрее). Включить: --think.",
     )
     ap.add_argument(
-        "--subject", action=_Bool, default=False,
+        "--subject", action=_Bool, default=True,
         help="Метка SUBJECT — предмет договора (наименования товаров/работ/услуг), "
              "добавляется в тот же LLM-вызов детекции без доп. времени обработки. "
              "Дополнительно переводит слой --review в режим предмета договора, "
              "чтобы он не раскрывал номенклатуру как «название продукта». "
-             "По умолчанию ВЫКЛ и работает только вместе с --llm. Включить: "
-             "--subject.",
+             "По умолчанию ВКЛ, работает только вместе с --llm. Отключить: "
+             "--no-subject.",
     )
     ap.add_argument("--review-base-url", default=None, help="Defaults to --llm-base-url")
     ap.add_argument("--review-model", default=None, help="Defaults to --llm-model")
