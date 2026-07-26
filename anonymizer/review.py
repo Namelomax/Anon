@@ -316,6 +316,17 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
         return spans
     cfg = config or ReviewConfig()
 
+    # Короткие голые числа судим отдельным сфокусированным вопросом: жёсткий
+    # порог по длине тут неуместен — «000» бывает куском госномера, «12» —
+    # номером пункта, «777» — кодом подразделения, и различает их только
+    # контекст. Отдельный вызов (а не общий батч) потому же, почему и
+    # _ask_adjacent: на маленьком прицельном вопросе модель стабильна.
+    drop_short = _judge_short_numbers(text, spans, cfg)
+    if drop_short:
+        spans = [s for s in spans if id(s) not in drop_short]
+        if not spans:
+            return spans
+
     # SUBJECT пересматриваем ТОЛЬКО в subject-режиме: критерий «номенклатура vs
     # служебная лексика» живёт в промпте этого режима (_build_review_prompt).
     # Без него ревьюер стабильно снимал маску с предмета договора («автомат
@@ -499,6 +510,152 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
         if key in merge_key_for:
             s = replace(s, merge_key=merge_key_for[key], canonical_text=canonical_for[key])
         out.append(s)
+    return out
+
+
+_SHORT_NUMBER_SYSTEM_PROMPT = (
+    "Ты — контролёр анонимизации русских документов. Каждый кандидат ниже — "
+    "КОРОТКОЕ ЧИСЛО (2-3 цифры), которое детектор пометил как конфиденциальное. "
+    "Кандидат выделен в контексте квадратными скобками: [вот_так].\n"
+    "Реши по КОНТЕКСТУ, что это число значит:\n"
+    "- mask=true — число само по себе является значимым идентификатором или "
+    "конфиденциальным значением: код подразделения, серия документа, шифр, "
+    "номер части/учреждения, внутренний код — то, по чему можно узнать "
+    "человека или организацию.\n"
+    "- mask=false — число НЕ является самостоятельным значением: номер пункта, "
+    "раздела, статьи или приложения («п. 1.2», «Приложение N 3»); количество, "
+    "срок или единица измерения («400 шт.», «12 мм», «3 рабочих дня»); "
+    "порядковый номер в перечне; ЧАСТЬ более крупного значения, которое рядом "
+    "записано целиком (кусок госномера «А 000 АА 00», пробега «22 000 км», "
+    "суммы, телефона, серии-номера) — такое число маскировать НЕЛЬЗЯ, иначе "
+    "оно разорвёт значение и остаток утечёт.\n"
+    "ВАЖНО: по умолчанию отвечай mask=false. Короткое число почти всегда "
+    "оказывается нумерацией или количеством, а замаскированное по ошибке оно "
+    "подставится во ВСЕ свои вхождения и разрушит документ. Ставь mask=true "
+    "только когда из контекста ЯВНО видно, что это идентификатор.\n"
+    'Ответь ТОЛЬКО JSON-массивом объектов {"id": <номер>, "text": <значение '
+    'кандидата ДОСЛОВНО>, "mask": true|false} для ВСЕХ кандидатов по порядку.'
+)
+
+
+def _short_number_spans(spans: list[Span]) -> list[Span]:
+    from .detectors import is_short_number
+
+    return [s for s in spans if is_short_number(s.text)]
+
+
+def _judge_short_numbers(
+    text: str, spans: list[Span], cfg: "ReviewConfig"
+) -> set[int]:
+    """Спросить модель, какие короткие числа реально стоит маскировать.
+
+    Возвращает множество ``id(span)`` спанов, которые НУЖНО СНЯТЬ. Умолчание
+    здесь ОБРАТНОЕ обычному для этого слоя «сомневаешься — оставь маску»: нет
+    ответа модели, ответ не распарсился, LLM недоступна — короткое число
+    снимается. Так сделано намеренно: утечка голого двузначного числа
+    ничтожна, а ошибочная маска размножается ``mask_all_occurrences`` по всем
+    вхождениям и ломает документ (номер пункта «1» дал 127 подстановок и
+    превратил нумерацию договора в «[PASSPORT_1].[PASSPORT_2]»), да ещё и
+    разрывает более крупные значения, выпуская наружу их остаток.
+    """
+    shorts = _short_number_spans(spans)
+    if not shorts:
+        return set()
+
+    # По одному вопросу на РАЗЛИЧНОЕ значение: одинаковые числа всё равно
+    # получат общий плейсхолдер, судить их порознь незачем.
+    by_value: dict[str, list[Span]] = {}
+    for s in shorts:
+        by_value.setdefault(s.text.strip(), []).append(s)
+
+    items: list[tuple[str, str]] = []
+    for value, group in by_value.items():
+        first = group[0]
+        lo = max(0, first.start - 90)
+        hi = min(len(text), first.end + 90)
+        ctx = f"{text[lo:first.start]}[{first.text}]{text[first.end:hi]}"
+        items.append((value, " ".join(ctx.split())))
+
+    lines = [f'{i}. "{value}" — контекст: «{ctx}»'
+             for i, (value, ctx) in enumerate(items)]
+    try:
+        verdicts = _ask_short_numbers(lines, items, cfg)
+    except Exception as exc:  # noqa: BLE001
+        import sys
+
+        print(f"[short-num] LLM-запрос упал ({exc}) — короткие числа сняты",
+              file=sys.stderr)
+        verdicts = {}
+
+    drop: set[int] = set()
+    kept_values: list[str] = []
+    for value, group in by_value.items():
+        if verdicts.get(value, False):  # нет вердикта = снимаем (см. docstring)
+            kept_values.append(value)
+            continue
+        drop.update(id(s) for s in group)
+
+    import sys
+
+    print(
+        f"[short-num] коротких чисел: {len(by_value)}; "
+        f"модель оставила замаскированными: {kept_values or '—'}",
+        file=sys.stderr,
+    )
+    return drop
+
+
+def _ask_short_numbers(
+    lines: list[str], items: list[tuple[str, str]], cfg: "ReviewConfig"
+) -> dict[str, bool]:
+    """value -> mask. Значения без совпавшего эхо-текста в результат не входят."""
+    payload = {
+        "model": cfg.model,
+        "messages": [
+            {"role": "system", "content": _SHORT_NUMBER_SYSTEM_PROMPT},
+            {"role": "user", "content": "\n".join(lines)},
+        ],
+        "temperature": cfg.temperature,
+        "max_tokens": 2000,
+        # см. комментарий в review._ask
+        "presence_penalty": 0,
+        "frequency_penalty": 0,
+        **cfg.extra_body,
+    }
+    req = urllib.request.Request(
+        cfg.base_url.rstrip("/") + "/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {cfg.api_key}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
+        data = json.load(resp)
+    msg = data["choices"][0]["message"]
+    content = msg.get("content") or msg.get("reasoning_content") or ""
+    blob = _extract_json_array(content)
+    if blob is None:
+        return {}
+    try:
+        arr = json.loads(blob)
+    except json.JSONDecodeError:
+        return {}
+
+    out: dict[str, bool] = {}
+    for obj in arr if isinstance(arr, list) else []:
+        if not isinstance(obj, dict):
+            continue
+        i, m, t = obj.get("id"), obj.get("mask"), obj.get("text")
+        if not (isinstance(i, int) and isinstance(m, bool) and isinstance(t, str)):
+            continue
+        if not (0 <= i < len(items)):
+            continue
+        value, _ctx = items[i]
+        # Тот же страховочный эхо-текст, что и в основном ревью.
+        if t.strip() != value:
+            continue
+        out[value] = m
     return out
 
 

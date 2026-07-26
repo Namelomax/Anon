@@ -15,6 +15,7 @@ from anonymizer.detectors import (
     DATE,
     is_contract_role,
     is_noise_span,
+    is_short_number,
     is_stopword_entity,
 )
 from anonymizer.engine import Anonymizer
@@ -140,22 +141,44 @@ def test_quoted_and_bare_org_share_placeholder_and_mapping_is_clean():
 # _SOFT_LABELS, поэтому форматные метки её не получали, а mask_all_occurrences
 # размножил цифры по 127 местам: «[PASSPORT_1].[PASSPORT_2]. Цена…».
 
-def test_bare_digits_are_noise_under_every_label():
+def test_single_character_is_noise_under_every_label():
+    """Одиночный символ не бывает спорным — режется детерминированно."""
     for label in ("PASSPORT", "EMAIL", "SUBJECT", "PERSON", "ORG", "SENSITIVE",
                   "ADMIN_CODE"):
-        for value in ("1", "12", "000"):
-            assert is_noise_span(value, label), (label, value)
+        assert is_noise_span("1", label), label
 
 
-def test_meaningful_numbers_survive_the_digit_filter():
-    # порог не должен задевать настоящие значения
-    for value in ("2014", "000000", "044525225", "50:20:123456:21", "777-003"):
+def test_short_numbers_are_routed_to_the_model_not_a_hard_threshold():
+    """2-3-значные числа спорные: их судит LLM по контексту, а не длина."""
+    for value in ("12", "000", "777"):
+        assert is_short_number(value), value
         assert not is_noise_span(value, "PASSPORT"), value
+    # длинные значения и значения с разделителями моделью не разбираются
+    for value in ("1", "2014", "000000", "044525225", "50:20:123456:21", "777-003"):
+        assert not is_short_number(value), value
 
 
-def test_short_number_does_not_fragment_a_larger_identifier():
-    """«000» под ADMIN_CODE маскировалось во всех вхождениях и разрывало
-    госномер («А [ADMIN_CODE_1] АА 00») и пробег («22 [ADMIN_CODE_1] км»)."""
+def test_clause_numbering_survives_a_bogus_passport_digit():
+    """Номер пункта «1» под меткой PASSPORT давал 127 подстановок и превращал
+    нумерацию договора в «[PASSPORT_1].[PASSPORT_2]. Цена…»."""
+
+    class FakeLLM:
+        def find(self, text):
+            out, start = [], 0
+            while (i := text.find("1", start)) >= 0:
+                out.append(Span(i, i + 1, "PASSPORT", "1", source="llm"))
+                start = i + 1
+            return out
+
+    text = "1. Предмет Договора\n1.1. Продавец передаёт участок в п. 1.2 Договора."
+    res = Anonymizer([FakeLLM()]).anonymize(text)
+    assert res.anonymized_text == text, res.anonymized_text
+    assert res.mapping == {}, res.mapping
+
+
+def test_short_number_dropped_when_no_review_layer_can_judge_it():
+    """Без ревью спросить некого: «000» снимается, иначе оно разорвёт госномер
+    («А [ADMIN_CODE_1] АА 00») и пробег («22 [ADMIN_CODE_1] км»)."""
 
     class FakeCode:
         def find(self, text):
@@ -166,9 +189,35 @@ def test_short_number_does_not_fragment_a_larger_identifier():
             return out
 
     text = "Государственный регистрационный номер: А 000 АА 00. Пробег: 22 000 км."
-    res = Anonymizer([FakeCode()]).anonymize(text)
+    res = Anonymizer([FakeCode()]).anonymize(text)  # review_config=None
     assert res.anonymized_text == text, res.anonymized_text
     assert res.mapping == {}, res.mapping
+
+
+def test_short_number_verdict_defaults_to_unmasking_when_llm_fails():
+    """Умолчание для этого класса ОБРАТНОЕ обычному «сомневаешься — маскируй»:
+    недоступная модель не должна возвращать баг, ломающий документ."""
+    from anonymizer.review import ReviewConfig, _judge_short_numbers
+
+    text = "Приложение N 12 к Договору"
+    span = Span(13, 15, "ADMIN_CODE", "12", source="llm")
+    # base_url заведомо нерабочий => исключение => умолчание
+    cfg = ReviewConfig(base_url="http://127.0.0.1:1/v1", timeout=1.0)
+    assert _judge_short_numbers(text, [span], cfg) == {id(span)}
+
+
+def test_short_number_kept_when_the_model_confirms_it():
+    from anonymizer.review import ReviewConfig, _judge_short_numbers
+    import anonymizer.review as review_mod
+
+    text = "Код подразделения 777 указан в заявлении"
+    span = Span(18, 21, "ADMIN_CODE", "777", source="llm")
+    orig = review_mod._ask_short_numbers
+    review_mod._ask_short_numbers = lambda lines, items, cfg: {"777": True}
+    try:
+        assert _judge_short_numbers(text, [span], ReviewConfig()) == set()
+    finally:
+        review_mod._ask_short_numbers = orig
 
 
 def test_clause_numbering_survives_a_bogus_passport_digit():

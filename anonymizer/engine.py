@@ -20,6 +20,7 @@ from .detectors import (
     is_money_amount,
     is_non_pii,
     is_noise_span,
+    is_short_number,
     is_stopword_entity,
     propagate_declensions,
     propagate_entity_aliases,
@@ -121,9 +122,17 @@ class Anonymizer:
         # "[[PERSON_1]]" and a mapping full of broken placeholder fragments.
         protected = find_placeholder_spans(text)
 
+        # Короткие голые числа («12», «000») разбирает LLM-ревью по контексту
+        # (см. review._judge_short_numbers). Если ревью не подключено, спросить
+        # некого — снимаем их детерминированно, как и раньше: ошибочная маска
+        # на номере пункта размножается по всем вхождениям и рушит документ,
+        # тогда как утечка голого двузначного числа пренебрежима.
+        adjudicate_short = self._review_config is not None
+
         def passes_filters(s: Span) -> bool:
             return (
                 _has_alnum(s.text)
+                and not (not adjudicate_short and is_short_number(s.text))
                 and not (s.label in _TITLE_FILTER_LABELS and is_non_pii(s.text))
                 and not is_stopword_entity(s.text, s.label)
                 and not is_noise_span(s.text, s.label)
