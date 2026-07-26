@@ -206,6 +206,21 @@ def test_short_number_verdict_defaults_to_unmasking_when_llm_fails():
     assert _judge_short_numbers(text, [span], cfg) == {id(span)}
 
 
+def test_plate_detected_when_written_spaced_out():
+    """«А 000 АА 00» в договорах пишут вразрядку — детектор не срабатывал, и
+    номер уходил на откуп LLM, а в части прогонов утекал целиком."""
+    from anonymizer.detectors import PLATE
+
+    text = "Государственный регистрационный номер: А 000 АА 00."
+    assert [s.text for s in PLATE.find(text)] == ["А 000 АА 00"]
+    # слитная форма и три цифры региона тоже работают
+    assert [s.text for s in PLATE.find("Госномер А123ВС77")] == ["А123ВС77"]
+    assert [s.text for s in PLATE.find("номер Т001ТТ199,")] == ["Т001ТТ199"]
+    # буквы вне разрешённого набора и разрозненные обрывки не ловятся
+    assert PLATE.find("счёт К 123 АБ 45") == []
+    assert PLATE.find("в п. 1 указано 000 и АА 00") == []
+
+
 def test_short_number_kept_when_the_model_confirms_it():
     from anonymizer.review import ReviewConfig, _judge_short_numbers
     import anonymizer.review as review_mod
