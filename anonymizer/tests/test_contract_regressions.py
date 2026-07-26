@@ -134,6 +134,86 @@ def test_quoted_and_bare_org_share_placeholder_and_mapping_is_clean():
         assert ph in res.anonymized_text, ph
 
 
+# --- Голые цифры под форматными метками (договор купли-продажи участка) -----
+# LLM пометила номера пунктов «1»/«2»/«3»/«4» как PASSPORT/EMAIL. Защита от
+# односимвольных значений жила в is_stopword_entity и работала только для
+# _SOFT_LABELS, поэтому форматные метки её не получали, а mask_all_occurrences
+# размножил цифры по 127 местам: «[PASSPORT_1].[PASSPORT_2]. Цена…».
+
+def test_bare_digits_are_noise_under_every_label():
+    for label in ("PASSPORT", "EMAIL", "SUBJECT", "PERSON", "ORG", "SENSITIVE"):
+        assert is_noise_span("1", label), label
+        assert is_noise_span("12", label), label
+
+
+def test_meaningful_numbers_survive_the_digit_filter():
+    # порог не должен задевать настоящие значения
+    for value in ("100", "2014", "000000", "50:20:123456:21"):
+        assert not is_noise_span(value, "PASSPORT"), value
+
+
+def test_clause_numbering_survives_a_bogus_passport_digit():
+    class FakeLLM:
+        """Имитация детектора, пометившего номер пункта как паспорт."""
+
+        def find(self, text):
+            out = []
+            start = 0
+            while (i := text.find("1", start)) >= 0:
+                out.append(Span(i, i + 1, "PASSPORT", "1", source="llm"))
+                start = i + 1
+            return out
+
+    text = "1. Предмет Договора\n1.1. Продавец передаёт участок в п. 1.2 Договора."
+    res = Anonymizer([FakeLLM()]).anonymize(text)
+    assert res.anonymized_text == text, res.anonymized_text
+    assert res.mapping == {}, res.mapping
+
+
+# --- Падежные формы, осиротевшие после ревью (договор купли-продажи авто) ---
+# Ревью корректно сняло маску с «Автомобиль», но порождённые им morph-спаны
+# «Автомобиля»/«Автомобилю» на пересмотр не отдаются и оставались
+# замаскированными — обычное слово превращалось в [PERSON_8] в 18 местах.
+
+def test_orphaned_declensions_dropped_with_their_reviewed_parent():
+    from anonymizer.review import _is_orphaned_derivative, _stems_of_dropped
+    from anonymizer.review import _Candidate
+
+    candidates = {"PERSON\x00автомобиль": _Candidate("PERSON", "Автомобиль", "…")}
+    stems = _stems_of_dropped(candidates, {"PERSON\x00автомобиль": False})
+
+    for form in ("Автомобиля", "Автомобилю", "Автомобилем"):
+        span = Span(0, len(form), "PERSON", form, source="morph")
+        assert _is_orphaned_derivative(span, stems), form
+
+
+def test_kept_parent_leaves_its_declensions_masked():
+    from anonymizer.review import _is_orphaned_derivative, _stems_of_dropped
+    from anonymizer.review import _Candidate
+
+    candidates = {"PERSON\x00иванов": _Candidate("PERSON", "Иванов", "…")}
+    stems = _stems_of_dropped(candidates, {"PERSON\x00иванов": True})
+    span = Span(0, 8, "PERSON", "Иванову", source="morph")
+    assert not _is_orphaned_derivative(span, stems)
+
+
+def test_unrelated_and_non_derived_spans_are_never_dropped():
+    from anonymizer.review import _is_orphaned_derivative, _stems_of_dropped
+    from anonymizer.review import _Candidate
+
+    candidates = {"PERSON\x00автомобиль": _Candidate("PERSON", "Автомобиль", "…")}
+    stems = _stems_of_dropped(candidates, {"PERSON\x00автомобиль": False})
+    # чужое значение
+    assert not _is_orphaned_derivative(
+        Span(0, 6, "PERSON", "Иванов", source="morph"), stems)
+    # та же основа, но метка другая
+    assert not _is_orphaned_derivative(
+        Span(0, 10, "ORG", "Автомобиля", source="morph"), stems)
+    # детерминированный источник — не производная, трогать нельзя
+    assert not _is_orphaned_derivative(
+        Span(0, 10, "PERSON", "Автомобиля", source="regex"), stems)
+
+
 if __name__ == "__main__":
     import sys
 
