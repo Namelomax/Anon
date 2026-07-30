@@ -471,8 +471,20 @@ def main() -> None:
         _compose(_DEFAULTS).anonymize("Иван Иванов из Москвы, ИНН 7707083893.")
     except Exception as exc:  # noqa: BLE001
         print(f"[warn] прогрев не удался (сервер всё равно поднят): {exc}", flush=True)
+    # Фактическое устройство GLiNER, а не запрошенное: при откате на CPU
+    # (несовместимый cuDNN в LD_LIBRARY_PATH, занятая карта) /health раньше
+    # продолжал показывать "cuda", и трёхкратное замедление выглядело
+    # необъяснимым. Отдаём оба поля, чтобы расхождение было видно сразу.
+    effective_device = args.device
+    if args.ner == "gliner":
+        from anonymizer.gliner_ner import effective_device as _eff
+
+        effective_device = _eff() or args.device
+
     _INFO = {
-        "ner": args.ner, "device": args.device,
+        "ner": args.ner,
+        "device": effective_device,
+        "device_requested": args.device,
         "corporate": args.corporate, "llm": args.llm,
         "llm_model": args.llm_model if args.llm else None,
         "glossary_terms": len(glossary_entries),

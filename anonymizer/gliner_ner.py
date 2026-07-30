@@ -61,17 +61,33 @@ def _resolve_device(device: str):
     return device
 
 
+# Устройство, на котором модель РЕАЛЬНО поднялась. Запрошенное («cuda») и
+# фактическое расходятся при откате на CPU, и раньше это было видно только в
+# stderr при старте: /health продолжал бодро рапортовать "device": "cuda", хотя
+# GLiNER считал на процессоре и документ обрабатывался втрое дольше. Диагностику
+# приходилось вести по логам старта, а не по состоянию сервиса.
+_EFFECTIVE_DEVICE: str | None = None
+
+
+def effective_device() -> str | None:
+    """Фактическое устройство GLiNER, или None, если модель ещё не грузилась."""
+    return _EFFECTIVE_DEVICE
+
+
 @functools.lru_cache(maxsize=2)
 def _load_model(model_id: str, device: str):
     """Build and cache a GLiNER model (downloads on first use)."""
+    global _EFFECTIVE_DEVICE
     from gliner import GLiNER
 
     model = GLiNER.from_pretrained(model_id)
     try:
         model = model.to(_resolve_device(device))
+        _EFFECTIVE_DEVICE = device
     except Exception as exc:  # keep running on CPU if the device is unavailable
         import sys
 
+        _EFFECTIVE_DEVICE = "cpu"
         print(f"[gliner] device {device!r} unavailable ({exc}); using CPU", file=sys.stderr)
     return model
 
