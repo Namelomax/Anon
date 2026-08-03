@@ -49,9 +49,9 @@ def main() -> None:
 
     llm_config = None
     if args.llm:
-        from anonymizer.llm import LLMConfig
+        from anonymizer.llm import NO_THINKING_EXTRA_BODY, LLMConfig
 
-        extra = {"reasoning_effort": "none"} if args.llm_no_think else {}
+        extra = NO_THINKING_EXTRA_BODY if args.llm_no_think else {}
         llm_config = LLMConfig(
             base_url=args.llm_base_url, model=args.llm_model,
             api_key=args.llm_api_key, extra_body=extra,

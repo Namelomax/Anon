@@ -27,12 +27,24 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
 from .chunking import chunk_text
 from .spans import Span
+
+# Disables model "thinking"/reasoning tokens before the reply. Both keys are
+# sent together because different servers honor different ones:
+# llama.cpp/LM Studio (the gemma family) only listens to
+# ``chat_template_kwargs.enable_thinking``; Ollama/Qwen looks at
+# ``reasoning_effort``. Servers ignore extra keys they don't recognize, so
+# sending both is harmless and covers both backends with one constant.
+NO_THINKING_EXTRA_BODY: dict = {
+    "reasoning_effort": "none",
+    "chat_template_kwargs": {"enable_thinking": False},
+}
 
 # LLM output type (upper-cased) -> anonymizer label.
 _TYPE_MAP: dict[str, str] = {
@@ -149,8 +161,9 @@ def _build_system_prompt(allowed_labels: frozenset) -> str:
         "Если документ относится к водительскому удостоверению (рядом есть слова "
         "«водитель», «права», «ВУ», «вождение»), используй тип DRIVER_LICENSE, а "
         "не PASSPORT.\n"
-        "Если ничего не найдено — верни пустой ответ. Никаких пояснений, "
-        "только строки «ТИП|текст»."
+        "Если ничего не найдено — верни ТОЛЬКО слово NONE (без кавычек) отдельной "
+        "строкой и больше ничего. Никаких пояснений, только строки «ТИП|текст» "
+        "либо, если ничего не найдено, одно слово NONE."
     )
 
 # Default label whitelist; anything else the model emits (ORGANIZATION, DATE...)
@@ -178,31 +191,51 @@ class LLMConfig:
         base_url: OpenAI-compatible base, e.g. ``http://127.0.0.1:1234/v1``
             (LM Studio) or ``http://127.0.0.1:11434/v1`` (Ollama).
         model: Model id as the server reports it (``/v1/models``).
-        max_tokens: Generous budget — reasoning models spend most of it thinking
-            before emitting the JSON. Too small => empty ``content``.
+        max_tokens: Output budget for the ``ТИП|текст`` reply. With thinking
+            genuinely disabled (see ``NO_THINKING_EXTRA_BODY``), real replies on
+            this pipeline run 117-600 completion tokens, so 1500 is ample
+            headroom. Kept deliberately small: if the model still degenerates
+            into a reasoning loop despite the "no thinking" flags, a small
+            budget bounds the wasted time (~45s instead of ~245s) instead of
+            silently burning the whole request on empty output.
         temperature: 0 for deterministic extraction.
         timeout: Per-request seconds. Reasoning models can be slow on CPU/GPU.
         api_key: Sent as Bearer; ignored by LM Studio/Ollama but required shape.
         extra_body: Merged into the request JSON. Use it to disable thinking,
-            e.g. ``{"chat_template_kwargs": {"enable_thinking": False}}`` or, on
-            Ollama's native path, ``{"think": False}``.
+            e.g. ``NO_THINKING_EXTRA_BODY`` (module-level constant, covers both
+            LM Studio/llama.cpp's ``chat_template_kwargs.enable_thinking`` and
+            Ollama/Qwen's ``reasoning_effort``) or, on Ollama's native path,
+            ``{"think": False}``.
         allowed_labels: Whitelist of labels to keep; others are dropped. Defaults
             to the canonical PII set (no ORGANIZATION/DATE).
         max_chars: Documents are split into chunks of at most this many chars
             before being sent to the model. Smaller chunks raise recall (the
             model sees less at once, so declined word-forms aren't missed) at the
             cost of more API calls.
+        stop: Stop sequences sent to the server. The model's known failure mode
+            is degenerating into a reasoning block of endless blank lines until
+            the token budget runs out (~47s wasted on a single call, measured);
+            four consecutive newlines never occur in a valid ``ТИП|текст`` reply
+            (nor in the ``NONE`` sentinel), so this cuts a degenerate call off
+            after a few tokens instead of burning the full ``max_tokens``
+            budget.
     """
 
     base_url: str = "http://127.0.0.1:1234/v1"
     model: str = "gemma4:12b"
-    max_tokens: int = 8000
+    max_tokens: int = 1500
     temperature: float = 0.0
     timeout: float = 300.0
     api_key: str = "not-needed"
     extra_body: dict = field(default_factory=dict)
     allowed_labels: frozenset = _DEFAULT_ALLOWED
     max_chars: int = 3000
+    stop: tuple[str, ...] = ("\n\n\n\n",)
+
+
+class _DegenerateReply(Exception):
+    """Raised by ``_complete`` when the model exhausted its token budget on a
+    reasoning block and returned no usable content, even after one retry."""
 
 
 class LLMDetector:
@@ -211,21 +244,65 @@ class LLMDetector:
     def __init__(self, config: LLMConfig | None = None) -> None:
         self.config = config or LLMConfig()
         self._system = _build_system_prompt(self.config.allowed_labels)
+        # Populated by find() when a chunk could not be analyzed at all (see
+        # _DegenerateReply) — surfaced to callers so the data-loss isn't silent.
+        self.warnings: list[dict] = []
 
     def find(self, text: str) -> list[Span]:
+        self.warnings = []
         if not text.strip():
             return []
         spans: list[Span] = []
         # Chunk long documents: smaller inputs keep the model's recall high
         # (declined word-forms aren't missed) and avoid output truncation.
         for offset, chunk in chunk_text(text, self.config.max_chars):
-            content = self._complete(chunk)
+            try:
+                content = self._complete(chunk)
+            except _DegenerateReply:
+                message = (
+                    "Фрагмент текста не удалось проанализировать с помощью LLM "
+                    "(модель дважды вернула пустой ответ, исчерпав лимит "
+                    "токенов на «размышления»). Персональные данные в этом "
+                    "фрагменте могли остаться незамаскированными."
+                )
+                self.warnings.append(
+                    {
+                        "kind": "llm_chunk_failed",
+                        "offset": offset,
+                        "chars": len(chunk),
+                        "message": message,
+                    }
+                )
+                print(
+                    f"[warn] LLM: фрагмент {offset}-{offset + len(chunk)} "
+                    "не обработан (пустой ответ после повторной попытки) — "
+                    "возможна утечка ПДн",
+                    file=sys.stderr,
+                )
+                continue
+            if _is_none_reply(content):
+                # Explicit "nothing found" sentinel (see _build_system_prompt)
+                # — legitimately zero entities, not a failure to record.
+                continue
             items = _parse_items(content)
             spans.extend(self._locate(chunk, offset, items))
         return spans
 
     # -- HTTP -----------------------------------------------------------
     def _complete(self, text: str) -> str:
+        """Ask the model, retrying once if it degenerates (see ``_is_degenerate``).
+
+        Raises ``_DegenerateReply`` if the retry also degenerates — the caller
+        (``find``) is responsible for recording the loss and moving on.
+        """
+        content, _finish_reason = self._request_once(text)
+        if _is_degenerate(content):
+            content, _finish_reason = self._request_once(text)
+            if _is_degenerate(content):
+                raise _DegenerateReply()
+        return content
+
+    def _request_once(self, text: str) -> tuple[str, str | None]:
         cfg = self.config
         payload = {
             "model": cfg.model,
@@ -238,6 +315,7 @@ class LLMDetector:
             # см. комментарий в review._ask
             "presence_penalty": 0,
             "frequency_penalty": 0,
+            **({"stop": list(cfg.stop)} if cfg.stop else {}),
             **cfg.extra_body,
         }
         req = urllib.request.Request(
@@ -256,10 +334,13 @@ class LLMDetector:
                 f"LLM request to {cfg.base_url} failed: {exc}. "
                 "Is LM Studio / Ollama running and the model loaded?"
             ) from exc
-        msg = data["choices"][0]["message"]
+        choice = data["choices"][0]
+        msg = choice["message"]
+        finish_reason = choice.get("finish_reason")
         # Prefer the answer; fall back to reasoning text if content is empty
         # (reasoning model ran out of budget before emitting content).
-        return msg.get("content") or msg.get("reasoning_content") or ""
+        content = msg.get("content") or msg.get("reasoning_content") or ""
+        return content, finish_reason
 
     # -- Locate substrings ---------------------------------------------
     def _locate(self, chunk: str, offset: int, items: list[tuple[str, str]]) -> list[Span]:
@@ -277,6 +358,46 @@ class LLMDetector:
                     Span(offset + start, offset + end, label, chunk[start:end], source="llm")
                 )
         return spans
+
+
+def _is_degenerate(content: str) -> bool:
+    """True if the model's reply carries no usable content, whatever the
+    finish reason.
+
+    Before the ``NONE`` sentinel (see ``_build_system_prompt``) existed, an
+    empty ``content`` was ambiguous between "no PII found" and "the model
+    failed" — and that ambiguity was measured to hide real failures: a
+    degenerate call (``finish_reason: "length"``, reasoning collapsed into
+    thousands of blank lines) could be immediately followed by a retry that
+    came back in 33ms with ``finish_reason: "stop"`` and empty ``content``,
+    which the old ``finish_reason == "length"`` gate let through as "nothing
+    found". Now that ``NONE`` is the explicit success sentinel, a genuinely
+    clean chunk is never empty, so *any* empty/whitespace-only reply is
+    unambiguously a failure — independent of ``finish_reason``.
+
+    ``content`` here is already the ``content`` / ``reasoning_content``
+    fallback (see ``_request_once``), so a reasoning block that is nothing but
+    newlines must still count as empty — hence stripping before the check.
+    """
+    return not content.strip()
+
+
+def _is_none_reply(content: str) -> bool:
+    """True if ``content``'s only meaningful line is the ``NONE`` sentinel
+    (see ``_build_system_prompt``), meaning the model looked and legitimately
+    found zero entities — as opposed to an empty/failed reply (``_is_degenerate``).
+
+    Tolerant of surrounding whitespace, case, and ``` code fences, since the
+    model sometimes wraps even a single-token reply in a fence despite being
+    told not to.
+    """
+    lines = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("```"):
+            continue
+        lines.append(line.strip("`").strip())
+    return len(lines) == 1 and lines[0].casefold() == "none"
 
 
 # --- Line-format / JSON parsing ---------------------------------------------

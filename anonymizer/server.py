@@ -163,6 +163,39 @@ class _BadRequest(Exception):
     """Raised by _run_anonymize_file for a 400-worthy input error."""
 
 
+def _run_anonymize_text(data: dict) -> dict:
+    """Run the text-anonymization pipeline for a parsed /anonymize body.
+
+    Body: {text, regex?, corporate?, ner?, llm?, ner_threshold?}
+    Returns the same shape the synchronous /anonymize handler replies with.
+    Shared by the synchronous handler and the async job worker so the two can
+    never drift apart (same contract as ``_run_anonymize_file``).
+    """
+    text = data.get("text", "")
+    stages = {k: data[k] for k in _STAGE_NAMES if k in data}
+
+    t0 = time.time()
+    with _LOCK:  # one model call at a time (torch is not thread-safe)
+        anon = _compose(stages, data.get("ner_threshold"))
+        res = anon.anonymize(text)
+    elapsed = time.time() - t0
+
+    used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
+    return {
+        "anonymized_text": res.anonymized_text,
+        "mapping": res.mapping,
+        "summary": res.summary,
+        "spans": [
+            {"start": s.start, "end": s.end, "label": s.label, "text": s.text}
+            for s in res.spans
+        ],
+        "stages": used,
+        "elapsed_seconds": round(elapsed, 2),
+        "preexisting_placeholders": res.preexisting_placeholders,
+        "warnings": list(res.warnings),
+    }
+
+
 def _run_anonymize_file(data: dict) -> dict:
     """Run the file-anonymization pipeline for a parsed /anonymize-file body.
 
@@ -279,7 +312,10 @@ class Handler(BaseHTTPRequestHandler):
         # NB: check the jobs routes first — "jobs/anonymize-file" also ends
         # with "anonymize-file", so it would otherwise be swallowed below.
         if path.endswith("jobs/anonymize-file"):
-            self._handle_file_job_submit()
+            self._submit_job(_run_anonymize_file)
+            return
+        if path.endswith("jobs/anonymize"):
+            self._submit_job(_run_anonymize_text)
             return
         # NB: check "deanonymize-file" first — it also ends with "anonymize-file".
         if path.endswith("deanonymize-file"):
@@ -295,30 +331,57 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_text(self):
         try:
-            data = self._read_json()
-            text = data.get("text", "")
-            stages = {k: data[k] for k in _STAGE_NAMES if k in data}
-            t0 = time.time()
-            with _LOCK:  # one model call at a time (torch is not thread-safe)
-                anon = _compose(stages, data.get("ner_threshold"))
-                res = anon.anonymize(text)
-            elapsed = time.time() - t0
-            used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
-            self._send(200, {
-                "anonymized_text": res.anonymized_text,
-                "mapping": res.mapping,
-                "summary": res.summary,
-                "spans": [
-                    {"start": s.start, "end": s.end, "label": s.label, "text": s.text}
-                    for s in res.spans
-                ],
-                "stages": used,
-                "elapsed_seconds": round(elapsed, 2),
-                "preexisting_placeholders": res.preexisting_placeholders,
-                "warnings": list(res.warnings),
-            })
+            self._send(200, _run_anonymize_text(self._read_json()))
+        except _BadRequest as exc:
+            self._send(400, {"error": str(exc)})
         except Exception as exc:  # noqa: BLE001
             self._send(500, {"error": str(exc)})
+
+    def _submit_job(self, runner):
+        """Parse the body, start ``runner(data)`` on a worker thread, reply 202.
+
+        Shared by the text and file job routes. The HTTP request itself lasts
+        milliseconds — which is the whole point: any gateway between us and the
+        client (Vercel, a VS Code dev tunnel) enforces a fixed per-request
+        timeout that a multi-minute pipeline can never satisfy, no matter how
+        the budget is configured on either end. Polling GET /jobs/<id> keeps
+        every request short, so the gateway limit stops mattering.
+        """
+        try:
+            data = self._read_json()
+        except Exception as exc:  # noqa: BLE001
+            self._send(400, {"error": f"invalid json: {exc}"})
+            return
+
+        job_id = uuid.uuid4().hex
+        with _JOBS_LOCK:
+            _sweep_jobs()
+            _JOBS[job_id] = {
+                "status": "pending", "result": None, "error": None, "created": time.time(),
+            }
+
+        def _worker():
+            with _JOBS_LOCK:
+                job = _JOBS.get(job_id)
+                if job is not None:
+                    job["status"] = "running"
+            try:
+                result = runner(data)
+            except Exception as exc:  # noqa: BLE001
+                with _JOBS_LOCK:
+                    job = _JOBS.get(job_id)
+                    if job is not None:
+                        job["status"] = "error"
+                        job["error"] = str(exc)
+                return
+            with _JOBS_LOCK:
+                job = _JOBS.get(job_id)
+                if job is not None:
+                    job["status"] = "done"
+                    job["result"] = result
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self._send(202, {"job_id": job_id})
 
     def _handle_file(self):
         """Accept a base64-encoded .docx/.txt, return the anonymized document.
@@ -337,49 +400,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": str(exc)})
         except Exception as exc:  # noqa: BLE001
             self._send(500, {"error": str(exc)})
-
-    def _handle_file_job_submit(self):
-        """Accept the same body as /anonymize-file but return immediately.
-
-        Reply: 202 {"job_id": "..."}. The actual pipeline run happens on a
-        background thread; poll GET /jobs/<job_id> for the result. Exists
-        because the devtunnel relay in front of this server 504s any single
-        request after ~100s, while the pipeline can easily take longer than
-        that on real documents.
-        """
-        try:
-            data = self._read_json()
-        except Exception as exc:  # noqa: BLE001
-            self._send(500, {"error": str(exc)})
-            return
-
-        job_id = uuid.uuid4().hex
-        with _JOBS_LOCK:
-            _sweep_jobs()
-            _JOBS[job_id] = {"status": "pending", "result": None, "error": None, "created": time.time()}
-
-        def _worker():
-            with _JOBS_LOCK:
-                job = _JOBS.get(job_id)
-                if job is not None:
-                    job["status"] = "running"
-            try:
-                result = _run_anonymize_file(data)
-            except Exception as exc:  # noqa: BLE001
-                with _JOBS_LOCK:
-                    job = _JOBS.get(job_id)
-                    if job is not None:
-                        job["status"] = "error"
-                        job["error"] = str(exc)
-                return
-            with _JOBS_LOCK:
-                job = _JOBS.get(job_id)
-                if job is not None:
-                    job["status"] = "done"
-                    job["result"] = result
-
-        threading.Thread(target=_worker, daemon=True).start()
-        self._send(202, {"job_id": job_id})
 
     def _handle_job_status(self, job_id: str):
         """GET /jobs/<job_id> -> {status, result, error}. Never touches _LOCK,
@@ -547,9 +567,9 @@ def main() -> None:
             _DETECTORS["ner"] = [NatashaDetector()]
 
     if args.llm:
-        from anonymizer.llm import LLMConfig, LLMDetector
+        from anonymizer.llm import NO_THINKING_EXTRA_BODY, LLMConfig, LLMDetector
 
-        extra = {} if args.think else {"reasoning_effort": "none"}
+        extra = {} if args.think else NO_THINKING_EXTRA_BODY
         lconf = LLMConfig(base_url=args.llm_base_url, model=args.llm_model, extra_body=extra)
         if args.corporate:  # the LLM (not regex) handles organizations and money sums
             from dataclasses import replace
@@ -558,9 +578,10 @@ def main() -> None:
         _DETECTORS["llm"] = [LLMDetector(lconf)]
 
     if args.review:
+        from anonymizer.llm import NO_THINKING_EXTRA_BODY
         from anonymizer.review import ReviewConfig
 
-        review_extra = {} if args.think else {"reasoning_effort": "none"}
+        review_extra = {} if args.think else NO_THINKING_EXTRA_BODY
         review_kwargs = dict(
             base_url=args.review_base_url or args.llm_base_url,
             model=args.review_model or args.llm_model,

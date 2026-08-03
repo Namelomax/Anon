@@ -3,7 +3,7 @@
   "regions": ["fra1"],
   "functions": {
     "app/api/anonymize/route.ts": {
-      "maxDuration": 300
+      "maxDuration": 900
     }
   }
 }

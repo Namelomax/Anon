@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { callBackend, callBackendGet, describeError } from "../_shared";
 
 export const runtime = "nodejs";
-export const maxDuration = 300; // long pipeline (GLiNER + LLM)
+export const maxDuration = 900; // long pipeline (GLiNER + LLM)
 
 const BACKEND_URL =
   process.env.ANONYMIZER_BACKEND_URL?.replace(/\/$/, "") || "http://127.0.0.1:8000";
@@ -12,14 +12,14 @@ type Stages = Partial<
   Record<"regex" | "corporate" | "ner" | "llm" | "review" | "subject", boolean>
 >;
 
-// Per-request timeout for the submit call and each status poll: short and
-// well under the devtunnel relay's ~100s ceiling, so a single stuck request
-// never eats the whole budget.
-const _REQUEST_TIMEOUT_MS = 30_000;
+// Per-request timeout for the submit call and each status poll: long enough
+// for the backend to answer under the proxy, but still short enough that a
+// single stuck request does not block the whole function for too long.
+const _REQUEST_TIMEOUT_MS = 60_000;
 // Interval between status polls.
 const _POLL_INTERVAL_MS = 2_000;
-// Total time budget for submit + polling, kept under maxDuration (300s).
-const _TOTAL_BUDGET_MS = 280_000;
+// Total time budget for submit + polling, kept under maxDuration (900s).
+const _TOTAL_BUDGET_MS = 840_000;
 
 function _sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

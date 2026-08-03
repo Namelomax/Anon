@@ -218,13 +218,28 @@ class Anonymizer:
 
         from .verify import scan_residual_pii
 
+        warnings: list[dict] = list(scan_residual_pii(anonymized))
+        # Detectors that could not fully analyze their input (e.g. the LLM
+        # detector giving up on a chunk after a degenerate reply, see llm.py)
+        # surface it here — a chunk skipped by the LLM is PII that may still
+        # be unmasked, and that must not be silent. Not all detectors track
+        # this, hence getattr with a default instead of a base-class method.
+        # Deduplicated by identity: build_anonymizer reuses the SAME LLM
+        # detector instance for both the main pass and the second pass, so
+        # iterating both lists as-is would double-count its warnings.
+        seen_detectors: dict[int, object] = {}
+        for det in (*self._detectors, *self._second_pass_detectors):
+            seen_detectors[id(det)] = det
+        for det in seen_detectors.values():
+            warnings.extend(getattr(det, "warnings", None) or [])
+
         return AnonymizationResult(
             text=text,
             anonymized_text=anonymized,
             mapping=mapping,
             spans=tuple(spans),
             preexisting_placeholders=len(protected),
-            warnings=tuple(scan_residual_pii(anonymized)),
+            warnings=tuple(warnings),
         )
 
     def _find_leaked_spans(

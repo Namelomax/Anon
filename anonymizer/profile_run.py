@@ -247,7 +247,7 @@ def _build(args, *, second_pass: bool, recall: bool, review_on: bool):
     from anonymizer.detectors import CORPORATE_DETECTORS, DEFAULT_DETECTORS
     from anonymizer.engine import Anonymizer
     from anonymizer.glossary import DEFAULT_GLOSSARY_PATH, GlossaryDetector, load_glossary
-    from anonymizer.llm import LLMConfig, LLMDetector
+    from anonymizer.llm import NO_THINKING_EXTRA_BODY, LLMConfig, LLMDetector
     from anonymizer.review import ReviewConfig
 
     dets: list = list(DEFAULT_DETECTORS)
@@ -267,7 +267,7 @@ def _build(args, *, second_pass: bool, recall: bool, review_on: bool):
 
         dets.append(NatashaDetector())
 
-    extra = {} if args.think else {"reasoning_effort": "none"}
+    extra = {} if args.think else NO_THINKING_EXTRA_BODY
     lconf = LLMConfig(
         base_url=args.llm_base_url, model=args.llm_model, extra_body=extra
     )

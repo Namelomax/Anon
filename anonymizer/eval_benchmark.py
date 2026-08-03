@@ -344,9 +344,9 @@ def _make_anon(args):
 def _llm_cfg(args):
     if not getattr(args, "llm", False):
         return None
-    from anonymizer.llm import LLMConfig
+    from anonymizer.llm import NO_THINKING_EXTRA_BODY, LLMConfig
 
-    extra = {"reasoning_effort": "none"} if getattr(args, "llm_no_think", False) else {}
+    extra = NO_THINKING_EXTRA_BODY if getattr(args, "llm_no_think", False) else {}
     return LLMConfig(
         base_url=args.llm_base_url, model=args.llm_model,
         api_key=args.llm_api_key, extra_body=extra,

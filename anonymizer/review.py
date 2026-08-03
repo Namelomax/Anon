@@ -240,8 +240,15 @@ class ReviewConfig:
         base_url: OpenAI-compatible base (LM Studio / Ollama). Typically the
             same server used for the detection LLM layer.
         model: Model id as the server reports it.
-        max_tokens: Output budget for the verdict JSON (small — just a list
-            of ``{id, keep, trim?, merge_with?}`` objects).
+        max_tokens: Output budget for the verdict JSON — a list of
+            ``{id, keep, trim?, merge_with?}`` objects, one per candidate, each
+            echoing the candidate text back, so it grows with document size
+            (1626 completion tokens on a ~90-candidate transcript, measured).
+            ВНИМАНИЕ: LM Studio отвергает запрос с HTTP 400, если
+            ``prompt_tokens + max_tokens`` превышает длину загруженного
+            контекста. При 16000 здесь модель должна быть загружена с
+            контекстом не меньше 32k, иначе recall-проход (он шлёт весь
+            замаскированный документ) будет падать с 400.
         temperature: 0 for deterministic verdicts.
         timeout: Per-request seconds.
         api_key: Sent as Bearer; ignored by LM Studio/Ollama.
@@ -255,7 +262,7 @@ class ReviewConfig:
 
     base_url: str = "http://127.0.0.1:11434/v1"
     model: str = "gemma4:12b"
-    max_tokens: int = 8000
+    max_tokens: int = 16000
     temperature: float = 0.0
     timeout: float = 300.0
     api_key: str = "not-needed"
