@@ -221,8 +221,8 @@ class LLMConfig:
             budget.
     """
 
-    base_url: str = "http://127.0.0.1:1234/v1"
-    model: str = "gemma4:12b"
+    base_url: str = "http://127.0.0.1:11433/v1"
+    model: str = "qwen3.5:9b"
     max_tokens: int = 1500
     temperature: float = 0.0
     timeout: float = 300.0

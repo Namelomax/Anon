@@ -260,8 +260,8 @@ class ReviewConfig:
             only so existing configs don't break.
     """
 
-    base_url: str = "http://127.0.0.1:11434/v1"
-    model: str = "gemma4:12b"
+    base_url: str = "http://127.0.0.1:11433/v1"
+    model: str = "qwen3.5:9b"
     max_tokens: int = 16000
     temperature: float = 0.0
     timeout: float = 300.0

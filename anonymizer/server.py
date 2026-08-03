@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 import time
@@ -502,8 +503,24 @@ def main() -> None:
         "--llm", action=_Bool, default=True,
         help="LLM-слой добора сложных ПДн. По умолчанию ВКЛ. Отключить: --no-llm.",
     )
-    ap.add_argument("--llm-base-url", default="http://127.0.0.1:11433/v1")
-    ap.add_argument("--llm-model", default="gemma4:12b")
+    # Дефолты берутся из окружения, чтобы модель переключалась ОДНОЙ переменной
+    # и одинаково для детекции и для review — иначе легко забыть --review-model
+    # и держать в VRAM две модели сразу, что на 10-гигабайтной карте кончается
+    # частичной выгрузкой слоёв на CPU (`offloaded 34/49 layers`) и падением
+    # скорости втрое.
+    ap.add_argument(
+        "--llm-base-url",
+        default=os.getenv("ANONYMIZER_LLM_BASE_URL", "http://127.0.0.1:11433/v1"),
+        help="OpenAI-совместимый эндпоинт. Дефолт — локальный Ollama на хабе "
+             "(:11433, см. JUPYTERHUB_GPU.md); обычная установка Ollama — :11434, "
+             "LM Studio — :1234. Переопределяется ANONYMIZER_LLM_BASE_URL.",
+    )
+    ap.add_argument(
+        "--llm-model",
+        default=os.getenv("ANONYMIZER_LLM_MODEL", "qwen3.5:9b"),
+        help="Идентификатор модели РОВНО как его отдаёт сервер (`ollama list` "
+             "или GET /v1/models). Переопределяется ANONYMIZER_LLM_MODEL.",
+    )
     ap.add_argument(
         "--review", action=_Bool, default=True,
         help="4-й слой: LLM перепроверяет итоговый список и снимает очевидные "

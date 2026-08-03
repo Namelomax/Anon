@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -310,8 +311,13 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("file", help="Документ .txt или .docx")
-    ap.add_argument("--llm-base-url", default="http://127.0.0.1:1234/v1")
-    ap.add_argument("--llm-model", default="google/gemma-4-12b-qat")
+    ap.add_argument(
+        "--llm-base-url",
+        default=os.getenv("ANONYMIZER_LLM_BASE_URL", "http://127.0.0.1:11433/v1"),
+    )
+    ap.add_argument(
+        "--llm-model", default=os.getenv("ANONYMIZER_LLM_MODEL", "qwen3.5:9b")
+    )
     ap.add_argument("--ner", default="gliner", choices=["gliner", "natasha", "none"])
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--corporate", action=argparse.BooleanOptionalAction, default=True)
