@@ -3,6 +3,7 @@
 import JSZip from "jszip";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { MAX_UPLOAD_BYTES, explainUploadLimit, formatBytes } from "./limits";
+import { stripDocxMedia } from "./strip-media";
 
 type StageKey = "regex" | "corporate" | "ner" | "llm" | "review" | "subject";
 
@@ -88,6 +89,10 @@ export default function Home() {
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Информационное сообщение (не ошибка): например, сколько картинок вырезано.
+  const [notice, setNotice] = useState<string | null>(null);
+  // Картинки для обезличивания не нужны, а вес дают почти весь — по умолчанию ВКЛ.
+  const [dropImages, setDropImages] = useState(true);
   const [result, setResult] = useState<AnonResult | null>(null);
   const [drag, setDrag] = useState(false);
   const [stagesOpen, setStagesOpen] = useState(false);
@@ -128,19 +133,38 @@ export default function Home() {
 
   const run = useCallback(async () => {
     if (!file) return;
-    // Проверяем размер ДО отправки: иначе платформа отвергнет запрос своим
-    // 413 с текстом «Request Entity Too Large», который не JSON, и
-    // пользователь увидит «Unexpected token 'R'» вместо объяснения.
-    if (file.size > MAX_UPLOAD_BYTES) {
-      setError(explainUploadLimit(file.size));
-      return;
-    }
     setLoading(true);
     setError(null);
     setResult(null);
+    setNotice(null);
     try {
+      // Картинки не участвуют в обезличивании (распознавания в конвейере нет),
+      // но именно они определяют вес файла. Вычищаем их ДО проверки размера —
+      // документы на десятки мегабайт после этого проходят свободно.
+      let toSend = file;
+      if (dropImages) {
+        const stripped = await stripDocxMedia(file);
+        if (stripped.removed > 0) {
+          toSend = stripped.file;
+          setNotice(
+            `Изображений вырезано: ${stripped.removed}. Размер ` +
+              `${formatBytes(stripped.bytesBefore)} → ${formatBytes(stripped.bytesAfter)}. ` +
+              `В скачанном документе на их месте будут пустые рамки.`,
+          );
+        }
+      }
+
+      // Проверяем размер ДО отправки: иначе платформа отвергнет запрос своим
+      // 413 с текстом «Request Entity Too Large», который не JSON, и
+      // пользователь увидит «Unexpected token 'R'» вместо объяснения.
+      if (toSend.size > MAX_UPLOAD_BYTES) {
+        setError(explainUploadLimit(toSend.size));
+        setLoading(false);
+        return;
+      }
+
       const fd = new FormData();
-      fd.append("file", file);
+      fd.append("file", toSend);
       fd.append("stages", JSON.stringify(stages));
       const resp = await fetch("/api/anonymize", { method: "POST", body: fd });
       // Тело ответа может НЕ быть JSON: платформа отдаёт свои ошибки (413, 504,
@@ -166,7 +190,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [file, stages]);
+  }, [file, stages, dropImages]);
 
   const toggleKept = (ph: string) =>
     setKept((prev) => {
@@ -432,6 +456,26 @@ export default function Home() {
               </button>
               {loading && <span className="note">Запрос идёт на бэкенд (GLiNER + LLM). Это может занять время.</span>}
             </div>
+            <label className="stage" style={{ marginTop: 14, display: "flex", gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={dropImages}
+                onChange={() => setDropImages((v) => !v)}
+              />
+              <span>
+                Вырезать изображения из .docx перед отправкой
+                <span className="note" style={{ display: "block" }}>
+                  Картинки не участвуют в обезличивании, но дают почти весь вес файла
+                  (проверено: 19.9 МБ → 42 КБ). В скачанном документе на их месте
+                  останутся пустые рамки.
+                </span>
+              </span>
+            </label>
+            {notice && (
+              <div className="note" style={{ marginTop: 10 }}>
+                {notice}
+              </div>
+            )}
             {error && (
               <div className="error" style={{ marginTop: 14 }}>
                 Ошибка: {error}
