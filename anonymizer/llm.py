@@ -14,8 +14,10 @@ Design contract that keeps anonymization reversible and safe:
   deterministic.
 * Anything the model returns that cannot be located verbatim (after whitespace
   normalization) is dropped — we never mask text we can't pin down.
-* JSON is parsed from ``content`` or, for reasoning models that exhaust the
-  token budget mid-think, from ``reasoning_content`` as a fallback.
+* The reply is parsed from ``content`` or, for reasoning models that exhaust
+  the token budget mid-think, from ``reasoning_content`` as a fallback. The
+  model is asked for a compact ``ТИП|текст`` line format; the old JSON-array
+  format is still accepted as a fallback.
 
 Works with LM Studio (``http://127.0.0.1:1234/v1``) and Ollama
 (``http://127.0.0.1:11434/v1``); both expose the same chat-completions API.
@@ -126,10 +128,13 @@ def _build_system_prompt(allowed_labels: frozenset) -> str:
         "Текст может быть СЛИПШИМСЯ (без пробелов) или с ошибками извлечения из "
         "файла: «ИвановИ.И.», «Москва101000», «годаг.». Всё равно находи ПДн и "
         "возвращай точную подстроку, как она записана (даже слипшуюся).\n"
-        "Верни ТОЛЬКО JSON-массив объектов вида "
-        '{"text": "<точная подстрока из текста>", "type": "<ТИП>"}.\n'
+        "Верни результат построчно, БЕЗ JSON, БЕЗ markdown-разметки и code fences, "
+        "БЕЗ пояснений: одна сущность на строку в формате «ТИП|текст», где «|» "
+        "отделяет тип от текста, например:\n"
+        "PERSON|Иванов Иван Петрович\n"
+        "PHONE|+7 916 123-45-67\n"
         f"Допустимые типы (используй ТОЛЬКО их): {types}.\n"
-        "Поле text должно ДОСЛОВНО совпадать с фрагментом исходного текста "
+        "Текст после «|» должен ДОСЛОВНО совпадать с фрагментом исходного текста "
         "(те же символы, регистр и пробелы). Не перефразируй, не нормализуй числа.\n"
         + org_rule + amount_rule + subject_rule +
         "НЕ помечай: слова-категории сами по себе (паспорт, СНИЛС, ИНН, полис, "
@@ -144,7 +149,8 @@ def _build_system_prompt(allowed_labels: frozenset) -> str:
         "Если документ относится к водительскому удостоверению (рядом есть слова "
         "«водитель», «права», «ВУ», «вождение»), используй тип DRIVER_LICENSE, а "
         "не PASSPORT.\n"
-        "Если ничего не найдено — верни []. Никаких пояснений, только JSON."
+        "Если ничего не найдено — верни пустой ответ. Никаких пояснений, "
+        "только строки «ТИП|текст»."
     )
 
 # Default label whitelist; anything else the model emits (ORGANIZATION, DATE...)
@@ -273,10 +279,51 @@ class LLMDetector:
         return spans
 
 
-# --- JSON parsing ----------------------------------------------------------
+# --- Line-format / JSON parsing ---------------------------------------------
+
+# A type label looks like "PERSON" or "DRIVER_LICENSE" — uppercase ASCII and
+# underscores only. Used to reject lines where "|" appears inside the text
+# itself before the real type (defensive; the split is on the first "|").
+_LABEL_RE = re.compile(r"^[A-Za-z_]+$")
+
 
 def _parse_items(content: str) -> list[tuple[str, str]]:
-    """Extract ``(text, type)`` pairs from a model reply (tolerant of prose)."""
+    """Extract ``(text, type)`` pairs from a model reply.
+
+    Prefers the compact ``ТИП|текст`` line format (one entity per line, no
+    JSON scaffolding — see ``_build_system_prompt``). Falls back to the old
+    JSON-array format for models that ignore the instruction.
+    """
+    items = _parse_lines(content)
+    if items:
+        return items
+    return _parse_json(content)
+
+
+def _parse_lines(content: str) -> list[tuple[str, str]]:
+    """Parse ``ТИП|текст`` lines, tolerant of ``` code fences around the reply."""
+    items: list[tuple[str, str]] = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("```"):
+            continue  # opening/closing code fence, possibly with a language tag
+        if "|" not in line:
+            continue
+        raw_type, _, raw_text = line.partition("|")
+        raw_type = raw_type.strip()
+        raw_text = raw_text.strip()
+        if not raw_type or not raw_text:
+            continue
+        if not _LABEL_RE.match(raw_type):
+            continue
+        items.append((raw_text, raw_type))
+    return items
+
+
+def _parse_json(content: str) -> list[tuple[str, str]]:
+    """Extract ``(text, type)`` pairs from a JSON-array reply (tolerant of prose)."""
     blob = _extract_json_array(content)
     if blob is None:
         return []

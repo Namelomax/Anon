@@ -46,7 +46,7 @@ export async function callBackend(
   let attempt = 0;
   for (;;) {
     try {
-      return await _callBackendOnce(url, bodyJson, apiKey, timeoutMs);
+      return await _callBackendOnce(url, "POST", bodyJson, apiKey, timeoutMs);
     } catch (err) {
       // Only retry pure connect-phase failures — once any response bytes/
       // headers have arrived, `_callBackendOnce` throws a marked error that
@@ -61,8 +61,34 @@ export async function callBackend(
   }
 }
 
+/**
+ * Same as `callBackend` but for a bodiless GET request (e.g. job-status
+ * polling). Shares the same connect-phase retry logic and the
+ * `insecureHTTPParser` workaround for the JupyterHub proxy's malformed CSP
+ * header.
+ */
+export async function callBackendGet(
+  url: string,
+  apiKey: string,
+  timeoutMs: number,
+): Promise<{ status: number; text: string }> {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await _callBackendOnce(url, "GET", "", apiKey, timeoutMs);
+    } catch (err) {
+      if (attempt >= _RETRY_DELAYS_MS.length || !_isRetryableConnectError(err)) {
+        throw err;
+      }
+      await _sleep(_RETRY_DELAYS_MS[attempt]);
+      attempt += 1;
+    }
+  }
+}
+
 function _callBackendOnce(
   url: string,
+  method: "POST" | "GET",
   bodyJson: string,
   apiKey: string,
   timeoutMs: number,
@@ -70,12 +96,13 @@ function _callBackendOnce(
   const u = new URL(url);
   const isHttps = u.protocol === "https:";
   const reqFn = isHttps ? httpsRequest : httpRequest;
-  const body = Buffer.from(bodyJson, "utf8");
+  const body = method === "GET" ? null : Buffer.from(bodyJson, "utf8");
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "Content-Length": String(body.length),
-  };
+  const headers: Record<string, string> = {};
+  if (body !== null) {
+    headers["Content-Type"] = "application/json";
+    headers["Content-Length"] = String(body.length);
+  }
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
   return new Promise((resolve, reject) => {
@@ -89,7 +116,7 @@ function _callBackendOnce(
         hostname: u.hostname,
         port: u.port || (isHttps ? 443 : 80),
         path: u.pathname + u.search,
-        method: "POST",
+        method,
         headers,
         insecureHTTPParser: true,
         timeout: timeoutMs,
@@ -111,7 +138,7 @@ function _callBackendOnce(
       if (responseStarted) (err as { _responseStarted?: boolean })._responseStarted = true;
       reject(err);
     });
-    req.write(body);
+    if (body !== null) req.write(body);
     req.end();
   });
 }

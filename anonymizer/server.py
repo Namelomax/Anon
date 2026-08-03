@@ -42,6 +42,7 @@ import json
 import sys
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -57,6 +58,30 @@ _INFO: dict = {}
 _LOCK = threading.Lock()  # serialize model calls: torch/GLiNER is not thread-safe
 
 _STAGE_NAMES = ("regex", "corporate", "glossary", "ner", "llm", "review", "second_pass", "subject")
+
+# --- Async job store (for /jobs/anonymize-file) --------------------------
+# The devtunnel relay in front of this server 504s any single request after
+# ~100s, but the anonymization pipeline routinely takes longer than that on
+# real documents. /jobs/anonymize-file returns immediately with a job id, and
+# the caller polls /jobs/<id> — every individual HTTP request stays fast.
+# Guarded by its own lock, separate from _LOCK (which serializes model calls):
+# never hold both at once, and GET /jobs/<id> must never block on _LOCK, or
+# polling would queue up behind a running job and defeat the whole point.
+_JOBS: dict = {}          # job_id -> {"status", "result", "error", "created"}
+_JOBS_LOCK = threading.Lock()
+_JOB_TTL_SECONDS = 10 * 60  # evict finished jobs after 10 minutes
+
+
+def _sweep_jobs() -> None:
+    """Drop finished jobs older than the TTL. Called lazily on each submit —
+    no background timer thread. Must be called with _JOBS_LOCK held."""
+    now = time.time()
+    stale = [
+        jid for jid, job in _JOBS.items()
+        if job["status"] in ("done", "error") and now - job["created"] > _JOB_TTL_SECONDS
+    ]
+    for jid in stale:
+        del _JOBS[jid]
 
 
 def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
@@ -113,6 +138,72 @@ def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
     return Anonymizer(dets, review_config=review_cfg, second_pass_detectors=second_pass)
 
 
+class _BadRequest(Exception):
+    """Raised by _run_anonymize_file for a 400-worthy input error."""
+
+
+def _run_anonymize_file(data: dict) -> dict:
+    """Run the file-anonymization pipeline for a parsed /anonymize-file body.
+
+    Body: {filename, file_base64, regex?, corporate?, ner?, llm?}
+    Returns: {filename, is_docx, anonymized_text, mapping, summary, spans,
+              stages, document_base64, document_name, document_mime}
+    Raises _BadRequest for a malformed request (missing file_base64), or lets
+    any other exception propagate. Shared by the synchronous /anonymize-file
+    handler and the async job worker, so the two paths can never drift apart.
+    """
+    import base64
+    from pathlib import PurePosixPath
+
+    from anonymizer.documents import anonymized_docx_bytes, read_text_from_bytes
+
+    filename = (data.get("filename") or "document.txt").strip()
+    b64 = data.get("file_base64") or ""
+    if not b64:
+        raise _BadRequest("file_base64 is required")
+    raw = base64.b64decode(b64)
+    stages = {k: data[k] for k in _STAGE_NAMES if k in data}
+
+    is_docx = filename.lower().endswith(".docx")
+    text = read_text_from_bytes(filename, raw)
+
+    t0 = time.time()
+    with _LOCK:  # torch is not thread-safe
+        anon = _compose(stages, data.get("ner_threshold"))
+        res = anon.anonymize(text)
+    elapsed = time.time() - t0
+
+    stem = PurePosixPath(filename).stem or "document"
+    if is_docx:
+        doc_bytes = anonymized_docx_bytes(raw, res.mapping)
+        doc_name = f"{stem}.anon.docx"
+        doc_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    else:
+        doc_bytes = res.anonymized_text.encode("utf-8")
+        doc_name = f"{stem}.anon.txt"
+        doc_mime = "text/plain"
+
+    used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
+    return {
+        "filename": filename,
+        "is_docx": is_docx,
+        "anonymized_text": res.anonymized_text,
+        "mapping": res.mapping,
+        "summary": res.summary,
+        "spans": [
+            {"start": s.start, "end": s.end, "label": s.label, "text": s.text}
+            for s in res.spans
+        ],
+        "stages": used,
+        "elapsed_seconds": round(elapsed, 2),
+        "preexisting_placeholders": res.preexisting_placeholders,
+        "warnings": list(res.warnings),
+        "document_base64": base64.b64encode(doc_bytes).decode("ascii"),
+        "document_name": doc_name,
+        "document_mime": doc_mime,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def _cors(self) -> None:
         # Allow the Next.js UI (Vercel / localhost) to call us from the browser.
@@ -148,10 +239,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path.rstrip("/").endswith("health") or self.path in ("/", ""):
+        path = self.path.rstrip("/")
+        if path.endswith("health") or self.path in ("/", ""):
             self._send(200, {"status": "ok", **_INFO})
-        else:
-            self._send(404, {"error": "not found"})
+            return
+        if "/jobs/" in path:
+            job_id = path.rsplit("/jobs/", 1)[1]
+            self._handle_job_status(job_id)
+            return
+        self._send(404, {"error": "not found"})
 
     def _read_json(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
@@ -159,6 +255,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.rstrip("/")
+        # NB: check the jobs routes first — "jobs/anonymize-file" also ends
+        # with "anonymize-file", so it would otherwise be swallowed below.
+        if path.endswith("jobs/anonymize-file"):
+            self._handle_file_job_submit()
+            return
         # NB: check "deanonymize-file" first — it also ends with "anonymize-file".
         if path.endswith("deanonymize-file"):
             self._handle_deanon_file()
@@ -208,61 +309,76 @@ class Handler(BaseHTTPRequestHandler):
         same placeholder everywhere; for .docx we rebuild a copy preserving the
         paragraph/table structure.
         """
-        import base64
-        from pathlib import PurePosixPath
-
-        from anonymizer.documents import anonymized_docx_bytes, read_text_from_bytes
-
         try:
             data = self._read_json()
-            filename = (data.get("filename") or "document.txt").strip()
-            b64 = data.get("file_base64") or ""
-            if not b64:
-                self._send(400, {"error": "file_base64 is required"})
-                return
-            raw = base64.b64decode(b64)
-            stages = {k: data[k] for k in _STAGE_NAMES if k in data}
-
-            is_docx = filename.lower().endswith(".docx")
-            text = read_text_from_bytes(filename, raw)
-
-            t0 = time.time()
-            with _LOCK:  # torch is not thread-safe
-                anon = _compose(stages, data.get("ner_threshold"))
-                res = anon.anonymize(text)
-            elapsed = time.time() - t0
-
-            stem = PurePosixPath(filename).stem or "document"
-            if is_docx:
-                doc_bytes = anonymized_docx_bytes(raw, res.mapping)
-                doc_name = f"{stem}.anon.docx"
-                doc_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            else:
-                doc_bytes = res.anonymized_text.encode("utf-8")
-                doc_name = f"{stem}.anon.txt"
-                doc_mime = "text/plain"
-
-            used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
-            self._send(200, {
-                "filename": filename,
-                "is_docx": is_docx,
-                "anonymized_text": res.anonymized_text,
-                "mapping": res.mapping,
-                "summary": res.summary,
-                "spans": [
-                    {"start": s.start, "end": s.end, "label": s.label, "text": s.text}
-                    for s in res.spans
-                ],
-                "stages": used,
-                "elapsed_seconds": round(elapsed, 2),
-                "preexisting_placeholders": res.preexisting_placeholders,
-                "warnings": list(res.warnings),
-                "document_base64": base64.b64encode(doc_bytes).decode("ascii"),
-                "document_name": doc_name,
-                "document_mime": doc_mime,
-            })
+            self._send(200, _run_anonymize_file(data))
+        except _BadRequest as exc:
+            self._send(400, {"error": str(exc)})
         except Exception as exc:  # noqa: BLE001
             self._send(500, {"error": str(exc)})
+
+    def _handle_file_job_submit(self):
+        """Accept the same body as /anonymize-file but return immediately.
+
+        Reply: 202 {"job_id": "..."}. The actual pipeline run happens on a
+        background thread; poll GET /jobs/<job_id> for the result. Exists
+        because the devtunnel relay in front of this server 504s any single
+        request after ~100s, while the pipeline can easily take longer than
+        that on real documents.
+        """
+        try:
+            data = self._read_json()
+        except Exception as exc:  # noqa: BLE001
+            self._send(500, {"error": str(exc)})
+            return
+
+        job_id = uuid.uuid4().hex
+        with _JOBS_LOCK:
+            _sweep_jobs()
+            _JOBS[job_id] = {"status": "pending", "result": None, "error": None, "created": time.time()}
+
+        def _worker():
+            with _JOBS_LOCK:
+                job = _JOBS.get(job_id)
+                if job is not None:
+                    job["status"] = "running"
+            try:
+                result = _run_anonymize_file(data)
+            except Exception as exc:  # noqa: BLE001
+                with _JOBS_LOCK:
+                    job = _JOBS.get(job_id)
+                    if job is not None:
+                        job["status"] = "error"
+                        job["error"] = str(exc)
+                return
+            with _JOBS_LOCK:
+                job = _JOBS.get(job_id)
+                if job is not None:
+                    job["status"] = "done"
+                    job["result"] = result
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self._send(202, {"job_id": job_id})
+
+    def _handle_job_status(self, job_id: str):
+        """GET /jobs/<job_id> -> {status, result, error}. Never touches _LOCK,
+        so polling is served concurrently with a running job (the server is
+        ThreadingHTTPServer)."""
+        # Snapshot under the lock, then release it before writing the response:
+        # a finished result carries the document as base64 (megabytes), and a
+        # slow client would otherwise hold _JOBS_LOCK for the whole socket
+        # write, stalling job submits and worker status updates.
+        with _JOBS_LOCK:
+            job = _JOBS.get(job_id)
+            payload = None if job is None else {
+                "status": job["status"],
+                "result": job["result"],
+                "error": job["error"],
+            }
+        if payload is None:
+            self._send(404, {"error": "unknown job"})
+            return
+        self._send(200, payload)
 
     def _handle_deanon_file(self):
         """Restore originals in an anonymized .docx/.txt using a mapping (no AI).
