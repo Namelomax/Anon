@@ -2,6 +2,7 @@
 
 import JSZip from "jszip";
 import { useCallback, useMemo, useRef, useState } from "react";
+import { MAX_UPLOAD_BYTES, explainUploadLimit, formatBytes } from "./limits";
 
 type StageKey = "regex" | "corporate" | "ner" | "llm" | "review" | "subject";
 
@@ -17,6 +18,10 @@ type AnonResult = {
   document_base64: string;
   document_name: string;
   document_mime: string;
+  /** Готовый файл не пролез в лимит ответа: текст и мапинг есть, бинарника нет. */
+  document_too_large?: boolean;
+  /** Человекочитаемое пояснение к document_too_large. */
+  warning?: string;
 };
 
 type DeanonResult = {
@@ -123,6 +128,13 @@ export default function Home() {
 
   const run = useCallback(async () => {
     if (!file) return;
+    // Проверяем размер ДО отправки: иначе платформа отвергнет запрос своим
+    // 413 с текстом «Request Entity Too Large», который не JSON, и
+    // пользователь увидит «Unexpected token 'R'» вместо объяснения.
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setError(explainUploadLimit(file.size));
+      return;
+    }
     setLoading(true);
     setError(null);
     setResult(null);
@@ -131,7 +143,19 @@ export default function Home() {
       fd.append("file", file);
       fd.append("stages", JSON.stringify(stages));
       const resp = await fetch("/api/anonymize", { method: "POST", body: fd });
-      const data = await resp.json();
+      // Тело ответа может НЕ быть JSON: платформа отдаёт свои ошибки (413, 504,
+      // «An error occurred…») обычным текстом или HTML. Читаем как текст и
+      // разбираем защищённо, чтобы наружу шло понятное сообщение.
+      const rawBody = await resp.text();
+      let data: any = null;
+      try {
+        data = rawBody ? JSON.parse(rawBody) : null;
+      } catch {
+        if (resp.status === 413) throw new Error(explainUploadLimit(file.size));
+        throw new Error(
+          `Сервер вернул не JSON (HTTP ${resp.status}): ${rawBody.slice(0, 200)}`,
+        );
+      }
       if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
       setResult(data as AnonResult);
       setKept(new Set());
@@ -181,6 +205,14 @@ export default function Home() {
   // masked. Returns the bytes + filename to download/zip.
   const buildEffectiveDoc = useCallback(async (): Promise<Blob> => {
     if (!result) throw new Error("нет результата");
+    // Для .docx нужен исходный бинарник, а его могло не быть в ответе: он не
+    // пролез в лимит. Для .txt он не нужен — текст собираем сами.
+    if (result.document_too_large && result.is_docx) {
+      throw new Error(
+        result.warning ||
+          "Готовый .docx не поместился в ответ. Скачайте текст или заберите файл с бэкенда напрямую.",
+      );
+    }
     if (!result.is_docx) {
       const txt = deanonClient(result.anonymized_text, keptMapping);
       return new Blob([txt], { type: "text/plain;charset=utf-8" });
