@@ -186,6 +186,121 @@ def test_compose_defaults_to_subject_off():
     assert "SUBJECT" not in llm_dets[0].config.allowed_labels
 
 
+# --- SUBJECT в разрешении перекрытий ----------------------------------------
+# Метки не было в DEFAULT_PRIORITY => вес 0 => любой пересекающийся спан
+# (дата, сумма, SENSITIVE) выбивал ВЕСЬ предмет договора целиком.
+
+def test_subject_has_priority_and_beats_date_and_amount():
+    from anonymizer.detectors import DEFAULT_PRIORITY  # noqa: E402
+    from anonymizer.spans import resolve_overlaps  # noqa: E402
+
+    assert "SUBJECT" in DEFAULT_PRIORITY
+    for weaker in ("DATE", "AMOUNT", "SENSITIVE"):
+        assert DEFAULT_PRIORITY["SUBJECT"] > DEFAULT_PRIORITY[weaker], weaker
+    for stronger in ("ORG", "CONTRACT", "PASSPORT", "INN"):
+        assert DEFAULT_PRIORITY["SUBJECT"] < DEFAULT_PRIORITY[stronger], stronger
+
+    text = "станок ЧПУ Haas VF-2 2014 года выпуска"
+    subject = Span(0, 20, "SUBJECT", text[:20], source="llm")
+    date = Span(15, 25, "DATE", text[15:25], source="regex")  # пересекает предмет
+    kept = resolve_overlaps([subject, date], priority=DEFAULT_PRIORITY)
+    assert [s.label for s in kept] == ["SUBJECT"], kept
+
+
+def test_subject_is_a_recall_label():
+    from anonymizer.review import _RECALL_LABELS  # noqa: E402
+
+    assert "SUBJECT" in _RECALL_LABELS
+
+
+# --- review больше не воюет с subject ---------------------------------------
+
+def test_review_prompt_stops_unmasking_goods_in_subject_mode():
+    from anonymizer.review import _build_review_prompt  # noqa: E402
+
+    off = _build_review_prompt(False)
+    on = _build_review_prompt(True)
+    # шаблон полностью раскрыт
+    assert "<<" not in off and "<<" not in on
+    # обычный режим не изменился — разрешение снимать «продукты» на месте
+    assert "продуктов/ПО" in off and "продукт/ПО" in off
+    assert "SUBJECT" not in off
+    # subject-режим: разрешение сужено до ПО, добавлен критерий предмета
+    assert "продуктов/ПО" not in on and "продукт/ПО" not in on
+    assert "SUBJECT" in on
+    # правило решает по РОЛИ значения: предмет поставки скрываем, рабочий
+    # инструмент (Битрикс/Zoom) — нет
+    assert "НАЗВАНИЯ-БРЕНДЫ" in on
+    assert "Битрикс" in on
+
+
+def test_review_config_carries_the_subject_flag():
+    from anonymizer.review import ReviewConfig  # noqa: E402
+
+    assert ReviewConfig().subject is False
+    assert ReviewConfig(subject=True).subject is True
+
+
+def test_subject_is_reviewable_only_in_subject_mode():
+    """Fail-safe: без subject-промпта ревьюер не знает критерия «номенклатура vs
+    служебная лексика» и на живой модели стабильно снимал маску с предмета
+    договора. Поэтому вне режима метка на пересмотр не отдаётся вовсе."""
+    from anonymizer.review import _REVIEWABLE_LABELS, _group_candidates  # noqa: E402
+
+    assert "SUBJECT" in _REVIEWABLE_LABELS
+
+    text = "Поставка: автомат Калашникова АК-74М в количестве 400 шт."
+    value = "автомат Калашникова АК-74М"
+    i = text.index(value)
+    spans = [Span(i, i + len(value), "SUBJECT", value, source="llm")]
+
+    off = _group_candidates(text, spans, 60, _REVIEWABLE_LABELS - {"SUBJECT"})
+    on = _group_candidates(text, spans, 60, _REVIEWABLE_LABELS)
+    assert off == {}, off          # не кандидат => маска гарантированно остаётся
+    assert len(on) == 1, on
+
+
+# --- second-pass и review получают ту же конфигурацию ------------------------
+
+def test_second_pass_uses_the_subject_aware_detector():
+    base_cfg = LLMConfig(allowed_labels=_DEFAULT_ALLOWED | {"ORG", "AMOUNT"})
+    dets = {"llm": [LLMDetector(base_cfg)]}
+    with _with_server_globals(dets, {"llm": True, "second_pass": True}) as server:
+        anon = server._compose({"subject": True})
+    sp = anon._second_pass_detectors
+    assert len(sp) == 1
+    assert "SUBJECT" in sp[0].config.allowed_labels
+    # тот же экземпляр, что и в детекции — лишнего объекта не создаём
+    assert sp[0] is [d for d in anon._detectors if isinstance(d, LLMDetector)][0]
+
+
+def test_second_pass_untouched_when_subject_off():
+    base_cfg = LLMConfig()
+    dets = {"llm": [LLMDetector(base_cfg)]}
+    with _with_server_globals(dets, {"llm": True, "second_pass": True}) as server:
+        anon = server._compose({"subject": False})
+    assert anon._second_pass_detectors == tuple(dets["llm"])
+
+
+def test_compose_switches_review_into_subject_mode():
+    import anonymizer.server as server_mod
+    from anonymizer.review import ReviewConfig  # noqa: E402
+
+    dets = {"llm": [LLMDetector(LLMConfig())]}
+    orig = server_mod._REVIEW_CFG
+    server_mod._REVIEW_CFG = ReviewConfig()
+    try:
+        with _with_server_globals(dets, {"llm": True, "review": True}) as server:
+            on = server._compose({"subject": True})
+            off = server._compose({"subject": False})
+    finally:
+        server_mod._REVIEW_CFG = orig
+    assert on._review_config.subject is True
+    assert off._review_config.subject is False
+    # глобальный конфиг сервера не мутирован
+    assert server_mod._REVIEW_CFG is orig
+
+
 if __name__ == "__main__":
     import traceback
 

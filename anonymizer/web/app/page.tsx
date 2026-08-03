@@ -79,7 +79,7 @@ export default function Home() {
     ner: true,
     llm: true,
     review: true,
-    subject: false,
+    subject: true,
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -374,7 +374,8 @@ export default function Home() {
                   Предмет договора — маскирует наименования товаров, работ и
                   услуг (модели, марки, номенклатуру), чтобы по ним нельзя было
                   восстановить отрасль; добавляется в тот же LLM-вызов без
-                  доп. времени обработки. Требует включённого слоя LLM —
+                  доп. времени обработки. Включён по умолчанию, снимите галочку,
+                  если предмет скрывать не нужно. Требует включённого слоя LLM —
                   недоступен, если LLM выключен.
                 </p>
               </>

@@ -8,7 +8,9 @@ const BACKEND_URL =
   process.env.ANONYMIZER_BACKEND_URL?.replace(/\/$/, "") || "http://127.0.0.1:8000";
 const BACKEND_KEY = process.env.ANONYMIZER_BACKEND_KEY || "";
 
-type Stages = Partial<Record<"regex" | "corporate" | "ner" | "llm" | "review", boolean>>;
+type Stages = Partial<
+  Record<"regex" | "corporate" | "ner" | "llm" | "review" | "subject", boolean>
+>;
 
 // Per-request timeout for the submit call and each status poll: short and
 // well under the devtunnel relay's ~100s ceiling, so a single stuck request

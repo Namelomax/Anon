@@ -32,7 +32,9 @@ context and un-masks obvious false positives (see ``review.py``); it only
 has any effect if the server was started with ``--review``. ``subject``
 adds the SUBJECT label (предмет договора) to the existing LLM detection
 call — no extra pass, no extra time — and only has any effect if ``llm`` is
-also on.
+also on. It also switches ``review`` into subject mode: otherwise the two
+layers work against each other, since the reviewer's default rules let it
+unmask "product names" — which is exactly what this stage masks.
 """
 
 from __future__ import annotations
@@ -95,6 +97,21 @@ def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
     if subject_on is None:
         subject_on = _DEFAULTS.get("subject", False)
 
+    # SUBJECT (предмет договора) — просто расширяем allowed_labels существующего
+    # LLM-детектора; отдельного прохода не добавляем. Строим ОДИН экземпляр и
+    # переиспользуем его и в детекции, и во втором проходе: иначе leak-скан
+    # (second_pass) шёл базовым детектором и предмет договора не видел вовсе.
+    subject_detector = None
+    if subject_on and _DETECTORS.get("llm"):
+        from dataclasses import replace
+
+        from anonymizer.llm import LLMDetector
+
+        base_cfg = _DETECTORS["llm"][0].config
+        subject_detector = LLMDetector(
+            replace(base_cfg, allowed_labels=base_cfg.allowed_labels | {"SUBJECT"})
+        )
+
     dets: list = []
     for name in ("regex", "corporate", "glossary", "ner", "llm"):
         on = stages.get(name)
@@ -108,17 +125,10 @@ def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
             from anonymizer.gliner_ner import GLiNERDetector
 
             dets.append(GLiNERDetector(replace(_GLINER_CFG, threshold=float(ner_threshold))))
-        elif name == "llm" and subject_on:
-            # SUBJECT (предмет договора) — просто расширяем allowed_labels
-            # существующего LLM-детектора; отдельного прохода не добавляем.
+        elif name == "llm" and subject_detector is not None:
             # Если llm выключена, до этой ветки не доходим — subject молча
             # игнорируется.
-            from dataclasses import replace
-
-            from anonymizer.llm import LLMDetector
-
-            base_cfg = _DETECTORS["llm"][0].config
-            dets.append(LLMDetector(replace(base_cfg, allowed_labels=base_cfg.allowed_labels | {"SUBJECT"})))
+            dets.append(subject_detector)
         else:
             dets.extend(_DETECTORS[name])
 
@@ -126,6 +136,12 @@ def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
     if review_on is None:
         review_on = _DEFAULTS.get("review", False)
     review_cfg = _REVIEW_CFG if (review_on and _REVIEW_CFG is not None) else None
+    if review_cfg is not None and subject_on:
+        # Иначе слои воюют: детекция маскирует номенклатуру, а ревью снимает её
+        # обратно по правилу «название продукта — не ПДн» (см. review.py).
+        from dataclasses import replace
+
+        review_cfg = replace(review_cfg, subject=True)
 
     # Leak check: re-scan the interim-anonymized text with the LLM detector and
     # mask whatever it still finds (bare first names, standalone surnames...).
@@ -133,7 +149,12 @@ def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
     sp_on = stages.get("second_pass")
     if sp_on is None:
         sp_on = _DEFAULTS.get("second_pass", False)
-    second_pass = _DETECTORS.get("llm", []) if sp_on else []
+    if not sp_on:
+        second_pass = []
+    elif subject_detector is not None:
+        second_pass = [subject_detector]
+    else:
+        second_pass = _DETECTORS.get("llm", [])
 
     return Anonymizer(dets, review_config=review_cfg, second_pass_detectors=second_pass)
 
@@ -484,11 +505,13 @@ def main() -> None:
              "ВЫКЛ (быстрее). Включить: --think.",
     )
     ap.add_argument(
-        "--subject", action=_Bool, default=False,
+        "--subject", action=_Bool, default=True,
         help="Метка SUBJECT — предмет договора (наименования товаров/работ/услуг), "
              "добавляется в тот же LLM-вызов детекции без доп. времени обработки. "
-             "По умолчанию ВЫКЛ и работает только вместе с --llm. Включить: "
-             "--subject.",
+             "Дополнительно переводит слой --review в режим предмета договора, "
+             "чтобы он не раскрывал номенклатуру как «название продукта». "
+             "По умолчанию ВКЛ, работает только вместе с --llm. Отключить: "
+             "--no-subject.",
     )
     ap.add_argument("--review-base-url", default=None, help="Defaults to --llm-base-url")
     ap.add_argument("--review-model", default=None, help="Defaults to --llm-model")
@@ -564,8 +587,20 @@ def main() -> None:
         _compose(_DEFAULTS).anonymize("Иван Иванов из Москвы, ИНН 7707083893.")
     except Exception as exc:  # noqa: BLE001
         print(f"[warn] прогрев не удался (сервер всё равно поднят): {exc}", flush=True)
+    # Фактическое устройство GLiNER, а не запрошенное: при откате на CPU
+    # (несовместимый cuDNN в LD_LIBRARY_PATH, занятая карта) /health раньше
+    # продолжал показывать "cuda", и трёхкратное замедление выглядело
+    # необъяснимым. Отдаём оба поля, чтобы расхождение было видно сразу.
+    effective_device = args.device
+    if args.ner == "gliner":
+        from anonymizer.gliner_ner import effective_device as _eff
+
+        effective_device = _eff() or args.device
+
     _INFO = {
-        "ner": args.ner, "device": args.device,
+        "ner": args.ner,
+        "device": effective_device,
+        "device_requested": args.device,
         "corporate": args.corporate, "llm": args.llm,
         "llm_model": args.llm_model if args.llm else None,
         "glossary_terms": len(glossary_entries),

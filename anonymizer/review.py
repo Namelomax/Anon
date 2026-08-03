@@ -68,6 +68,12 @@ _REVIEWABLE_LABELS = frozenset({
     "DISTRICT", "STREET", "HOUSE", "ADDRESS",
     "FIRST_NAME", "LAST_NAME", "MIDDLE_NAME",
     "ADMIN_CODE",
+    # SUBJECT (предмет договора) тоже вероятностный — его выдаёт LLM по смыслу,
+    # а не по формату, поэтому ложные срабатывания («товар», «оборудование»)
+    # некому было снимать. Ревьюится ТОЛЬКО в subject-режиме, где промпт знает
+    # критерий «отраслевая номенклатура vs служебная лексика договора»; вне
+    # этого режима метка не появляется вовсе (см. _build_review_prompt).
+    "SUBJECT",
 })
 
 # Вероятностные источники спанов — ТОЛЬКО их имеет смысл пересматривать LLM-ревью
@@ -75,7 +81,64 @@ _REVIEWABLE_LABELS = frozenset({
 # morph, glossary) высокоточны и на пересмотр не отдаются — см. _group_candidates.
 _NER_LLM_SOURCES = frozenset({"gliner", "ner", "llm", "llm2", "llm-recall"})
 
-_REVIEW_SYSTEM_PROMPT = (
+def _build_review_prompt(subject: bool = False) -> str:
+    """Промпт ревьюера. ``subject`` — включён ли режим предмета договора.
+
+    В обычном режиме ревьюеру РАЗРЕШЕНО снимать маску с «названий продуктов»
+    (GPT, Telegram, Битрикс) — это давняя и полезная эвристика против ложных
+    ORG/PERSON. Но при включённой стадии `subject` наименование товара — ровно
+    то, что заказчик просит СКРЫТЬ, а предмет договора сплошь и рядом приезжает
+    из детектора под меткой ORG («Ритон», «МАР RD-5547-CE», «Siemens Somatom
+    go.Now»). Без этой развилки два слоя работали друг против друга: детекция
+    маскировала номенклатуру, а ревью её тут же раскрывало как «продукт».
+    Поэтому в subject-режиме разрешение сужается до программ и ИТ-сервисов, а
+    для самой метки SUBJECT даётся отдельный критерий.
+    """
+    product_rule = (
+        "название программы или ИТ-сервиса (GPT, Telegram, Zoom, Битрикс, 1С)"
+        if subject else
+        "название программы/продукта (GPT, Telegram, Zoom, Битрикс, 1С)"
+    )
+    goods_guard = (
+        "ВАЖНО ПРО НАЗВАНИЯ-БРЕНДЫ. В этом документе намеренно скрывается "
+        "предмет договора, поэтому решай по РОЛИ значения в тексте, а не по "
+        "тому, похоже ли оно на торговую марку:\n"
+        "  keep=TRUE — если это вещь, которую по договору поставляют, продают, "
+        "передают, монтируют или перечисляют в предмете/спецификации/"
+        "комплектации: марка, модель, изделие, оборудование, материал "
+        "(«сигнализация: Ритон», «GPS-навигатор МАР RD-5547-CE», «автомат "
+        "Калашникова АК-74М», «томограф Somatom go.Now»). Такие значения "
+        "keep=true ДАЖЕ ЕСЛИ они помечены типом ORG и выглядят как бренд: "
+        "по ним восстанавливается отрасль заказчика.\n"
+        "  keep=false — если это лишь ИНСТРУМЕНТ или сервис, которым стороны "
+        "пользуются в работе и который не является предметом сделки "
+        "(«учёт ведётся в Битрикс», «созвон в Zoom», «1С», «Telegram»).\n"
+        if subject else ""
+    )
+    subject_rule = (
+        "Тип SUBJECT — предмет договора. keep=true, если значение указывает на "
+        "КОНКРЕТНУЮ номенклатуру: марка, модель, тип изделия, обозначение "
+        "(«автомат Калашникова АК-74М», «станок ЧПУ Haas VF-2»), либо родовое "
+        "слово с явной отраслевой спецификой («вооружение», «боеприпасы», "
+        "«медицинское оборудование»). keep=false — только если детектор "
+        "захватил служебную лексику договора: «товар», «продукция», «услуги», "
+        "«работы», «поставка», «оборудование» без уточняющего определения, "
+        "количество или единицу измерения.\n"
+        if subject else ""
+    )
+    # str.format здесь применять НЕЛЬЗЯ: в шаблоне есть литеральный JSON
+    # ({"id": …, "keep": …}), на котором format падает с KeyError.
+    return (
+        _REVIEW_PROMPT_TEMPLATE
+        .replace("<<PRODUCT_RULE>>", product_rule)
+        .replace("<<PERSON_PRODUCT>>", "ПО" if subject else "продуктов/ПО")
+        .replace("<<ORG_PRODUCT>>", "ПО" if subject else "продукт/ПО")
+        .replace("<<GOODS_GUARD>>", goods_guard)
+        .replace("<<SUBJECT_RULE>>", subject_rule)
+    )
+
+
+_REVIEW_PROMPT_TEMPLATE = (
     "Ты — контролёр качества анонимизации персональных данных (ПДн) в русском "
     "тексте. Тебе присылают пронумерованный список кандидатов, которые детектор "
     "пометил как ПДн (ФИО, организация, локация и т.п.). Для каждого дано: id, "
@@ -95,8 +158,8 @@ _REVIEW_SYSTEM_PROMPT = (
     "нумерация не сбилась. Если не уверен в решении — не пропускай кандидата: "
     "верни его с keep=true.\n"
     "- keep=false — это ОШИБКА детектора: обычное слово, местоимение, день "
-    "недели, должность, название программы/продукта (GPT, Telegram, Zoom, "
-    "Битрикс, 1С), юридический термин или аббревиатура (ФЗ, НДА), обрывок "
+    "недели, должность, <<PRODUCT_RULE>>, юридический термин или "
+    "аббревиатура (ФЗ, НДА), обрывок "
     "слова — значение НЕ является ПДн и должно остаться в тексте как есть. "
     "Типичные ошибки в расшифровках встреч, которые нужно снимать (keep=false): "
     "слово из приветствия или вежливой фразы, помеченное как имя (в контексте "
@@ -111,7 +174,7 @@ _REVIEW_SYSTEM_PROMPT = (
     "Для типа PERSON снимать маску (keep=false) можно ТОЛЬКО с обычных слов "
     "русского языка, ошибочно помеченных как имя (день недели, приветствие, "
     "роль «Спикер»/«Участник», обращение «Коллеги»/«Друзья», местоимение, "
-    "обычное существительное), либо с названий продуктов/ПО. Если слово "
+    "обычное существительное), либо с названий <<PERSON_PRODUCT>>. Если слово "
     "РЕДКОЕ, иностранное или незнакомое («Вайгус», «Смит», необычная фамилия "
     "или позывной) — это ПДн, keep=true ВСЕГДА: незнакомость слова — признак "
     "имени, а не ошибки. Если с этим значением здороваются, к нему обращаются "
@@ -124,8 +187,10 @@ _REVIEW_SYSTEM_PROMPT = (
     "это важные данные, их нужно скрывать. Для типа ORG ставь keep=false ТОЛЬКО "
     "если это слово-роль/отношение (Сторона, Стороны, Заказчик, Исполнитель, "
     "Подрядчик, студенты, сотрудники, участники), термин или аббревиатура "
-    "документа (ТЗ, АКТ, МП, КОСГУ, приказ, раздел), либо продукт/ПО — но "
+    "документа (ТЗ, АКТ, МП, КОСГУ, приказ, раздел), либо <<ORG_PRODUCT>> — но "
     "НИКОГДА не настоящее название организации.\n"
+    "<<GOODS_GUARD>>"
+    "<<SUBJECT_RULE>>"
     "Для типа ADMIN_CODE кандидат — это число/шифр рядом со словом вроде «код "
     "структуры», «КОСГУ», «субконто», «шифр», «рег. номер», «штамп». Формат "
     "таких кодов не стандартизован, поэтому решай по смыслу: keep=true — если "
@@ -162,6 +227,9 @@ _REVIEW_SYSTEM_PROMPT = (
     "Ответь ТОЛЬКО JSON-массивом объектов для ВСЕХ кандидатов по порядку, без "
     "каких-либо пояснений."
 )
+
+# Промпт обычного (не-subject) режима — поведение по умолчанию не изменилось.
+_REVIEW_SYSTEM_PROMPT = _build_review_prompt(False)
 
 
 @dataclass
@@ -203,6 +271,10 @@ class ReviewConfig:
         default_factory=lambda: os.getenv("ANONYMIZER_LLM_RECALL", "").strip().lower()
         in ("1", "true", "yes", "on")
     )
+    # Режим предмета договора: ревьюер судит метку SUBJECT и перестаёт снимать
+    # маску с товарной номенклатуры под предлогом «это продукт». Выставляется
+    # сервером из стадии `subject` (server._compose); см. _build_review_prompt.
+    subject: bool = False
 
 
 @dataclass
@@ -244,7 +316,24 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
         return spans
     cfg = config or ReviewConfig()
 
-    candidates = _group_candidates(text, spans, cfg.context_chars)
+    # Короткие голые числа судим отдельным сфокусированным вопросом: жёсткий
+    # порог по длине тут неуместен — «000» бывает куском госномера, «12» —
+    # номером пункта, «777» — кодом подразделения, и различает их только
+    # контекст. Отдельный вызов (а не общий батч) потому же, почему и
+    # _ask_adjacent: на маленьком прицельном вопросе модель стабильна.
+    drop_short = _judge_short_numbers(text, spans, cfg)
+    if drop_short:
+        spans = [s for s in spans if id(s) not in drop_short]
+        if not spans:
+            return spans
+
+    # SUBJECT пересматриваем ТОЛЬКО в subject-режиме: критерий «номенклатура vs
+    # служебная лексика» живёт в промпте этого режима (_build_review_prompt).
+    # Без него ревьюер стабильно снимал маску с предмета договора («автомат
+    # Калашникова АК-74М», «медицинское оборудование») — проверено на живой
+    # модели. Fail-safe: не знаем критерия — не трогаем, маска остаётся.
+    reviewable = _REVIEWABLE_LABELS if cfg.subject else _REVIEWABLE_LABELS - {"SUBJECT"}
+    candidates = _group_candidates(text, spans, cfg.context_chars, reviewable)
     if not candidates:
         return spans
 
@@ -395,10 +484,14 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
             merge_key_for[m] = mkey
             canonical_for[m] = canon
 
+    dropped_stems = _stems_of_dropped(candidates, keep)
+
     out: list[Span] = []
     for span in spans:
         key = _key_of(span)
         if key not in candidates:
+            if _is_orphaned_derivative(span, dropped_stems):
+                continue  # производная снятого кандидата — снимаем вместе с ним
             out.append(span)  # label not reviewable, untouched
             continue
         if not keep[key]:
@@ -418,6 +511,192 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
             s = replace(s, merge_key=merge_key_for[key], canonical_text=canonical_for[key])
         out.append(s)
     return out
+
+
+_SHORT_NUMBER_SYSTEM_PROMPT = (
+    "Ты — контролёр анонимизации русских документов. Каждый кандидат ниже — "
+    "КОРОТКОЕ ЧИСЛО (2-3 цифры), которое детектор пометил как конфиденциальное. "
+    "Кандидат выделен в контексте квадратными скобками: [вот_так].\n"
+    "Реши по КОНТЕКСТУ, что это число значит:\n"
+    "- mask=true — число само по себе является значимым идентификатором или "
+    "конфиденциальным значением: код подразделения, серия документа, шифр, "
+    "номер части/учреждения, внутренний код — то, по чему можно узнать "
+    "человека или организацию.\n"
+    "- mask=false — число НЕ является самостоятельным значением: номер пункта, "
+    "раздела, статьи или приложения («п. 1.2», «Приложение N 3»); количество, "
+    "срок или единица измерения («400 шт.», «12 мм», «3 рабочих дня»); "
+    "порядковый номер в перечне; ЧАСТЬ более крупного значения, которое рядом "
+    "записано целиком (кусок госномера «А 000 АА 00», пробега «22 000 км», "
+    "суммы, телефона, серии-номера) — такое число маскировать НЕЛЬЗЯ, иначе "
+    "оно разорвёт значение и остаток утечёт.\n"
+    "ВАЖНО: по умолчанию отвечай mask=false. Короткое число почти всегда "
+    "оказывается нумерацией или количеством, а замаскированное по ошибке оно "
+    "подставится во ВСЕ свои вхождения и разрушит документ. Ставь mask=true "
+    "только когда из контекста ЯВНО видно, что это идентификатор.\n"
+    'Ответь ТОЛЬКО JSON-массивом объектов {"id": <номер>, "text": <значение '
+    'кандидата ДОСЛОВНО>, "mask": true|false} для ВСЕХ кандидатов по порядку.'
+)
+
+
+def _short_number_spans(spans: list[Span]) -> list[Span]:
+    from .detectors import is_short_number
+
+    return [s for s in spans if is_short_number(s.text)]
+
+
+def _judge_short_numbers(
+    text: str, spans: list[Span], cfg: "ReviewConfig"
+) -> set[int]:
+    """Спросить модель, какие короткие числа реально стоит маскировать.
+
+    Возвращает множество ``id(span)`` спанов, которые НУЖНО СНЯТЬ. Умолчание
+    здесь ОБРАТНОЕ обычному для этого слоя «сомневаешься — оставь маску»: нет
+    ответа модели, ответ не распарсился, LLM недоступна — короткое число
+    снимается. Так сделано намеренно: утечка голого двузначного числа
+    ничтожна, а ошибочная маска размножается ``mask_all_occurrences`` по всем
+    вхождениям и ломает документ (номер пункта «1» дал 127 подстановок и
+    превратил нумерацию договора в «[PASSPORT_1].[PASSPORT_2]»), да ещё и
+    разрывает более крупные значения, выпуская наружу их остаток.
+    """
+    shorts = _short_number_spans(spans)
+    if not shorts:
+        return set()
+
+    # По одному вопросу на РАЗЛИЧНОЕ значение: одинаковые числа всё равно
+    # получат общий плейсхолдер, судить их порознь незачем.
+    by_value: dict[str, list[Span]] = {}
+    for s in shorts:
+        by_value.setdefault(s.text.strip(), []).append(s)
+
+    items: list[tuple[str, str]] = []
+    for value, group in by_value.items():
+        first = group[0]
+        lo = max(0, first.start - 90)
+        hi = min(len(text), first.end + 90)
+        ctx = f"{text[lo:first.start]}[{first.text}]{text[first.end:hi]}"
+        items.append((value, " ".join(ctx.split())))
+
+    lines = [f'{i}. "{value}" — контекст: «{ctx}»'
+             for i, (value, ctx) in enumerate(items)]
+    try:
+        verdicts = _ask_short_numbers(lines, items, cfg)
+    except Exception as exc:  # noqa: BLE001
+        import sys
+
+        print(f"[short-num] LLM-запрос упал ({exc}) — короткие числа сняты",
+              file=sys.stderr)
+        verdicts = {}
+
+    drop: set[int] = set()
+    kept_values: list[str] = []
+    for value, group in by_value.items():
+        if verdicts.get(value, False):  # нет вердикта = снимаем (см. docstring)
+            kept_values.append(value)
+            continue
+        drop.update(id(s) for s in group)
+
+    import sys
+
+    print(
+        f"[short-num] коротких чисел: {len(by_value)}; "
+        f"модель оставила замаскированными: {kept_values or '—'}",
+        file=sys.stderr,
+    )
+    return drop
+
+
+def _ask_short_numbers(
+    lines: list[str], items: list[tuple[str, str]], cfg: "ReviewConfig"
+) -> dict[str, bool]:
+    """value -> mask. Значения без совпавшего эхо-текста в результат не входят."""
+    payload = {
+        "model": cfg.model,
+        "messages": [
+            {"role": "system", "content": _SHORT_NUMBER_SYSTEM_PROMPT},
+            {"role": "user", "content": "\n".join(lines)},
+        ],
+        "temperature": cfg.temperature,
+        "max_tokens": 2000,
+        # см. комментарий в review._ask
+        "presence_penalty": 0,
+        "frequency_penalty": 0,
+        **cfg.extra_body,
+    }
+    req = urllib.request.Request(
+        cfg.base_url.rstrip("/") + "/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {cfg.api_key}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
+        data = json.load(resp)
+    msg = data["choices"][0]["message"]
+    content = msg.get("content") or msg.get("reasoning_content") or ""
+    blob = _extract_json_array(content)
+    if blob is None:
+        return {}
+    try:
+        arr = json.loads(blob)
+    except json.JSONDecodeError:
+        return {}
+
+    out: dict[str, bool] = {}
+    for obj in arr if isinstance(arr, list) else []:
+        if not isinstance(obj, dict):
+            continue
+        i, m, t = obj.get("id"), obj.get("mask"), obj.get("text")
+        if not (isinstance(i, int) and isinstance(m, bool) and isinstance(t, str)):
+            continue
+        if not (0 <= i < len(items)):
+            continue
+        value, _ctx = items[i]
+        # Тот же страховочный эхо-текст, что и в основном ревью.
+        if t.strip() != value:
+            continue
+        out[value] = m
+    return out
+
+
+# Производные спаны, которые НЕ проходят ревью сами (см. _group_candidates), но
+# целиком порождены другим спаном: падежные формы и алиасы.
+_DERIVED_SOURCES = frozenset({"morph", "alias"})
+
+
+def _stems_of_dropped(
+    candidates: dict[str, "_Candidate"], keep: dict[str, bool]
+) -> dict[str, list[str]]:
+    """label -> основы кандидатов, с которых ревью сняло маску (casefold)."""
+    from .detectors import _decl_stem
+
+    out: dict[str, list[str]] = {}
+    for key, cand in candidates.items():
+        if keep.get(key, True):
+            continue
+        stem = _decl_stem(" ".join(cand.text.split())).casefold()
+        if len(stem) >= 4:
+            out.setdefault(cand.label, []).append(stem)
+    return out
+
+
+def _is_orphaned_derivative(span: Span, dropped_stems: dict[str, list[str]]) -> bool:
+    """True, если спан — падежная форма/алиас значения, снятого ревью.
+
+    ``propagate_declensions`` строит формы как ``<основа><окончание>`` от уже
+    найденного значения, а ``_group_candidates`` их на пересмотр НЕ отдаёт
+    (source не вероятностный). Из-за этого разрыва ревью снимало маску с
+    исходного «Автомобиль», а порождённые им «Автомобиля»/«Автомобилю»
+    оставались замаскированными: в договоре купли-продажи автомобиля обычное
+    слово превращалось в [PERSON_8] в 18 местах, причём именительный падеж
+    рядом стоял открытым. Совпадение по основе — и есть та связь «родитель →
+    производная», которой не хватало: другого способа её узнать нет, спаны
+    происхождение не хранят.
+    """
+    if span.source not in _DERIVED_SOURCES:
+        return False
+    value = " ".join(span.text.split()).casefold()
+    return any(value.startswith(stem) for stem in dropped_stems.get(span.label, ()))
 
 
 # Зазор между соседними именами: пусто, пробелы, запятая, точка, тире —
@@ -563,6 +842,9 @@ _RECALL_LABELS = frozenset({
     "INN", "SNILS", "OGRN", "OKPO", "KPP", "BIK", "BANK_ACCOUNT",
     "CONTRACT", "PASSPORT", "MILITARY_ID", "CREDIT_CARD", "ADMIN_CODE",
     "OMS", "DRIVER_LICENSE", "BIRTH_CERTIFICATE",
+    # Предмет договора: recall-промпт его не запрашивает, но если модель всё же
+    # вернёт этот тип, метка должна сохраниться, а не выродиться в SENSITIVE.
+    "SUBJECT",
 })
 
 _RECALL_SYSTEM_PROMPT = (
@@ -746,7 +1028,10 @@ def _key_of(span: Span) -> str:
 
 
 def _group_candidates(
-    text: str, spans: list[Span], context_chars: int
+    text: str,
+    spans: list[Span],
+    context_chars: int,
+    reviewable: frozenset | set | None = None,
 ) -> dict[str, _Candidate]:
     """Group reviewable spans by value, sampling up to 3 spread-out occurrences
     (first/middle/last) per value instead of just the first.
@@ -759,10 +1044,12 @@ def _group_candidates(
     ambiguous passage) gives the model a fair cross-section of how the value is
     actually used before it decides.
     """
+    if reviewable is None:
+        reviewable = _REVIEWABLE_LABELS
     by_key: dict[str, list[Span]] = {}
     order: list[str] = []
     for span in spans:
-        if span.label not in _REVIEWABLE_LABELS:
+        if span.label not in reviewable:
             continue
         # LLM-ревью нужно только для ВЕРОЯТНОСТНЫХ источников (GLiNER/LLM), где
         # реально бывают ложные срабатывания. Детерминированные спаны —
@@ -809,7 +1096,7 @@ def _ask(batch: list[tuple[str, _Candidate]], cfg: ReviewConfig) -> dict[int, di
     payload = {
         "model": cfg.model,
         "messages": [
-            {"role": "system", "content": _REVIEW_SYSTEM_PROMPT},
+            {"role": "system", "content": _build_review_prompt(cfg.subject)},
             {"role": "user", "content": "\n".join(lines)},
         ],
         "temperature": cfg.temperature,

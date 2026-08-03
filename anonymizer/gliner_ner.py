@@ -61,19 +61,75 @@ def _resolve_device(device: str):
     return device
 
 
+# Устройство, на котором модель РЕАЛЬНО поднялась. Запрошенное («cuda») и
+# фактическое расходятся при откате на CPU, и раньше это было видно только в
+# stderr при старте: /health продолжал бодро рапортовать "device": "cuda", хотя
+# GLiNER считал на процессоре и документ обрабатывался втрое дольше. Диагностику
+# приходилось вести по логам старта, а не по состоянию сервиса.
+_EFFECTIVE_DEVICE: str | None = None
+
+
+def effective_device() -> str | None:
+    """Фактическое устройство GLiNER, или None, если модель ещё не грузилась."""
+    return _EFFECTIVE_DEVICE
+
+
 @functools.lru_cache(maxsize=2)
 def _load_model(model_id: str, device: str):
     """Build and cache a GLiNER model (downloads on first use)."""
+    global _EFFECTIVE_DEVICE
     from gliner import GLiNER
 
     model = GLiNER.from_pretrained(model_id)
     try:
         model = model.to(_resolve_device(device))
+        _EFFECTIVE_DEVICE = device
     except Exception as exc:  # keep running on CPU if the device is unavailable
         import sys
 
+        _EFFECTIVE_DEVICE = "cpu"
         print(f"[gliner] device {device!r} unavailable ({exc}); using CPU", file=sys.stderr)
+        print("[gliner] " + _gpu_diagnostics(), file=sys.stderr)
     return model
+
+
+def _gpu_diagnostics() -> str:
+    """Одна строка «почему не GPU»: версии и свободная память.
+
+    Откат на CPU замедляет обработку документа примерно втрое, а сообщение
+    torch объясняет только сам сбой. Собираем рядом то, что реально нужно для
+    диагноза: собранную и рантайм-версии cuDNN, наличие cudnn в
+    LD_LIBRARY_PATH (частая причина — системная библиотека перебивает ту, что
+    torch везёт с собой; см. run.sh) и свободную VRAM.
+    """
+    import os
+
+    bits: list[str] = []
+    try:
+        import torch
+
+        bits.append(f"torch={torch.__version__}")
+        bits.append(f"cuda_available={torch.cuda.is_available()}")
+        try:
+            bits.append(f"cudnn_built={torch.backends.cudnn.version()}")
+        except Exception:  # noqa: BLE001
+            pass
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info()
+            bits.append(f"vram_free={free / 2**30:.1f}/{total / 2**30:.1f}GiB")
+    except Exception as exc:  # noqa: BLE001
+        bits.append(f"torch недоступен: {exc}")
+
+    # LD_LIBRARY_PATH — переменная POSIX и всегда разделена ':', даже когда
+    # os.pathsep на текущей платформе другой (';' на Windows).
+    ld = os.environ.get("LD_LIBRARY_PATH", "")
+    hits = [p for p in ld.split(":") if "cudnn" in p.lower()]
+    if hits:
+        bits.append(
+            "в LD_LIBRARY_PATH есть cudnn: " + ", ".join(hits)
+            + " — запускайте через run.sh, он их вычищает"
+        )
+    return "диагностика: " + "; ".join(bits)
 
 
 @dataclass
