@@ -50,6 +50,53 @@ function base64ToBuffer(b64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
+/**
+ * Опрос фоновой задачи: GET /api/anonymize?jobId=... пока не вернётся
+ * {done:true}.
+ *
+ * Потолка по времени здесь СОЗНАТЕЛЬНО нет. Ждёт браузер, а он ничем не
+ * ограничен — задача считается ровно столько, сколько нужно. Единичный сбой
+ * сети не хоронит задачу: она живёт на бэкенде независимо от того, доехал ли
+ * конкретный GET, поэтому сдаёмся только после серии неудач подряд.
+ */
+async function pollJob(
+  jobId: string,
+  onTick: (sec: number) => void,
+): Promise<any> {
+  const startedAt = Date.now();
+  let delayMs = 1000;
+  let failures = 0;
+
+  for (;;) {
+    await new Promise((r) => setTimeout(r, delayMs));
+    // Короткие документы успевают за секунду; на длинных разряжаем опрос,
+    // чтобы не молотить прокси сотнями запросов.
+    delayMs = Math.min(delayMs * 1.4, 5000);
+    onTick(Math.round((Date.now() - startedAt) / 1000));
+
+    let resp: Response;
+    try {
+      resp = await fetch(`/api/anonymize?jobId=${encodeURIComponent(jobId)}`, {
+        cache: "no-store",
+      });
+    } catch {
+      if (++failures > 10) throw new Error("Связь с сервером потеряна");
+      continue;
+    }
+    failures = 0;
+
+    const raw = await resp.text();
+    let data: any = null;
+    try {
+      data = raw ? JSON.parse(raw) : null;
+    } catch {
+      continue; // прокси вклинился HTML-заглушкой — спросим ещё раз
+    }
+    if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+    if (data?.done) return data;
+  }
+}
+
 function download(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -91,6 +138,9 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   // Информационное сообщение (не ошибка): например, сколько картинок вырезано.
   const [notice, setNotice] = useState<string | null>(null);
+  // Секунды с момента постановки задачи — чтобы минуты ожидания не выглядели
+  // зависанием.
+  const [elapsed, setElapsed] = useState(0);
   // Картинки для обезличивания не нужны, а вес дают почти весь — по умолчанию ВКЛ.
   const [dropImages, setDropImages] = useState(true);
   const [result, setResult] = useState<AnonResult | null>(null);
@@ -137,6 +187,7 @@ export default function Home() {
     setError(null);
     setResult(null);
     setNotice(null);
+    setElapsed(0);
     try {
       // Картинки не участвуют в обезличивании (распознавания в конвейере нет),
       // но именно они определяют вес файла. Вычищаем их ДО проверки размера —
@@ -181,10 +232,21 @@ export default function Home() {
         );
       }
       if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-      setResult(data as AnonResult);
+
+      // POST только ПОСТАВИЛ задачу — досматриваем её опросом отсюда, из
+      // браузера. Раньше ожидание сидело внутри серверной функции, и её предел
+      // становился пределом анонимизации; на Hobby это ещё и ломало деплой
+      // («invalid maxDuration for plan»). Браузер же не ограничен ничем.
+      let final: any = data;
+      if (data?.jobId && !data?.done) {
+        final = await pollJob(data.jobId, setElapsed);
+      }
+
+      setResult(final as AnonResult);
       setKept(new Set());
       setDeUseLast(true);
       setDeResult(null);
+      if (final?.warning) setNotice(final.warning);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -454,7 +516,12 @@ export default function Home() {
                   "🔒 Обезличить"
                 )}
               </button>
-              {loading && <span className="note">Запрос идёт на бэкенд (GLiNER + LLM). Это может занять время.</span>}
+              {loading && (
+                <span className="note">
+                  Запрос идёт на бэкенд (GLiNER + LLM){elapsed > 0 ? `, ${elapsed} с` : ""}. Это
+                  может занять несколько минут — вкладку можно свернуть.
+                </span>
+              )}
             </div>
             <label className="stage" style={{ marginTop: 14, display: "flex", gap: 8 }}>
               <input

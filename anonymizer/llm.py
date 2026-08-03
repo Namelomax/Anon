@@ -25,6 +25,7 @@ Works with LM Studio (``http://127.0.0.1:1234/v1``) and Ollama
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
 import sys
@@ -219,6 +220,15 @@ class LLMConfig:
             (nor in the ``NONE`` sentinel), so this cuts a degenerate call off
             after a few tokens instead of burning the full ``max_tokens``
             budget.
+        concurrency: Number of chunks sent to the server concurrently. Default
+            is 1 (sequential) DELIBERATELY: the local LM Studio/Ollama path
+            typically serves a single contended GPU, where concurrent requests
+            just queue up behind each other and add nothing but request
+            overhead. Only raise this for a remote endpoint that itself scales
+            under concurrency (measured on the chat endpoint used elsewhere in
+            this pipeline: ~1.23 s fixed overhead per call, throughput per
+            call roughly unchanged from 1 to 8 concurrent callers — the
+            backend batches).
     """
 
     base_url: str = "http://127.0.0.1:11433/v1"
@@ -231,6 +241,7 @@ class LLMConfig:
     allowed_labels: frozenset = _DEFAULT_ALLOWED
     max_chars: int = 3000
     stop: tuple[str, ...] = ("\n\n\n\n",)
+    concurrency: int = 1
 
 
 class _DegenerateReply(Exception):
@@ -252,13 +263,43 @@ class LLMDetector:
         self.warnings = []
         if not text.strip():
             return []
-        spans: list[Span] = []
         # Chunk long documents: smaller inputs keep the model's recall high
         # (declined word-forms aren't missed) and avoid output truncation.
-        for offset, chunk in chunk_text(text, self.config.max_chars):
-            try:
-                content = self._complete(chunk)
-            except _DegenerateReply:
+        chunks = chunk_text(text, self.config.max_chars)
+        if not chunks:
+            return []
+
+        # Completed sequentially by default (see LLMConfig.concurrency — the
+        # local GPU path gains nothing from concurrent requests) or via a
+        # thread pool for remote endpoints that scale under concurrency.
+        # Either way results are collected by chunk index, not completion
+        # order, so the output is deterministic regardless of which request
+        # answers first.
+        results: list[str | _DegenerateReply] = [None] * len(chunks)  # type: ignore[list-item]
+        if self.config.concurrency > 1:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.config.concurrency
+            ) as pool:
+                future_to_index = {
+                    pool.submit(self._complete, chunk): i
+                    for i, (_offset, chunk) in enumerate(chunks)
+                }
+                for future in future_to_index:
+                    index = future_to_index[future]
+                    try:
+                        results[index] = future.result()
+                    except _DegenerateReply as exc:
+                        results[index] = exc
+        else:
+            for i, (_offset, chunk) in enumerate(chunks):
+                try:
+                    results[i] = self._complete(chunk)
+                except _DegenerateReply as exc:
+                    results[i] = exc
+
+        spans: list[Span] = []
+        for (offset, chunk), result in zip(chunks, results):
+            if isinstance(result, _DegenerateReply):
                 message = (
                     "Фрагмент текста не удалось проанализировать с помощью LLM "
                     "(модель дважды вернула пустой ответ, исчерпав лимит "
@@ -280,6 +321,7 @@ class LLMDetector:
                     file=sys.stderr,
                 )
                 continue
+            content = result
             if _is_none_reply(content):
                 # Explicit "nothing found" sentinel (see _build_system_prompt)
                 # — legitimately zero entities, not a failure to record.

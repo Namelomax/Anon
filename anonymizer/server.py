@@ -487,7 +487,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
-    ap.add_argument("--ner", default="gliner", choices=["gliner", "natasha", "none"])
+    ap.add_argument(
+        "--ner", default="gliner", choices=["gliner", "natasha", "remote", "none"]
+    )
     ap.add_argument("--device", default="cuda", help="GLiNER device: cpu | cuda | dml")
     # Весь конвейер включён ПО УМОЛЧАНИЮ — просто `python server.py` поднимает
     # полный корпоративный режим (regex + GLiNER + LLM + review + second-pass +
@@ -520,6 +522,41 @@ def main() -> None:
         default=os.getenv("ANONYMIZER_LLM_MODEL", "qwen3.5:9b"),
         help="Идентификатор модели РОВНО как его отдаёт сервер (`ollama list` "
              "или GET /v1/models). Переопределяется ANONYMIZER_LLM_MODEL.",
+    )
+    ap.add_argument(
+        "--llm-api-key",
+        default=os.getenv("ANONYMIZER_LLM_API_KEY", "not-needed"),
+        help="Bearer-токен для LLM-эндпоинта. Локальные Ollama и LM Studio его "
+             "игнорируют, но внешний шлюз без него ответит 401. "
+             "Переопределяется ANONYMIZER_LLM_API_KEY.",
+    )
+    ap.add_argument(
+        "--gliner-url",
+        default=os.getenv("ANONYMIZER_GLINER_URL", "https://oui.interfonica.cloud/gliner"),
+        help="База удалённого GLiNER (--ner remote), БЕЗ /extract на конце. "
+             "Переопределяется ANONYMIZER_GLINER_URL.",
+    )
+    ap.add_argument(
+        "--gliner-api-key",
+        default=os.getenv("ANONYMIZER_GLINER_API_KEY", ""),
+        help="Bearer-токен для GLiNER-эндпоинта (--ner remote). Пусто по "
+             "умолчанию — тогда используется --llm-api-key, один ключ "
+             "обслуживает оба эндпоинта. Переопределяется "
+             "ANONYMIZER_GLINER_API_KEY.",
+    )
+    ap.add_argument(
+        "--gliner-concurrency", type=int, default=16,
+        help="Число параллельных запросов к удалённому GLiNER (--ner remote). "
+             "Эндпоинт упирается в задержку сети, а не в вычисления, поэтому "
+             "параллельность почти линейно ускоряет обработку. По умолчанию 16.",
+    )
+    ap.add_argument(
+        "--llm-concurrency", type=int, default=1,
+        help="Число параллельных запросов к LLM-детектору. По умолчанию 1 "
+             "(последовательно) — локальная модель обычно занимает одну "
+             "видеокарту, где параллельные запросы просто встают в очередь. "
+             "Повышать имеет смысл только для удалённого эндпоинта, который "
+             "сам масштабируется под параллельной нагрузкой.",
     )
     ap.add_argument(
         "--review", action=_Bool, default=True,
@@ -578,6 +615,20 @@ def main() -> None:
 
             _GLINER_CFG = GLiNERConfig(device=args.device)
             _DETECTORS["ner"] = [GLiNERDetector(_GLINER_CFG)]
+        elif args.ner == "remote":
+            # Imported lazily, same as the "gliner" branch above: the entire
+            # point of the remote path is to run without torch installed.
+            from anonymizer.gliner_remote import RemoteGLiNERConfig, RemoteGLiNERDetector
+
+            _DETECTORS["ner"] = [
+                RemoteGLiNERDetector(
+                    RemoteGLiNERConfig(
+                        base_url=args.gliner_url,
+                        api_key=args.gliner_api_key or args.llm_api_key,
+                        concurrency=args.gliner_concurrency,
+                    )
+                )
+            ]
         else:
             from anonymizer.ner import NatashaDetector
 
@@ -587,7 +638,13 @@ def main() -> None:
         from anonymizer.llm import NO_THINKING_EXTRA_BODY, LLMConfig, LLMDetector
 
         extra = {} if args.think else NO_THINKING_EXTRA_BODY
-        lconf = LLMConfig(base_url=args.llm_base_url, model=args.llm_model, extra_body=extra)
+        lconf = LLMConfig(
+            base_url=args.llm_base_url,
+            model=args.llm_model,
+            api_key=args.llm_api_key,
+            extra_body=extra,
+            concurrency=args.llm_concurrency,
+        )
         if args.corporate:  # the LLM (not regex) handles organizations and money sums
             from dataclasses import replace
 
@@ -602,6 +659,7 @@ def main() -> None:
         review_kwargs = dict(
             base_url=args.review_base_url or args.llm_base_url,
             model=args.review_model or args.llm_model,
+            api_key=args.llm_api_key,
             extra_body=review_extra,
             recall=args.recall,  # recall ВКЛ по умолчанию; отключить: --no-recall
         )
