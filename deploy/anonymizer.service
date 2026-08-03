@@ -1,0 +1,51 @@
+# systemd-юнит бэкенда анонимайзера (режим «только API»).
+#
+#   sudo cp deploy/anonymizer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now anonymizer
+#   journalctl -u anonymizer -f
+#
+# Порт 8010, а не 8000: восьмитысячный на этом хосте уже занят чужим
+# uvicorn (`uvicorn main:app --host 0.0.0.0 --port 8000`).
+#
+# Слушаем 127.0.0.1: наружу сервис отдаёт nginx, который терминирует TLS.
+# Прямой доступ к порту извне не нужен и не должен открываться в firewall.
+
+[Unit]
+Description=Privacy filter (anonymizer) backend — API-only mode
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yakov
+Group=yakov
+WorkingDirectory=/home/yakov/privacy-filter
+
+# Ключи только отсюда — не из ExecStart, см. комментарий в anonymizer.env.example
+EnvironmentFile=/etc/anonymizer.env
+
+ExecStart=/home/yakov/privacy-filter/.venv/bin/python anonymizer/server.py \
+    --host 127.0.0.1 \
+    --port 8010 \
+    --ner remote \
+    --llm-concurrency 8 \
+    --gliner-concurrency 16
+
+Restart=always
+RestartSec=5
+
+# Логи в journald
+StandardOutput=journal
+StandardError=journal
+
+# Умеренное усиление. ProtectHome НЕ включаем: код лежит в /home/yakov.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
