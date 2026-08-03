@@ -1,0 +1,47 @@
+# Веб-интерфейс (Next.js) как пользовательский сервис — без прав root.
+#
+#   cp deploy/anonymizer-web.user.service ~/.config/systemd/user/anonymizer-web.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now anonymizer-web
+#   journalctl --user -u anonymizer-web -f
+#
+# СХЕМА ПОРТОВ (важно — она подобрана так, чтобы НЕ трогать конфиг nginx):
+#
+#   nginx:443  --> 8010  Next.js (этот сервис)
+#                  8011  Python-бэкенд (anonymizer.service)
+#
+# Существующий конфиг nginx проксирует всё с "/" на 127.0.0.1:8010. Поэтому UI
+# занимает 8010, а Python съезжает на 8011 — и владельца сервера просить
+# больше ни о чём не нужно. Наружу Python при этом не смотрит вовсе: к нему
+# ходит только Next.js по петлевому интерфейсу.
+#
+# ПУТЬ К NODE. В PATH пользователя node может отсутствовать (у yakov его нет,
+# хотя n8n на node работает). Подставьте реальный путь в ExecStart — узнать
+# его можно так:
+#     ls -la /proc/$(pgrep -f 'bin/n8n' | head -1)/exe
+
+[Unit]
+Description=Privacy filter web UI (Next.js)
+After=network-online.target anonymizer.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/yakov/anon/anonymizer/web
+
+# Бэкенд рядом, по петле — TLS на этом участке не нужен, наружу он не выходит.
+Environment=ANONYMIZER_BACKEND_URL=http://127.0.0.1:8011
+Environment=ANONYMIZER_BACKEND_KEY=
+Environment=NODE_ENV=production
+Environment=PORT=8010
+
+# ЗАМЕНИТЬ на реальный путь к node
+ExecStart=/usr/local/bin/node node_modules/.bin/next start -p 8010
+
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

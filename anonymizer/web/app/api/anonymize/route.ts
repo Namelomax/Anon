@@ -1,11 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callBackend, callBackendGet, describeError } from "../_shared";
-import {
-  MAX_UPLOAD_BYTES,
-  PLATFORM_BODY_LIMIT_BYTES,
-  explainUploadLimit,
-  formatBytes,
-} from "../../limits";
 
 export const runtime = "nodejs";
 // Ни один запрос сюда не длится дольше нескольких секунд: POST только СТАВИТ
@@ -55,13 +49,6 @@ export async function POST(req: NextRequest) {
     const file = form.get("file");
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "Файл не получен" }, { status: 400 });
-    }
-
-    // Вторая линия обороны после проверки в браузере: сюда можно прийти и в
-    // обход формы (curl, старая вкладка). Отдаём ЧЕСТНЫЙ JSON с 413 — платформа
-    // на своём пороге отвечает обычным текстом, который клиент не разберёт.
-    if (file.size > MAX_UPLOAD_BYTES) {
-      return NextResponse.json({ error: explainUploadLimit(file.size) }, { status: 413 });
     }
 
     let stages: Stages = {};
@@ -157,40 +144,6 @@ export async function GET(req: NextRequest) {
     }
     if (pollData.status !== "done") {
       return NextResponse.json({ done: false }, { status: 200 });
-    }
-
-    // Ограничение платформы действует и на ОТВЕТ. В результате лежит
-    // document_base64 — готовый .docx, снова раздутый base64 на треть, так что
-    // ответ бывает тяжелее запроса. Если он не пролезает, платформа оборвёт его
-    // на полуслове и клиент получит обрывок вместо JSON; лучше отдать текст и
-    // мапинг, а бинарник честно исключить.
-    const body = JSON.stringify(pollData.result);
-    if (Buffer.byteLength(body) > PLATFORM_BODY_LIMIT_BYTES) {
-      const result = (pollData.result ?? {}) as Record<string, unknown>;
-      const { document_base64: _dropped, ...withoutDoc } = result;
-      if (Buffer.byteLength(JSON.stringify(withoutDoc)) <= PLATFORM_BODY_LIMIT_BYTES) {
-        return NextResponse.json(
-          {
-            done: true,
-            ...withoutDoc,
-            document_base64: "",
-            document_too_large: true,
-            warning:
-              `Готовый документ (${formatBytes(Buffer.byteLength(body))}) не помещается в ` +
-              `ответ веб-приложения. Текст и таблица замен полные, но скачивание файла ` +
-              `недоступно — заберите его с бэкенда напрямую.`,
-          },
-          { status: 200 },
-        );
-      }
-      return NextResponse.json(
-        {
-          error:
-            `Результат (${formatBytes(Buffer.byteLength(body))}) не помещается в ответ ` +
-            `веб-приложения. Разбейте документ на части или работайте с бэкендом напрямую.`,
-        },
-        { status: 413 },
-      );
     }
 
     return NextResponse.json(

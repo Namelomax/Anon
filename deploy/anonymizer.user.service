@@ -1,0 +1,49 @@
+# Пользовательский вариант юнита — для systemctl --user, БЕЗ прав root.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/anonymizer.user.service ~/.config/systemd/user/anonymizer.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now anonymizer
+#   systemctl --user status anonymizer
+#   journalctl --user -u anonymizer -f
+#
+# ОБЯЗАТЕЛЬНО включить lingering, иначе сервис умрёт при выходе из SSH и не
+# поднимется после перезагрузки:
+#
+#   loginctl enable-linger yakov
+#   loginctl show-user yakov | grep Linger      # ждём Linger=yes
+#
+# Если loginctl откажет по правам — запасной путь через cron, см. DEPLOY.md.
+#
+# Отличия от системного anonymizer.service: нет User=/Group= (юнит и так
+# исполняется от владельца), ключи берутся из ~/anon/.env вместо /etc/, и цель
+# установки default.target вместо multi-user.target.
+
+[Unit]
+Description=Privacy filter (anonymizer) backend — API-only, user service
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/yakov/anon
+
+# Права на файл — 600. Корень репозитория под .gitignore, ключ в git не уедет.
+EnvironmentFile=/home/yakov/anon/.env
+
+ExecStart=/home/yakov/anon/.venv/bin/python anonymizer/server.py \
+    --host 127.0.0.1 \
+    --port 8010 \
+    --ner remote \
+    --llm-concurrency 8 \
+    --gliner-concurrency 16
+
+# Поднимать всегда: и при падении процесса, и при перезагрузке хоста (последнее
+# работает только с включённым lingering).
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

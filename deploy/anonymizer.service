@@ -20,12 +20,15 @@ Wants=network-online.target
 Type=simple
 User=yakov
 Group=yakov
-WorkingDirectory=/home/yakov/privacy-filter
+WorkingDirectory=/home/yakov/anon
 
-# Ключи только отсюда — не из ExecStart, см. комментарий в anonymizer.env.example
+# Ключи только отсюда — не из ExecStart, см. комментарий в anonymizer.env.example.
+# БЕЗ ROOT: /etc/ недоступен — держите файл как /home/yakov/anon/.env с правами
+# 600 и укажите его здесь. Корень репозитория целиком в .gitignore (белый
+# список пускает только /anonymizer/ и /deploy/), так что ключ не уедет в git.
 EnvironmentFile=/etc/anonymizer.env
 
-ExecStart=/home/yakov/privacy-filter/.venv/bin/python anonymizer/server.py \
+ExecStart=/home/yakov/anon/.venv/bin/python anonymizer/server.py \
     --host 127.0.0.1 \
     --port 8010 \
     --ner remote \
