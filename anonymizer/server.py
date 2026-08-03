@@ -40,6 +40,7 @@ unmask "product names" — which is exactly what this stage masks.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -52,13 +53,29 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from anonymizer.engine import Anonymizer  # noqa: E402
+from anonymizer.llm import Cancelled  # noqa: E402
 
 _DETECTORS: dict = {}    # stage name -> list of detector objects (built once)
 _DEFAULTS: dict = {}     # stage name -> bool (start-up default on/off)
 _GLINER_CFG = None       # base GLiNERConfig, for per-request threshold overrides
 _REVIEW_CFG = None       # ReviewConfig for the LLM review layer, or None if disabled
 _INFO: dict = {}
-_LOCK = threading.Lock()  # serialize model calls: torch/GLiNER is not thread-safe
+_NER_BACKEND = "none"    # args.ner, set once in main() ("gliner"/"natasha"/"remote"/"none")
+
+# _LOCK serializes model calls, but is only actually taken when the process
+# holds a LOCAL model in memory (--ner gliner or --ner natasha): both are not
+# thread-safe (GLiNER wraps torch; concurrent calls corrupt each other's
+# state). With --ner remote or --ner none there is NO local model in the
+# process at all — anonymize() just fans out HTTP requests — so this lock
+# bought nothing but serialization. Measured on the live site with --ner
+# remote: three simultaneous document uploads took 31.7 / 64.9 / 91.9s, a
+# perfect staircase (91.9s ~= 3 * the ~28.9s single-document time), purely
+# from queuing on this lock while every request waited for the previous one's
+# _compose(...) + anon.anonymize(text) to finish. _NEEDS_MODEL_LOCK (set once
+# in main() from the chosen --ner backend) controls whether _model_lock()
+# below actually takes it; see _model_lock's docstring.
+_LOCK = threading.Lock()
+_NEEDS_MODEL_LOCK = False
 
 _STAGE_NAMES = ("regex", "corporate", "glossary", "ner", "llm", "review", "second_pass", "subject")
 
@@ -70,9 +87,11 @@ _STAGE_NAMES = ("regex", "corporate", "glossary", "ner", "llm", "review", "secon
 # Guarded by its own lock, separate from _LOCK (which serializes model calls):
 # never hold both at once, and GET /jobs/<id> must never block on _LOCK, or
 # polling would queue up behind a running job and defeat the whole point.
-_JOBS: dict = {}          # job_id -> {"status", "result", "error", "created"}
+_JOBS: dict = {}          # job_id -> {"status", "result", "error", "created", "cancel"}
 _JOBS_LOCK = threading.Lock()
 _JOB_TTL_SECONDS = 10 * 60  # evict finished jobs after 10 minutes
+
+_TERMINAL_STATUSES = ("done", "error", "cancelled")
 
 
 def _sweep_jobs() -> None:
@@ -81,18 +100,50 @@ def _sweep_jobs() -> None:
     now = time.time()
     stale = [
         jid for jid, job in _JOBS.items()
-        if job["status"] in ("done", "error") and now - job["created"] > _JOB_TTL_SECONDS
+        if job["status"] in _TERMINAL_STATUSES and now - job["created"] > _JOB_TTL_SECONDS
     ]
     for jid in stale:
         del _JOBS[jid]
 
 
-def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
-    """Build an Anonymizer from the selected stages (detectors are reused).
+def _model_lock():
+    """Context manager to hold around a model call: ``_LOCK`` if a local model
+    needs it, a no-op otherwise (see ``_LOCK``'s docstring above for why).
+    """
+    return _LOCK if _NEEDS_MODEL_LOCK else contextlib.nullcontext()
+
+
+def _compose(
+    stages: dict,
+    ner_threshold=None,
+    cancel_event: threading.Event | None = None,
+) -> Anonymizer:
+    """Build an Anonymizer from the selected stages.
 
     ``ner_threshold`` optionally overrides GLiNER's confidence threshold for this
     request (lower => higher recall / more catches). The model itself is cached,
     so a per-request detector with a different threshold is cheap.
+
+    ``cancel_event``, if given, is wired onto the per-request ``LLMDetector``
+    and ``RemoteGLiNERDetector`` instances built below (see their
+    ``cancel_event`` attribute) so a job worker can stop a running pipeline
+    between chunks once the client has gone away. ``None`` (the default) means
+    "never cancel" — every synchronous caller (sync endpoints, the CLI tools)
+    keeps today's behaviour untouched.
+
+    Requests now run concurrently (see ``_model_lock``), so any detector with
+    per-request mutable state must NOT be one of the shared ``_DETECTORS``
+    instances — sharing it would let one request's ``find()`` clear another's
+    in-flight state. ``LLMDetector.warnings`` and (with ``--ner remote``)
+    ``RemoteGLiNERDetector.warnings`` are exactly that: a list cleared at the
+    start of every ``find()`` call, used to report "this chunk was never
+    analysed, PII inside it may be unmasked" up through engine.py. So both are
+    always built fresh per request below, from the shared (immutable) config
+    object — cheap, since neither holds model weights, just an HTTP client.
+    The regex/corporate/glossary detectors are stateless and stay shared; the
+    local GLiNER (--ner gliner) and Natasha (--ner natasha) detectors hold no
+    such per-request state either (only model weights, expensive to
+    duplicate), so they also stay shared.
     """
     subject_on = stages.get("subject")
     if subject_on is None:
@@ -112,6 +163,20 @@ def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
         subject_detector = LLMDetector(
             replace(base_cfg, allowed_labels=base_cfg.allowed_labels | {"SUBJECT"})
         )
+        subject_detector.cancel_event = cancel_event
+
+    # Fresh per-request LLM detector for the non-subject case too (replacing
+    # what used to be the shared _DETECTORS["llm"][0] instance — see the
+    # warnings-isolation note in the docstring above). Built unconditionally
+    # whenever an LLM detector is configured at all, independent of whether
+    # this particular request has the "llm" stage on: second_pass below can
+    # still want it even when "llm" itself is off.
+    base_llm_detector = None
+    if _DETECTORS.get("llm"):
+        from anonymizer.llm import LLMDetector
+
+        base_llm_detector = LLMDetector(_DETECTORS["llm"][0].config)
+        base_llm_detector.cancel_event = cancel_event
 
     dets: list = []
     for name in ("regex", "corporate", "glossary", "ner", "llm"):
@@ -120,7 +185,22 @@ def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
             on = _DEFAULTS.get(name, False)
         if not (on and _DETECTORS.get(name)):
             continue
-        if name == "ner" and ner_threshold is not None and _GLINER_CFG is not None:
+        if name == "ner" and _NER_BACKEND == "remote":
+            # RemoteGLiNERDetector.warnings is per-request mutable state too
+            # (see docstring above) — always build a fresh one from the
+            # shared config, same shape as the local-GLiNER threshold-override
+            # branch below.
+            from dataclasses import replace
+
+            from anonymizer.gliner_remote import RemoteGLiNERDetector
+
+            base_ner_cfg = _DETECTORS["ner"][0].config
+            if ner_threshold is not None:
+                base_ner_cfg = replace(base_ner_cfg, threshold=float(ner_threshold))
+            remote_ner_detector = RemoteGLiNERDetector(base_ner_cfg)
+            remote_ner_detector.cancel_event = cancel_event
+            dets.append(remote_ner_detector)
+        elif name == "ner" and ner_threshold is not None and _GLINER_CFG is not None:
             from dataclasses import replace
 
             from anonymizer.gliner_ner import GLiNERDetector
@@ -130,6 +210,8 @@ def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
             # Если llm выключена, до этой ветки не доходим — subject молча
             # игнорируется.
             dets.append(subject_detector)
+        elif name == "llm":
+            dets.append(base_llm_detector)
         else:
             dets.extend(_DETECTORS[name])
 
@@ -154,8 +236,10 @@ def _compose(stages: dict, ner_threshold=None) -> Anonymizer:
         second_pass = []
     elif subject_detector is not None:
         second_pass = [subject_detector]
+    elif base_llm_detector is not None:
+        second_pass = [base_llm_detector]
     else:
-        second_pass = _DETECTORS.get("llm", [])
+        second_pass = []
 
     return Anonymizer(dets, review_config=review_cfg, second_pass_detectors=second_pass)
 
@@ -164,20 +248,25 @@ class _BadRequest(Exception):
     """Raised by _run_anonymize_file for a 400-worthy input error."""
 
 
-def _run_anonymize_text(data: dict) -> dict:
+def _run_anonymize_text(data: dict, cancel_event: threading.Event | None = None) -> dict:
     """Run the text-anonymization pipeline for a parsed /anonymize body.
 
     Body: {text, regex?, corporate?, ner?, llm?, ner_threshold?}
     Returns the same shape the synchronous /anonymize handler replies with.
     Shared by the synchronous handler and the async job worker so the two can
     never drift apart (same contract as ``_run_anonymize_file``).
+
+    ``cancel_event`` is only ever passed by the async job worker (see
+    ``_submit_job``); the synchronous handler leaves it at the default
+    ``None``, so ``anon.anonymize(text)`` can raise ``Cancelled`` only for
+    jobs, never for a direct /anonymize call.
     """
     text = data.get("text", "")
     stages = {k: data[k] for k in _STAGE_NAMES if k in data}
 
     t0 = time.time()
-    with _LOCK:  # one model call at a time (torch is not thread-safe)
-        anon = _compose(stages, data.get("ner_threshold"))
+    with _model_lock():  # only held for local (in-process) models; see _LOCK
+        anon = _compose(stages, data.get("ner_threshold"), cancel_event=cancel_event)
         res = anon.anonymize(text)
     elapsed = time.time() - t0
 
@@ -197,7 +286,7 @@ def _run_anonymize_text(data: dict) -> dict:
     }
 
 
-def _run_anonymize_file(data: dict) -> dict:
+def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None) -> dict:
     """Run the file-anonymization pipeline for a parsed /anonymize-file body.
 
     Body: {filename, file_base64, regex?, corporate?, ner?, llm?}
@@ -206,6 +295,9 @@ def _run_anonymize_file(data: dict) -> dict:
     Raises _BadRequest for a malformed request (missing file_base64), or lets
     any other exception propagate. Shared by the synchronous /anonymize-file
     handler and the async job worker, so the two paths can never drift apart.
+
+    ``cancel_event`` — see ``_run_anonymize_text``'s docstring; only the async
+    job worker ever passes one.
     """
     import base64
     from pathlib import PurePosixPath
@@ -223,8 +315,8 @@ def _run_anonymize_file(data: dict) -> dict:
     text = read_text_from_bytes(filename, raw)
 
     t0 = time.time()
-    with _LOCK:  # torch is not thread-safe
-        anon = _compose(stages, data.get("ner_threshold"))
+    with _model_lock():  # only held for local (in-process) models; see _LOCK
+        anon = _compose(stages, data.get("ner_threshold"), cancel_event=cancel_event)
         res = anon.anonymize(text)
     elapsed = time.time() - t0
 
@@ -263,7 +355,7 @@ class Handler(BaseHTTPRequestHandler):
     def _cors(self) -> None:
         # Allow the Next.js UI (Vercel / localhost) to call us from the browser.
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
     def _send(self, code: int, obj: dict) -> None:
@@ -301,6 +393,17 @@ class Handler(BaseHTTPRequestHandler):
         if "/jobs/" in path:
             job_id = path.rsplit("/jobs/", 1)[1]
             self._handle_job_status(job_id)
+            return
+        self._send(404, {"error": "not found"})
+
+    def do_DELETE(self):
+        # Only route here is /jobs/<job_id> — cooperative job cancellation.
+        # There is no "jobs/anonymize-file"-style ambiguity to worry about
+        # (unlike do_POST) since DELETE has no other endpoints at all.
+        path = self.path.rstrip("/")
+        if "/jobs/" in path:
+            job_id = path.rsplit("/jobs/", 1)[1]
+            self._handle_job_cancel(job_id)
             return
         self._send(404, {"error": "not found"})
 
@@ -355,10 +458,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         job_id = uuid.uuid4().hex
+        cancel_event = threading.Event()
         with _JOBS_LOCK:
             _sweep_jobs()
             _JOBS[job_id] = {
                 "status": "pending", "result": None, "error": None, "created": time.time(),
+                "cancel": cancel_event,
             }
 
         def _worker():
@@ -367,17 +472,27 @@ class Handler(BaseHTTPRequestHandler):
                 if job is not None:
                     job["status"] = "running"
             try:
-                result = runner(data)
-            except Exception as exc:  # noqa: BLE001
+                result = runner(data, cancel_event)
+            except Cancelled:
                 with _JOBS_LOCK:
                     job = _JOBS.get(job_id)
                     if job is not None:
+                        job["status"] = "cancelled"
+                        job["error"] = None
+                return
+            except Exception as exc:  # noqa: BLE001
+                with _JOBS_LOCK:
+                    job = _JOBS.get(job_id)
+                    if job is not None and job["status"] != "cancelled":
                         job["status"] = "error"
                         job["error"] = str(exc)
                 return
             with _JOBS_LOCK:
                 job = _JOBS.get(job_id)
-                if job is not None:
+                # Don't resurrect a job DELETE already marked "cancelled" —
+                # e.g. the cancel event was set right after the last
+                # cancellation check, so the pipeline ran to completion anyway.
+                if job is not None and job["status"] != "cancelled":
                     job["status"] = "done"
                     job["result"] = result
 
@@ -421,6 +536,28 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "unknown job"})
             return
         self._send(200, payload)
+
+    def _handle_job_cancel(self, job_id: str):
+        """DELETE /jobs/<job_id> -> {"status": ...}. Cooperative cancellation:
+        sets the job's cancel event so the worker's detectors stop between
+        chunks (see Cancelled in anonymizer/llm.py) rather than killing the
+        thread outright.
+
+        Unknown id -> 404, matching GET's behaviour. A job already in a
+        terminal state (done / error / cancelled) is left untouched and its
+        existing status is returned — DELETE never resurrects or overwrites
+        a finished job's result.
+        """
+        with _JOBS_LOCK:
+            job = _JOBS.get(job_id)
+            if job is None:
+                self._send(404, {"error": "unknown job"})
+                return
+            if job["status"] not in _TERMINAL_STATUSES:
+                job["cancel"].set()
+                job["status"] = "cancelled"
+            status = job["status"]
+        self._send(200, {"status": status})
 
     def _handle_deanon_file(self):
         """Restore originals in an anonymized .docx/.txt using a mapping (no AI).
@@ -596,8 +733,13 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    global _INFO, _GLINER_CFG, _REVIEW_CFG
+    global _INFO, _GLINER_CFG, _REVIEW_CFG, _NER_BACKEND, _NEEDS_MODEL_LOCK
     print("Загружаю модели…", flush=True)
+
+    _NER_BACKEND = args.ner
+    # Local models (gliner/natasha) are not thread-safe; remote/none carry no
+    # in-process model at all, so no serialization is needed — see _LOCK.
+    _NEEDS_MODEL_LOCK = args.ner in ("gliner", "natasha")
 
     from anonymizer.detectors import CORPORATE_DETECTORS, DEFAULT_DETECTORS
     from anonymizer.glossary import DEFAULT_GLOSSARY_PATH, GlossaryDetector, load_glossary

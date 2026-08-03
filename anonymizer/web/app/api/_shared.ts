@@ -86,9 +86,33 @@ export async function callBackendGet(
   }
 }
 
+/**
+ * Same as `callBackendGet` but for a bodiless DELETE request (job cancellation
+ * on tab close/reload/new-job). Shares the same connect-phase retry logic and
+ * the `insecureHTTPParser` workaround.
+ */
+export async function callBackendDelete(
+  url: string,
+  apiKey: string,
+  timeoutMs: number,
+): Promise<{ status: number; text: string }> {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await _callBackendOnce(url, "DELETE", "", apiKey, timeoutMs);
+    } catch (err) {
+      if (attempt >= _RETRY_DELAYS_MS.length || !_isRetryableConnectError(err)) {
+        throw err;
+      }
+      await _sleep(_RETRY_DELAYS_MS[attempt]);
+      attempt += 1;
+    }
+  }
+}
+
 function _callBackendOnce(
   url: string,
-  method: "POST" | "GET",
+  method: "POST" | "GET" | "DELETE",
   bodyJson: string,
   apiKey: string,
   timeoutMs: number,
@@ -96,7 +120,7 @@ function _callBackendOnce(
   const u = new URL(url);
   const isHttps = u.protocol === "https:";
   const reqFn = isHttps ? httpsRequest : httpRequest;
-  const body = method === "GET" ? null : Buffer.from(bodyJson, "utf8");
+  const body = method === "GET" || method === "DELETE" ? null : Buffer.from(bodyJson, "utf8");
 
   const headers: Record<string, string> = {};
   if (body !== null) {

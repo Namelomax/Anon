@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callBackend, callBackendGet, describeError } from "../_shared";
+import { callBackend, callBackendGet, callBackendDelete, describeError } from "../_shared";
 
 export const runtime = "nodejs";
 // Ни один запрос сюда не длится дольше нескольких секунд: POST только СТАВИТ
@@ -28,6 +28,11 @@ type Stages = Partial<
 // Достаточно, чтобы бэкенд успел ответить через прокси, и достаточно мало,
 // чтобы застрявший запрос не съел всю инвокацию.
 const _REQUEST_TIMEOUT_MS = 45_000;
+
+// Cancellation is fired from a page unload/reload/navigation handler — it must
+// never hang a closing page, so this timeout is deliberately much shorter
+// than the submit/poll one above.
+const _CANCEL_TIMEOUT_MS = 10_000;
 
 /**
  * POST — принять файл и ПОСТАВИТЬ задачу на бэкенде.
@@ -106,7 +111,9 @@ export async function POST(req: NextRequest) {
  * GET ?jobId=... — ОДИН опрос статуса задачи.
  *
  * Пока не готово, отдаём 200 {done:false}: браузер отличает «ещё считается» по
- * полю, и промежуточный статус не путается с ошибкой.
+ * полю, и промежуточный статус не путается с ошибкой. Отменённую задачу
+ * (см. DELETE ниже) отдаём как {done:false, cancelled:true} — это не ошибка,
+ * браузер должен остановить опрос и показать нейтральное сообщение.
  */
 export async function GET(req: NextRequest) {
   const jobId = new URL(req.url).searchParams.get("jobId");
@@ -142,6 +149,9 @@ export async function GET(req: NextRequest) {
     if (pollData.status === "error") {
       return NextResponse.json({ error: pollData.error || "unknown error" }, { status: 500 });
     }
+    if (pollData.status === "cancelled") {
+      return NextResponse.json({ done: false, cancelled: true }, { status: 200 });
+    }
     if (pollData.status !== "done") {
       return NextResponse.json({ done: false }, { status: 200 });
     }
@@ -153,6 +163,44 @@ export async function GET(req: NextRequest) {
   } catch (e: unknown) {
     const msg = describeError(e, BACKEND_URL);
     console.error("[/api/anonymize] poll failed:", msg, e);
+    return NextResponse.json({ error: msg }, { status: 502 });
+  }
+}
+
+/**
+ * DELETE ?jobId=... — отменить фоновую задачу.
+ *
+ * Вызывается, когда вкладка закрывается/перезагружается/уходит со страницы
+ * или когда пользователь ставит новую задачу поверх ещё не завершённой —
+ * иначе бэкенд продолжает считать задачу, которую никто не заберёт, и грузит
+ * общую очередь моделей. Таймаут короткий: отмена не должна задерживать
+ * закрытие страницы.
+ */
+export async function DELETE(req: NextRequest) {
+  const jobId = req.nextUrl.searchParams.get("jobId");
+  if (!jobId) {
+    return NextResponse.json({ error: "jobId обязателен" }, { status: 400 });
+  }
+
+  try {
+    const cancelResp = await callBackendDelete(
+      `${BACKEND_URL}/jobs/${jobId}`,
+      BACKEND_KEY,
+      _CANCEL_TIMEOUT_MS,
+    );
+
+    let data: unknown;
+    try {
+      data = JSON.parse(cancelResp.text);
+    } catch {
+      data = {
+        error: `Некорректный ответ бэкенда (HTTP ${cancelResp.status}): ${cancelResp.text.slice(0, 300)}`,
+      };
+    }
+    return NextResponse.json(data, { status: cancelResp.status });
+  } catch (e: unknown) {
+    const msg = describeError(e, BACKEND_URL);
+    console.error("[/api/anonymize] cancel failed:", msg, e);
     return NextResponse.json({ error: msg }, { status: 502 });
   }
 }

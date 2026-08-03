@@ -1,7 +1,7 @@
 "use client";
 
 import JSZip from "jszip";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type StageKey = "regex" | "corporate" | "ner" | "llm" | "review" | "subject";
 
@@ -36,6 +36,18 @@ const STAGE_LABELS: Record<StageKey, string> = {
   review: "LLM-проверка (отсеивает ложные срабатывания)",
   subject: "Предмет договора (наименования товаров и услуг)",
 };
+
+// Best-effort cancel of a background job. Used both from the `pagehide`
+// handler (with keepalive:true, so the request survives the page going away —
+// the browser's beacon API can't be used here since it only supports POST,
+// not DELETE) and when a new job replaces one still in flight. Fire-and-
+// forget: the caller doesn't need to wait for the backend to acknowledge.
+function cancelJob(jobId: string, keepalive = false) {
+  fetch(`/api/anonymize?jobId=${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+    keepalive,
+  }).catch(() => {});
+}
 
 function base64ToBuffer(b64: string): ArrayBuffer {
   const bin = atob(b64);
@@ -87,6 +99,9 @@ async function pollJob(
       continue; // прокси вклинился HTML-заглушкой — спросим ещё раз
     }
     if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+    // A cancelled job is not an error — someone (this tab on unload, or a new
+    // job replacing it) asked the backend to stop it. Stop polling quietly.
+    if (data?.cancelled) return { cancelled: true };
     if (data?.done) return data;
   }
 }
@@ -134,9 +149,18 @@ export default function Home() {
   // зависанием.
   const [elapsed, setElapsed] = useState(0);
   const [result, setResult] = useState<AnonResult | null>(null);
+  // Set when the currently displayed job was cancelled rather than errored —
+  // rendered as a neutral note, never in the red error style.
+  const [cancelled, setCancelled] = useState(false);
   const [drag, setDrag] = useState(false);
   const [stagesOpen, setStagesOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  // Id of the job currently being polled, kept in a ref (not just state) so
+  // the `pagehide` handler can read the latest value without a stale
+  // closure. Cleared as soon as the job reaches a terminal state (done or
+  // cancelled) so a finished job is never cancelled by a later unload/new
+  // submit.
+  const activeJobIdRef = useRef<string | null>(null);
   // Placeholders the user manually chose to KEEP in plain text (undo a mask).
   // Reversible: clicking again re-masks. Everything downstream (preview,
   // mapping.json, downloaded document) is derived from this set.
@@ -158,6 +182,20 @@ export default function Home() {
     [result],
   );
 
+  // Cancel the in-flight job when the tab is closed, reloaded, or navigated
+  // away from. `pagehide` (not `beforeunload`) is used because it also fires
+  // on mobile/bfcache navigations. `keepalive: true` on the fetch is what
+  // lets the request survive the page going away.
+  useEffect(() => {
+    const onPageHide = () => {
+      const jobId = activeJobIdRef.current;
+      if (!jobId) return;
+      cancelJob(jobId, true);
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, []);
+
   const onPick = (f: File | null | undefined) => {
     if (!f) return;
     if (!/\.(docx?|pdf|xlsx?|xlsm|xml|rtf|odt|txt|csv|md)$/i.test(f.name)) {
@@ -166,6 +204,7 @@ export default function Home() {
     }
     setError(null);
     setResult(null);
+    setCancelled(false);
     setFile(f);
   };
 
@@ -173,8 +212,17 @@ export default function Home() {
 
   const run = useCallback(async () => {
     if (!file) return;
+    // A previous job may still be in flight — either genuinely still running,
+    // or orphaned client-side after `pollJob` gave up on a flaky connection.
+    // Cancel it before starting a new one instead of leaving it to burn
+    // shared model capacity for a result nobody will read.
+    if (activeJobIdRef.current) {
+      cancelJob(activeJobIdRef.current);
+      activeJobIdRef.current = null;
+    }
     setLoading(true);
     setError(null);
+    setCancelled(false);
     setResult(null);
     setElapsed(0);
     try {
@@ -207,13 +255,21 @@ export default function Home() {
       // («invalid maxDuration for plan»). Браузер же не ограничен ничем.
       let final: any = data;
       if (data?.jobId && !data?.done) {
+        activeJobIdRef.current = data.jobId;
         final = await pollJob(data.jobId, setElapsed);
+        // Terminal state reached (done or cancelled) — clear the ref so a
+        // later unload/new submit never sends a cancel for this job again.
+        activeJobIdRef.current = null;
       }
 
-      setResult(final as AnonResult);
-      setKept(new Set());
-      setDeUseLast(true);
-      setDeResult(null);
+      if (final?.cancelled) {
+        setCancelled(true);
+      } else {
+        setResult(final as AnonResult);
+        setKept(new Set());
+        setDeUseLast(true);
+        setDeResult(null);
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -485,6 +541,11 @@ export default function Home() {
             {error && (
               <div className="error" style={{ marginTop: 14 }}>
                 Ошибка: {error}
+              </div>
+            )}
+            {cancelled && !error && (
+              <div className="note" style={{ marginTop: 14 }}>
+                Задача отменена.
               </div>
             )}
           </div>

@@ -172,7 +172,11 @@ def test_compose_leaves_allowed_labels_untouched_when_subject_off():
     llm_dets = [d for d in anon._detectors if isinstance(d, LLMDetector)]
     assert len(llm_dets) == 1
     assert "SUBJECT" not in llm_dets[0].config.allowed_labels
-    assert llm_dets[0] is dets["llm"][0]  # reused as-is, no rebuild needed
+    # Экземпляр детектора теперь СВОЙ на каждый запрос: у LLMDetector есть
+    # изменяемое поле warnings, и при общем экземпляре два параллельных
+    # документа затирали бы предупреждения друг друга. Общим остаётся КОНФИГ —
+    # именно он несёт allowed_labels, которые проверены строкой выше.
+    assert llm_dets[0].config is dets["llm"][0].config
 
 
 def test_compose_defaults_to_subject_off():
@@ -279,7 +283,12 @@ def test_second_pass_untouched_when_subject_off():
     dets = {"llm": [LLMDetector(base_cfg)]}
     with _with_server_globals(dets, {"llm": True, "second_pass": True}) as server:
         anon = server._compose({"subject": False})
-    assert anon._second_pass_detectors == tuple(dets["llm"])
+    # Второй проход обязан идти ТЕМ ЖЕ экземпляром, что и детекция: engine.py
+    # дедуплицирует предупреждения детекторов по id(), и отдельный третий
+    # объект дал бы дубликаты в warnings документа.
+    llm_dets = [d for d in anon._detectors if isinstance(d, LLMDetector)]
+    assert anon._second_pass_detectors == (llm_dets[0],)
+    assert "SUBJECT" not in anon._second_pass_detectors[0].config.allowed_labels
 
 
 def test_compose_switches_review_into_subject_mode():

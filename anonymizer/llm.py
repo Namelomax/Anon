@@ -29,12 +29,20 @@ import concurrent.futures
 import json
 import re
 import sys
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
 from .chunking import chunk_text
 from .spans import Span
+
+
+class Cancelled(Exception):
+    """Raised by ``find()`` when ``cancel_event`` is set mid-run (cooperative
+    cancellation — see ``LLMDetector.cancel_event``). Reused by
+    ``gliner_remote.py`` so both detectors signal the same thing to callers
+    like ``server.py``'s job worker."""
 
 # Disables model "thinking"/reasoning tokens before the reply. Both keys are
 # sent together because different servers honor different ones:
@@ -258,6 +266,11 @@ class LLMDetector:
         # Populated by find() when a chunk could not be analyzed at all (see
         # _DegenerateReply) — surfaced to callers so the data-loss isn't silent.
         self.warnings: list[dict] = []
+        # Opt-in cooperative-cancellation hook: None (default) means "never
+        # cancel" and find() behaves exactly as before. server.py sets this on
+        # a fresh per-request instance so a job worker can stop mid-document
+        # when the client goes away (see Cancelled).
+        self.cancel_event: threading.Event | None = None
 
     def find(self, text: str) -> list[Span]:
         self.warnings = []
@@ -280,18 +293,27 @@ class LLMDetector:
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=self.config.concurrency
             ) as pool:
-                future_to_index = {
-                    pool.submit(self._complete, chunk): i
-                    for i, (_offset, chunk) in enumerate(chunks)
-                }
+                future_to_index = {}
+                for i, (_offset, chunk) in enumerate(chunks):
+                    if self.cancel_event is not None and self.cancel_event.is_set():
+                        raise Cancelled()
+                    future_to_index[pool.submit(self._complete, chunk)] = i
                 for future in future_to_index:
                     index = future_to_index[future]
                     try:
                         results[index] = future.result()
                     except _DegenerateReply as exc:
                         results[index] = exc
+                # In-flight requests above have already run to completion (we
+                # don't kill HTTP calls mid-flight — see Change 1's docstring
+                # in the spec); this just stops us from starting a new batch
+                # of chunks on a job the client already gave up on.
+                if self.cancel_event is not None and self.cancel_event.is_set():
+                    raise Cancelled()
         else:
             for i, (_offset, chunk) in enumerate(chunks):
+                if self.cancel_event is not None and self.cancel_event.is_set():
+                    raise Cancelled()
                 try:
                     results[i] = self._complete(chunk)
                 except _DegenerateReply as exc:

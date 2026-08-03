@@ -34,12 +34,14 @@ import concurrent.futures
 import json
 import os
 import sys
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
 from .chunking import chunk_text
 from .gliner_ner import _DEFAULT_LABEL_MAP
+from .llm import Cancelled
 from .spans import Span
 
 
@@ -101,6 +103,11 @@ class RemoteGLiNERDetector:
         # чтобы engine.py мог собрать предупреждения с обоих детекторов
         # одинаково (getattr(detector, "warnings", None)).
         self.warnings: list[dict] = []
+        # Опциональный крючок кооперативной отмены: None (по умолчанию) —
+        # find() ведёт себя ровно как раньше. server.py выставляет его на
+        # свежем экземпляре per-request, чтобы воркер job'а мог остановиться
+        # между кусками, когда клиент отвалился (см. anonymizer.llm.Cancelled).
+        self.cancel_event: threading.Event | None = None
 
     def find(self, text: str) -> list[Span]:
         self.warnings = []
@@ -126,18 +133,27 @@ class RemoteGLiNERDetector:
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=cfg.concurrency
             ) as pool:
-                future_to_index = {
-                    pool.submit(self._extract, chunk): i
-                    for i, (_offset, chunk) in enumerate(chunks)
-                }
+                future_to_index = {}
+                for i, (_offset, chunk) in enumerate(chunks):
+                    if self.cancel_event is not None and self.cancel_event.is_set():
+                        raise Cancelled()
+                    future_to_index[pool.submit(self._extract, chunk)] = i
                 for future in future_to_index:
                     index = future_to_index[future]
                     try:
                         results[index] = future.result()
                     except Exception as exc:  # noqa: BLE001
                         results[index] = exc
+                # Запросы выше уже отработали до конца (in-flight HTTP не
+                # прерываем — кусок стоит максимум пару секунд), это лишь не
+                # даёт запустить новую партию на job'е, от которого клиент
+                # уже отвалился.
+                if self.cancel_event is not None and self.cancel_event.is_set():
+                    raise Cancelled()
         else:
             for i, (_offset, chunk) in enumerate(chunks):
+                if self.cancel_event is not None and self.cancel_event.is_set():
+                    raise Cancelled()
                 try:
                     results[i] = self._extract(chunk)
                 except Exception as exc:  # noqa: BLE001
