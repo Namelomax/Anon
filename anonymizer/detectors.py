@@ -704,8 +704,14 @@ FILE = RegexDetector(
 # AMOUNT included: на договорах LLM-слой стабильно пропускает суммы (отзыв
 # заказчика — «нигде не убрал цены»), а денежные форматы детерминированы;
 # ложные срабатывания дополнительно режет is_money_amount в engine.
+# DATE / DATE_RANGE ОТКЛЮЧЕНЫ по договорённости с заказчиком: даты не являются
+# персональными данными, а их маскирование ломает документ. Модель перестаёт
+# видеть сроки («срок [DATE_3]» вместо «до конца недели»), не может посчитать
+# относительные даты, а после обратной подстановки в тексте появляется
+# «работы закрыты Вчера» и «Срок: следующей неделе» — исходная форма слова
+# вставляется в середину фразы. Вернуть можно, добавив DATE, DATE_RANGE обратно.
 CORPORATE_DETECTORS: tuple[Detector, ...] = (
-    CONTRACT, CONTRACT_NUM, CONTRACT_QUOTED, DATE, DATE_RANGE, ORG_LEGAL, FILE,
+    CONTRACT, CONTRACT_NUM, CONTRACT_QUOTED, ORG_LEGAL, FILE,
     AMOUNT, PRICE_KW, *REQUISITES_DETECTORS, *ADMIN_CODE_DETECTORS,
 )
 

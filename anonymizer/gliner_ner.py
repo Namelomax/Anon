@@ -168,6 +168,42 @@ class GLiNERConfig:
     batch_size: int = 12  # chunks per model call (batching cuts per-call overhead)
 
 
+# Родовые слова, которые GLiNER регулярно принимает за названия организаций и
+# людей. Маскировать их бессмысленно — они ничего не раскрывают, — и вредно:
+# в протоколе появляются «организация учреждение», «Исполнитель — организация
+# заказчик», а после обратной подстановки ломаются падежи.
+_GENERIC_STOPWORDS: frozenset[str] = frozenset(
+    {
+        # роли сторон и участников
+        "заказчик", "исполнитель", "подрядчик", "поставщик", "клиент",
+        "участник", "участники", "представитель", "представители",
+        "сотрудник", "сотрудники", "коллега", "коллеги", "спикер",
+        "директор", "руководитель", "начальник", "специалист", "аналитик",
+        "команда", "команды", "сторона", "стороны", "пользователь",
+        # родовые обозначения организаций и мест
+        "организация", "организации", "учреждение", "учреждения",
+        "компания", "компании", "фирма", "предприятие", "отдел", "отдела",
+        "департамент", "служба", "офис", "филиал", "подразделение",
+        "министерство", "администрация", "больница", "поликлиника", "школа",
+        "город", "города", "область", "район", "адрес",
+        # прочее, что модель иногда помечает как имя
+        "протокол", "договор", "проект", "система", "программа", "документ",
+    }
+)
+
+
+def _is_generic_word(value: str) -> bool:
+    """True — фрагмент состоит только из родовых слов и не является названием."""
+    cleaned = value.strip().strip("«»\"'()[].,;:!?—–-").lower().replace("ё", "е")
+    if not cleaned:
+        return True
+    words = [w for w in cleaned.split() if w]
+    if not words:
+        return True
+    # «учреждение», «заказчик», «городская больница» → все слова родовые.
+    return all(w in _GENERIC_STOPWORDS for w in words)
+
+
 class GLiNERDetector:
     """Detector that finds people/locations via a GLiNER model."""
 
@@ -196,8 +232,15 @@ class GLiNERDetector:
                         continue
                     start = offset + int(ent["start"])
                     end = offset + int(ent["end"])
-                    if end > start:
-                        spans.append(Span(start, end, label, text[start:end], source="gliner"))
+                    if end <= start:
+                        continue
+                    value = text[start:end]
+                    # Родовое слово вместо названия — пропускаем. Иначе в
+                    # протоколе появляется «организация учреждение», а падежи
+                    # ломаются на каждой подстановке.
+                    if _is_generic_word(value):
+                        continue
+                    spans.append(Span(start, end, label, value, source="gliner"))
         return spans
 
     def _predict_batch(self, model, texts: list[str], labels: list[str]) -> list[list[dict]]:
