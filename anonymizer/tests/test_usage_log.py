@@ -18,6 +18,7 @@ import io
 import json
 import sys
 import tempfile
+import time
 from contextlib import contextmanager, redirect_stderr
 from pathlib import Path
 
@@ -218,12 +219,70 @@ def test_request_context_writes_single_summary_with_matching_totals():
         "gliner": {"prompt_tokens": 0, "completion_tokens": 0},
     }
     assert summary["stages"] == {"llm": True}
+    # seconds_by_kind: cumulative (NOT wall-clock) seconds per kind — sits
+    # next to tokens_by_kind, same shape/rounding contract.
+    assert summary["seconds_by_kind"] == {"llm_detect": 1.2, "gliner": 0.2}
 
     # The object yielded by the context manager reflects the same totals
     # AFTER the block exits (server.py reads it this way for the HTTP reply).
     assert totals.prompt_tokens == 30
     assert totals.completion_tokens == 13
     assert totals.calls == {"llm_detect": 2, "gliner": 1}
+    assert totals.seconds_by_kind == {"llm_detect": 1.2, "gliner": 0.2}
+
+    # server.py surfaces usage via as_response_dict() — must carry the same
+    # seconds_by_kind map (task spec point 3).
+    response_usage = totals.as_response_dict()
+    assert response_usage["seconds_by_kind"] == {"llm_detect": 1.2, "gliner": 0.2}
+
+
+def test_seconds_by_kind_sums_correctly_including_failed_calls():
+    """seconds_by_kind must accumulate for BOTH successful and failed calls
+    (same invariant as tokens/calls — see record_call's docstring point 1),
+    and sum correctly across multiple calls of the same kind."""
+    with _temp_log_path() as log_path:
+        with usage_log.request_context(chars=100) as totals:
+            usage_log.record_call("llm_detect", seconds=0.5, ok=True)
+            usage_log.record_call("llm_detect", seconds=0.7, ok=False, error="boom")
+            usage_log.record_call("gliner", seconds=0.2, ok=True)
+        lines = _read_lines(log_path)
+
+    totals_line = next(l for l in lines if l["kind"] == "request_total")
+    assert totals_line["seconds_by_kind"] == {"llm_detect": 1.2, "gliner": 0.2}
+    assert totals.seconds_by_kind == {"llm_detect": 1.2, "gliner": 0.2}
+
+
+def test_cumulative_seconds_can_legitimately_exceed_wall_clock_seconds():
+    """Pins the semantics called out in the module docstring: seconds_by_kind
+    is a SUM across calls of a kind, not wall-clock time. Calls of the same
+    kind run in parallel via a ThreadPoolExecutor (through run_in_context,
+    exactly like llm.py/gliner_remote.py do), each sleeping for real — so the
+    document's wall-clock ``seconds`` genuinely reflects overlapped
+    execution, while seconds_by_kind sums each call's own duration
+    independently and therefore ends up LARGER than wall-clock. A reader who
+    mistook seconds_by_kind for wall-clock time would conclude the opposite
+    of the truth — this test pins that the cumulative figure legitimately
+    exceeds wall-clock, not just that it's an unrelated number."""
+
+    def _slow_call():
+        t0 = time.time()
+        time.sleep(0.05)
+        usage_log.record_call("gliner", seconds=time.time() - t0)
+
+    with _temp_log_path() as log_path:
+        with usage_log.request_context(chars=100) as totals:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                futures = [usage_log.run_in_context(pool, _slow_call) for _ in range(8)]
+                for f in futures:
+                    f.result()
+        lines = _read_lines(log_path)
+
+    totals_line = next(l for l in lines if l["kind"] == "request_total")
+    cumulative = totals_line["seconds_by_kind"]["gliner"]
+    wall = totals_line["seconds"]
+    # 8 calls x ~0.05s each run 4-wide -> cumulative ~0.4s, wall ~0.1s.
+    assert cumulative > wall
+    assert totals.seconds_by_kind["gliner"] == cumulative
 
 
 def test_request_context_all_mode_keeps_per_call_lines_alongside_summary():
@@ -335,6 +394,58 @@ def test_usage_summary_handles_missing_and_malformed_lines():
     assert "today" in summary
 
 
+def test_usage_summary_aggregates_by_stage_across_documents_tolerating_malformed():
+    """by_stage (usage_report.py table, GET /usage) must aggregate calls/
+    seconds/tokens per kind across MULTIPLE request_total lines — and stay
+    tolerant of lines missing seconds_by_kind/tokens_by_kind entirely (old
+    log lines predating this feature) or carrying a malformed shape for
+    those fields, matching usage_summary's existing malformed-line
+    tolerance (see test_usage_summary_handles_missing_and_malformed_lines
+    above)."""
+    rec1 = {
+        "ts": "2026-08-12T10:00:00.000+00:00", "kind": "request_total",
+        "request_id": "a", "pages": 1.0, "prompt_tokens_total": 10,
+        "completion_tokens_total": 5, "cost_rub": 0.1, "seconds": 2.0,
+        "calls": {"gliner": 3, "llm_detect": 1},
+        "seconds_by_kind": {"gliner": 1.5, "llm_detect": 0.4},
+        "tokens_by_kind": {
+            "llm_detect": {"prompt_tokens": 10, "completion_tokens": 5},
+            "gliner": {"prompt_tokens": 0, "completion_tokens": 0},
+        },
+    }
+    rec2 = {
+        "ts": "2026-08-12T11:00:00.000+00:00", "kind": "request_total",
+        "request_id": "b", "pages": 2.0, "prompt_tokens_total": 20,
+        "completion_tokens_total": 8, "cost_rub": 0.2, "seconds": 3.0,
+        "calls": {"gliner": 5},
+        "seconds_by_kind": {"gliner": 2.5},
+        "tokens_by_kind": {"gliner": {"prompt_tokens": 0, "completion_tokens": 0}},
+    }
+    # Old-shaped/malformed line: no seconds_by_kind/tokens_by_kind at all,
+    # and "calls" isn't even a dict — must be skipped for by_stage without
+    # blowing up the whole summary.
+    malformed = {
+        "ts": "2026-08-12T12:00:00.000+00:00", "kind": "request_total",
+        "request_id": "c", "pages": 0.5, "calls": "not-a-dict", "seconds_by_kind": None,
+    }
+    with _temp_log_path() as log_path:
+        log_path.write_text(
+            "\n".join(json.dumps(r) for r in (rec1, rec2, malformed))
+            + "\n" + "not json at all {{{\n",
+            encoding="utf-8",
+        )
+        summary = usage_log.usage_summary(days=30)
+
+    by_stage = summary["all_time"]["by_stage"]
+    assert by_stage["gliner"]["calls"] == 8  # 3 (rec1) + 5 (rec2)
+    assert by_stage["gliner"]["seconds"] == 4.0  # 1.5 + 2.5, cumulative not wall-clock
+    assert by_stage["gliner"]["avg_seconds"] == 0.5  # 4.0 / 8
+    assert by_stage["gliner"]["tokens"] == 0
+    assert by_stage["llm_detect"] == {
+        "calls": 1, "seconds": 0.4, "avg_seconds": 0.4, "tokens": 15,
+    }
+
+
 def test_usage_summary_missing_log_file_returns_zeros():
     with _temp_log_path() as log_path:
         assert not log_path.exists()  # _temp_log_path only reserves a path, doesn't create it
@@ -343,6 +454,7 @@ def test_usage_summary_missing_log_file_returns_zeros():
     assert summary["all_time"]["requests"] == 0
     assert summary["all_time"]["pages"] == 0.0
     assert summary["today"]["requests"] == 0
+    assert summary["all_time"]["by_stage"] == {}
 
 
 if __name__ == "__main__":

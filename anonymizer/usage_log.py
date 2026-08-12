@@ -7,6 +7,20 @@
 GLiNER ``gliner_remote.py``). Именно эта строка — биллинговая запись по
 документу; её форму (набор полей) менять нельзя.
 
+``request_total`` также несёт ``seconds_by_kind`` — суммарное время вызовов
+вышестоящих моделей, накопленное отдельно по каждому ``kind`` (``gliner``,
+``llm_detect``, ``review_list`` и т.д.). КРИТИЧЕСКИ ВАЖНО: это НЕ wall-clock
+время — это СУММА времени по всем вызовам данного вида, а вызовы уходят
+параллельно через ``ThreadPoolExecutor`` (см. ловушку с потоками ниже).
+Поэтому сумма ``seconds_by_kind`` по всем видам РУТИННО ПРЕВЫШАЕТ ``seconds``
+самого документа — это не баг и не ошибка учёта, а прямое следствие
+параллелизма. Именно в этом и есть польза поля: разделив накопленные
+``seconds_by_kind[kind]`` на wall-clock ``seconds`` документа, получаем
+реально достигнутый параллелизм для этого вида вызовов (сколько вызовов в
+среднем выполнялось одновременно) — читатель, который примет
+``seconds_by_kind`` за wall-clock время, придёт к выводу, ПРОТИВОПОЛОЖНОМУ
+истине.
+
 Каждый отдельный HTTP-вызов вышестоящей модели ПРОХОДИТ через
 :func:`record_call`, который ВСЕГДА обновляет накопитель, питающий
 ``request_total`` (см. :func:`_accumulate`) — это происходит независимо от
@@ -102,13 +116,16 @@ class _Accumulator:
     """Итоги ОДНОГО активного ``request_context`` — накапливается со всех
     потоков, поэтому изменяется только под ``_ACC_LOCK``."""
 
-    __slots__ = ("prompt_tokens", "completion_tokens", "calls", "tokens_by_kind")
+    __slots__ = ("prompt_tokens", "completion_tokens", "calls", "tokens_by_kind", "seconds_by_kind")
 
     def __init__(self) -> None:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.calls: dict[str, int] = {}
         self.tokens_by_kind: dict[str, dict[str, int]] = {}
+        # kind -> сумма seconds по всем вызовам этого kind. НЕ wall-clock —
+        # см. докстринг модуля про параллелизм ThreadPoolExecutor.
+        self.seconds_by_kind: dict[str, float] = {}
 
 
 # request_id -> _Accumulator, только для документов, чья обработка идёт
@@ -154,7 +171,9 @@ def _append(record: dict) -> None:
         print(f"[usage_log] запись в лог не удалась: {exc}", file=sys.stderr)
 
 
-def _accumulate(request_id: str | None, kind: str, prompt_tokens: int, completion_tokens: int) -> None:
+def _accumulate(
+    request_id: str | None, kind: str, prompt_tokens: int, completion_tokens: int, seconds: float,
+) -> None:
     if not request_id:
         return
     try:
@@ -168,6 +187,8 @@ def _accumulate(request_id: str | None, kind: str, prompt_tokens: int, completio
             tk = acc.tokens_by_kind.setdefault(kind, {"prompt_tokens": 0, "completion_tokens": 0})
             tk["prompt_tokens"] += prompt_tokens
             tk["completion_tokens"] += completion_tokens
+            # Сумма seconds по kind — НЕ wall-clock, см. докстринг модуля.
+            acc.seconds_by_kind[kind] = acc.seconds_by_kind.get(kind, 0.0) + seconds
     except Exception as exc:  # noqa: BLE001
         print(f"[usage_log] учёт итогов запроса не удался: {exc}", file=sys.stderr)
 
@@ -213,8 +234,9 @@ def record_call(
     request_id = current_request_id()
     ok = bool(ok)
 
-    # (1) Агрегат request_total — безусловно, для любого исхода вызова.
-    _accumulate(request_id, kind, prompt_tokens, completion_tokens)
+    # (1) Агрегат request_total — безусловно, для любого исхода вызова
+    # (включая неудачные — их время тоже накапливается в seconds_by_kind).
+    _accumulate(request_id, kind, prompt_tokens, completion_tokens, seconds)
 
     # (2) Отдельная per-call строка — только если режим её требует.
     if USAGE_LOG_CALLS == "off":
@@ -253,6 +275,10 @@ class RequestTotals:
     seconds: float = 0.0
     cost_rub: float = 0.0
     calls: dict = field(default_factory=dict)  # kind -> количество вызовов
+    # kind -> суммарные seconds по всем вызовам этого kind. НЕ wall-clock —
+    # вызовы идут параллельно (ThreadPoolExecutor), поэтому сумма по всем
+    # kind обычно ПРЕВЫШАЕТ ``seconds`` документа. См. докстринг модуля.
+    seconds_by_kind: dict = field(default_factory=dict)
 
     def as_response_dict(self) -> dict:
         return {
@@ -261,6 +287,8 @@ class RequestTotals:
             "seconds": self.seconds,
             "cost_rub": self.cost_rub,
             "calls": dict(self.calls),
+            # НЕ wall-clock — см. докстринг модуля / поле RequestTotals.seconds_by_kind.
+            "seconds_by_kind": dict(self.seconds_by_kind),
         }
 
 
@@ -293,11 +321,14 @@ def request_context(filename: str | None = None, chars: int = 0, stages: dict | 
             cost_rub = _cost_rub(acc.prompt_tokens, acc.completion_tokens)
             pages = round(chars / 1800, 1) if chars else 0.0
 
+            seconds_by_kind = {k: round(v, 3) for k, v in acc.seconds_by_kind.items()}
+
             totals.prompt_tokens = acc.prompt_tokens
             totals.completion_tokens = acc.completion_tokens
             totals.seconds = elapsed
             totals.cost_rub = cost_rub
             totals.calls = dict(acc.calls)
+            totals.seconds_by_kind = seconds_by_kind
 
             _append({
                 "ts": _now_iso(),
@@ -309,6 +340,10 @@ def request_context(filename: str | None = None, chars: int = 0, stages: dict | 
                 "seconds": elapsed,
                 "calls": dict(acc.calls),
                 "tokens_by_kind": {k: dict(v) for k, v in acc.tokens_by_kind.items()},
+                # Суммарные (не wall-clock!) seconds по kind — см. докстринг
+                # модуля: сумма по всем kind обычно ПРЕВЫШАЕТ elapsed выше,
+                # т.к. вызовы идут параллельно через ThreadPoolExecutor.
+                "seconds_by_kind": seconds_by_kind,
                 "prompt_tokens_total": acc.prompt_tokens,
                 "completion_tokens_total": acc.completion_tokens,
                 "cost_rub": cost_rub,
@@ -356,6 +391,52 @@ def _parse_ts(rec: dict) -> datetime | None:
         return None
 
 
+def _by_stage(records: list[dict]) -> dict:
+    """Разбивка по ``kind`` (``gliner``, ``llm_detect``, ``review_*``, ...),
+    агрегированная по переданным ``request_total`` записям: число вызовов,
+    суммарные (НЕ wall-clock — см. докстринг модуля) seconds, среднее
+    seconds на вызов и суммарные токены. Устойчиво к записям без
+    ``seconds_by_kind``/``tokens_by_kind`` (старые строки лога до появления
+    этих полей) и к записям с "кривой" формой этих полей."""
+    acc: dict[str, dict[str, float]] = {}
+    for rec in records:
+        calls = rec.get("calls")
+        calls = calls if isinstance(calls, dict) else {}
+        seconds_by_kind = rec.get("seconds_by_kind")
+        seconds_by_kind = seconds_by_kind if isinstance(seconds_by_kind, dict) else {}
+        tokens_by_kind = rec.get("tokens_by_kind")
+        tokens_by_kind = tokens_by_kind if isinstance(tokens_by_kind, dict) else {}
+
+        for kind in set(calls) | set(seconds_by_kind) | set(tokens_by_kind):
+            entry = acc.setdefault(kind, {"calls": 0, "seconds": 0.0, "tokens": 0})
+            try:
+                entry["calls"] += int(calls.get(kind) or 0)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                entry["seconds"] += float(seconds_by_kind.get(kind) or 0)
+            except Exception:  # noqa: BLE001
+                pass
+            tk = tokens_by_kind.get(kind)
+            tk = tk if isinstance(tk, dict) else {}
+            try:
+                entry["tokens"] += int(tk.get("prompt_tokens") or 0) + int(tk.get("completion_tokens") or 0)
+            except Exception:  # noqa: BLE001
+                pass
+
+    result: dict[str, dict] = {}
+    for kind, entry in acc.items():
+        calls_n = int(entry["calls"])
+        seconds_sum = round(entry["seconds"], 3)
+        result[kind] = {
+            "calls": calls_n,
+            "seconds": seconds_sum,
+            "avg_seconds": round(seconds_sum / calls_n, 3) if calls_n else 0.0,
+            "tokens": int(entry["tokens"]),
+        }
+    return result
+
+
 def _summarize(records: list[dict]) -> dict:
     requests = len(records)
     pages = sum(float(r.get("pages") or 0) for r in records)
@@ -372,6 +453,10 @@ def _summarize(records: list[dict]) -> dict:
         "cost_rub": round(cost_rub, 4),
         "avg_seconds_per_page": round(seconds / pages, 3) if pages else 0.0,
         "avg_tokens_per_page": round(total_tokens / pages, 1) if pages else 0.0,
+        # Разбивка по kind (gliner/llm_detect/review_*): calls/seconds/
+        # avg_seconds/tokens. seconds здесь — тоже НЕ wall-clock, а сумма
+        # по вызовам этого kind (см. докстринг модуля и _by_stage выше).
+        "by_stage": _by_stage(records),
     }
 
 
