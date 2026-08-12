@@ -39,8 +39,9 @@ def _temp_usage_log():
 
 @contextmanager
 def _patched_post_json(fn):
-    """``fn(url, payload_bytes, headers, timeout) -> (status, body_bytes)``,
-    same shape as ``http_pool.post_json`` — see that module."""
+    """``fn(url, payload_bytes, headers, timeout, *, pool="chat") ->
+    (status, body_bytes)``, same signature as ``http_pool.post_json`` — see
+    that module."""
     orig = http_pool.post_json
     http_pool.post_json = fn
     try:
@@ -74,9 +75,15 @@ def _canned(content: str, prompt_tokens: int = 11, completion_tokens: int = 22) 
     }
 
 
-def _ok(payload: dict):
+def _ok(payload: dict, seen_pools: list | None = None):
     body = json.dumps(payload).encode("utf-8")
-    return lambda url, payload_bytes, headers, timeout: (200, body)
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        if seen_pools is not None:
+            seen_pools.append(pool)
+        return 200, body
+
+    return _fake
 
 
 def test_ask_short_numbers_records_review_short_numbers():
@@ -87,9 +94,10 @@ def test_ask_short_numbers_records_review_short_numbers():
     items = [("123", "ctx")]
     lines = ['0. "123" — контекст: «ctx»']
     payload = _canned(json.dumps([{"id": 0, "mask": True, "text": "123"}]))
+    seen_pools: list = []
 
     with _temp_usage_log() as log_path, _patched_calls_mode("all"), \
-            _patched_post_json(_ok(payload)):
+            _patched_post_json(_ok(payload, seen_pools)):
         _ask_short_numbers(lines, items, cfg)
         lines_out = _read_jsonl(log_path)
 
@@ -99,15 +107,19 @@ def test_ask_short_numbers_records_review_short_numbers():
     assert calls[0]["prompt_tokens"] == 11
     assert calls[0]["completion_tokens"] == 22
     assert calls[0]["ok"] is True
+    # Review calls are chat-completion calls; they must count against the
+    # chat pool, not gliner's (see http_pool.py's module docstring).
+    assert seen_pools == ["chat"]
 
 
 def test_ask_adjacent_records_review_adjacent():
     cfg = ReviewConfig(model="test-model")
     suspects = [("k1", "Вайгус", "context [Вайгус] context")]
     payload = _canned(json.dumps([{"id": 0, "mask": True, "text": "Вайгус"}]))
+    seen_pools: list = []
 
     with _temp_usage_log() as log_path, _patched_calls_mode("all"), \
-            _patched_post_json(_ok(payload)):
+            _patched_post_json(_ok(payload, seen_pools)):
         _ask_adjacent(suspects, cfg)
         lines_out = _read_jsonl(log_path)
 
@@ -116,14 +128,16 @@ def test_ask_adjacent_records_review_adjacent():
     assert calls[0]["prompt_tokens"] == 11
     assert calls[0]["completion_tokens"] == 22
     assert calls[0]["ok"] is True
+    assert seen_pools == ["chat"]
 
 
 def test_ask_recall_records_review_recall():
     cfg = ReviewConfig(model="test-model")
     payload = _canned(json.dumps([{"text": "Иван", "type": "PERSON"}]))
+    seen_pools: list = []
 
     with _temp_usage_log() as log_path, _patched_calls_mode("all"), \
-            _patched_post_json(_ok(payload)):
+            _patched_post_json(_ok(payload, seen_pools)):
         _ask_recall("interim text with [PERSON_1] and Иван", cfg)
         lines_out = _read_jsonl(log_path)
 
@@ -132,15 +146,17 @@ def test_ask_recall_records_review_recall():
     assert calls[0]["prompt_tokens"] == 11
     assert calls[0]["completion_tokens"] == 22
     assert calls[0]["ok"] is True
+    assert seen_pools == ["chat"]
 
 
 def test_ask_records_review_list():
     cfg = ReviewConfig(model="test-model")
     batch = [("k1", _Candidate(label="PERSON", text="Иван", context="[Иван]"))]
     payload = _canned(json.dumps([{"id": 0, "keep": True, "text": "Иван"}]))
+    seen_pools: list = []
 
     with _temp_usage_log() as log_path, _patched_calls_mode("all"), \
-            _patched_post_json(_ok(payload)):
+            _patched_post_json(_ok(payload, seen_pools)):
         _ask(batch, cfg)
         lines_out = _read_jsonl(log_path)
 
@@ -149,13 +165,16 @@ def test_ask_records_review_list():
     assert calls[0]["prompt_tokens"] == 11
     assert calls[0]["completion_tokens"] == 22
     assert calls[0]["ok"] is True
+    assert seen_pools == ["chat"]
 
 
 def test_ask_records_failure_on_url_error():
     cfg = ReviewConfig(model="test-model")
     batch = [("k1", _Candidate(label="PERSON", text="Иван", context="[Иван]"))]
+    seen_pools: list = []
 
-    def _boom(url, payload_bytes, headers, timeout):
+    def _boom(url, payload_bytes, headers, timeout, *, pool="chat"):
+        seen_pools.append(pool)
         raise http_pool.PoolConnectionError("connection refused")
 
     with _temp_usage_log() as log_path, _patched_post_json(_boom):
@@ -169,6 +188,7 @@ def test_ask_records_failure_on_url_error():
     assert len(calls) == 1
     assert calls[0]["ok"] is False
     assert "connection refused" in calls[0]["error"]
+    assert seen_pools == ["chat"]
 
 
 if __name__ == "__main__":

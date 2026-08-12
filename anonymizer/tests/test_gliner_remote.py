@@ -31,8 +31,9 @@ def _temp_usage_log():
 
 @contextmanager
 def _patched_post_json(fn):
-    """``fn(url, payload_bytes, headers, timeout) -> (status, body_bytes)``,
-    same shape as ``http_pool.post_json`` — see that module."""
+    """``fn(url, payload_bytes, headers, timeout, *, pool="chat") ->
+    (status, body_bytes)``, same signature as ``http_pool.post_json`` — see
+    that module."""
     orig = http_pool.post_json
     http_pool.post_json = fn
     try:
@@ -67,8 +68,14 @@ def test_extract_records_gliner_call_with_chars_and_no_tokens():
     payload = {"entities": [{"text": "Иван", "label": "person", "start": 0, "end": 4, "score": 0.9}]}
     body = json.dumps(payload).encode("utf-8")
     det = RemoteGLiNERDetector(RemoteGLiNERConfig())
+    seen_pools = []
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        seen_pools.append(pool)
+        return 200, body
+
     with _temp_usage_log() as log_path, _patched_calls_mode("all"), \
-            _patched_post_json(lambda url, payload_bytes, headers, timeout: (200, body)):
+            _patched_post_json(_fake):
         det._extract("Иван пошёл домой")
         lines = _read_jsonl(log_path)
 
@@ -78,10 +85,17 @@ def test_extract_records_gliner_call_with_chars_and_no_tokens():
     assert calls[0]["prompt_tokens"] == 0
     assert calls[0]["completion_tokens"] == 0
     assert calls[0]["ok"] is True
+    # The whole point of splitting the pools (see http_pool.py's module
+    # docstring): a GLiNER call must count against the GLiNER pool, not the
+    # chat pool, so a burst of long chat calls can never make it queue.
+    assert seen_pools == ["gliner"]
 
 
 def test_extract_records_failure_on_http_error():
-    def _boom(url, payload_bytes, headers, timeout):
+    seen_pools = []
+
+    def _boom(url, payload_bytes, headers, timeout, *, pool="chat"):
+        seen_pools.append(pool)
         return 500, b"internal error"
 
     det = RemoteGLiNERDetector(RemoteGLiNERConfig())
@@ -96,6 +110,7 @@ def test_extract_records_failure_on_http_error():
     assert len(calls) == 1
     assert calls[0]["ok"] is False
     assert "500" in calls[0]["error"]
+    assert seen_pools == ["gliner"]
 
 
 if __name__ == "__main__":
