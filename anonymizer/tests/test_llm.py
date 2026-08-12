@@ -5,13 +5,12 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from anonymizer import usage_log  # noqa: E402
+from anonymizer import http_pool, usage_log  # noqa: E402
 from anonymizer.llm import (  # noqa: E402
     LLMConfig,
     LLMDetector,
@@ -88,25 +87,9 @@ def test_detector_drops_unlocatable_hallucination():
 
 
 # --- usage_log instrumentation (see anonymizer/usage_log.py) ----------------
-# No live server here: urllib.request.urlopen is monkeypatched to return a
+# No live server here: http_pool.post_json is monkeypatched to return a
 # canned vLLM-style response carrying a "usage" object, per the task's
 # constraint against calling the real upstream endpoint.
-
-class _FakeResponse:
-    """Minimal stand-in for the object urllib.request.urlopen() returns."""
-
-    def __init__(self, payload: dict) -> None:
-        self._body = json.dumps(payload).encode("utf-8")
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def read(self):
-        return self._body
-
 
 @contextmanager
 def _temp_usage_log():
@@ -121,13 +104,20 @@ def _temp_usage_log():
 
 
 @contextmanager
-def _patched_urlopen(payload: dict):
-    orig = urllib.request.urlopen
-    urllib.request.urlopen = lambda req, timeout=None: _FakeResponse(payload)
+def _patched_post_json(fn):
+    """``fn(url, payload_bytes, headers, timeout) -> (status, body_bytes)``,
+    same shape as ``http_pool.post_json`` — see that module."""
+    orig = http_pool.post_json
+    http_pool.post_json = fn
     try:
         yield
     finally:
-        urllib.request.urlopen = orig
+        http_pool.post_json = orig
+
+
+def _ok(payload: dict):
+    body = json.dumps(payload).encode("utf-8")
+    return lambda url, payload_bytes, headers, timeout: (200, body)
 
 
 @contextmanager
@@ -156,7 +146,7 @@ def test_request_once_records_llm_detect_usage():
         "usage": {"prompt_tokens": 42, "completion_tokens": 7},
     }
     det = LLMDetector(LLMConfig(model="test-model"))
-    with _temp_usage_log() as log_path, _patched_calls_mode("all"), _patched_urlopen(payload):
+    with _temp_usage_log() as log_path, _patched_calls_mode("all"), _patched_post_json(_ok(payload)):
         det._request_once("some chunk of text")
         lines = _read_jsonl(log_path)
 
@@ -169,24 +159,17 @@ def test_request_once_records_llm_detect_usage():
 
 
 def test_request_once_records_failure_on_url_error():
-    import urllib.error
-
     det = LLMDetector(LLMConfig(model="test-model"))
-    orig = urllib.request.urlopen
 
-    def _boom(req, timeout=None):
-        raise urllib.error.URLError("connection refused")
+    def _boom(url, payload_bytes, headers, timeout):
+        raise http_pool.PoolConnectionError("connection refused")
 
-    urllib.request.urlopen = _boom
-    try:
-        with _temp_usage_log() as log_path:
-            try:
-                det._request_once("some text")
-            except RuntimeError:
-                pass  # existing error handling untouched — see llm.py
-            lines = _read_jsonl(log_path)
-    finally:
-        urllib.request.urlopen = orig
+    with _temp_usage_log() as log_path, _patched_post_json(_boom):
+        try:
+            det._request_once("some text")
+        except RuntimeError:
+            pass  # existing error handling untouched — see llm.py
+        lines = _read_jsonl(log_path)
 
     calls = [l for l in lines if l["kind"] == "llm_detect"]
     assert len(calls) == 1

@@ -1,6 +1,6 @@
 """Offline tests for review.py's four usage_log call sites (see
 anonymizer/usage_log.py's kind values: review_short_numbers, review_adjacent,
-review_recall, review_list). No live LLM server: urllib.request.urlopen is
+review_recall, review_list). No live LLM server: http_pool.post_json is
 monkeypatched to return a canned response carrying a "usage" object.
 """
 
@@ -9,14 +9,12 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-import urllib.error
-import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from anonymizer import usage_log  # noqa: E402
+from anonymizer import http_pool, usage_log  # noqa: E402
 from anonymizer.review import (  # noqa: E402
     ReviewConfig,
     _Candidate,
@@ -25,20 +23,6 @@ from anonymizer.review import (  # noqa: E402
     _ask_recall,
     _ask_short_numbers,
 )
-
-
-class _FakeResponse:
-    def __init__(self, payload: dict) -> None:
-        self._body = json.dumps(payload).encode("utf-8")
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def read(self):
-        return self._body
 
 
 @contextmanager
@@ -54,13 +38,15 @@ def _temp_usage_log():
 
 
 @contextmanager
-def _patched_urlopen(fn):
-    orig = urllib.request.urlopen
-    urllib.request.urlopen = fn
+def _patched_post_json(fn):
+    """``fn(url, payload_bytes, headers, timeout) -> (status, body_bytes)``,
+    same shape as ``http_pool.post_json`` — see that module."""
+    orig = http_pool.post_json
+    http_pool.post_json = fn
     try:
         yield
     finally:
-        urllib.request.urlopen = orig
+        http_pool.post_json = orig
 
 
 @contextmanager
@@ -88,6 +74,11 @@ def _canned(content: str, prompt_tokens: int = 11, completion_tokens: int = 22) 
     }
 
 
+def _ok(payload: dict):
+    body = json.dumps(payload).encode("utf-8")
+    return lambda url, payload_bytes, headers, timeout: (200, body)
+
+
 def test_ask_short_numbers_records_review_short_numbers():
     # Success case: force mode "all" since the point of this test is the
     # raw per-call line shape — under the new default ("errors") a
@@ -98,7 +89,7 @@ def test_ask_short_numbers_records_review_short_numbers():
     payload = _canned(json.dumps([{"id": 0, "mask": True, "text": "123"}]))
 
     with _temp_usage_log() as log_path, _patched_calls_mode("all"), \
-            _patched_urlopen(lambda req, timeout=None: _FakeResponse(payload)):
+            _patched_post_json(_ok(payload)):
         _ask_short_numbers(lines, items, cfg)
         lines_out = _read_jsonl(log_path)
 
@@ -116,7 +107,7 @@ def test_ask_adjacent_records_review_adjacent():
     payload = _canned(json.dumps([{"id": 0, "mask": True, "text": "Вайгус"}]))
 
     with _temp_usage_log() as log_path, _patched_calls_mode("all"), \
-            _patched_urlopen(lambda req, timeout=None: _FakeResponse(payload)):
+            _patched_post_json(_ok(payload)):
         _ask_adjacent(suspects, cfg)
         lines_out = _read_jsonl(log_path)
 
@@ -132,7 +123,7 @@ def test_ask_recall_records_review_recall():
     payload = _canned(json.dumps([{"text": "Иван", "type": "PERSON"}]))
 
     with _temp_usage_log() as log_path, _patched_calls_mode("all"), \
-            _patched_urlopen(lambda req, timeout=None: _FakeResponse(payload)):
+            _patched_post_json(_ok(payload)):
         _ask_recall("interim text with [PERSON_1] and Иван", cfg)
         lines_out = _read_jsonl(log_path)
 
@@ -149,7 +140,7 @@ def test_ask_records_review_list():
     payload = _canned(json.dumps([{"id": 0, "keep": True, "text": "Иван"}]))
 
     with _temp_usage_log() as log_path, _patched_calls_mode("all"), \
-            _patched_urlopen(lambda req, timeout=None: _FakeResponse(payload)):
+            _patched_post_json(_ok(payload)):
         _ask(batch, cfg)
         lines_out = _read_jsonl(log_path)
 
@@ -164,10 +155,10 @@ def test_ask_records_failure_on_url_error():
     cfg = ReviewConfig(model="test-model")
     batch = [("k1", _Candidate(label="PERSON", text="Иван", context="[Иван]"))]
 
-    def _boom(req, timeout=None):
-        raise urllib.error.URLError("connection refused")
+    def _boom(url, payload_bytes, headers, timeout):
+        raise http_pool.PoolConnectionError("connection refused")
 
-    with _temp_usage_log() as log_path, _patched_urlopen(_boom):
+    with _temp_usage_log() as log_path, _patched_post_json(_boom):
         try:
             _ask(batch, cfg)
         except RuntimeError:

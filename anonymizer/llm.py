@@ -31,11 +31,9 @@ import re
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 
-from . import usage_log
+from . import http_pool, usage_log
 from .chunking import chunk_text
 from .spans import Span
 
@@ -230,15 +228,18 @@ class LLMConfig:
             (nor in the ``NONE`` sentinel), so this cuts a degenerate call off
             after a few tokens instead of burning the full ``max_tokens``
             budget.
-        concurrency: Number of chunks sent to the server concurrently. Default
-            is 1 (sequential) DELIBERATELY: the local LM Studio/Ollama path
-            typically serves a single contended GPU, where concurrent requests
-            just queue up behind each other and add nothing but request
-            overhead. Only raise this for a remote endpoint that itself scales
-            under concurrency (measured on the chat endpoint used elsewhere in
-            this pipeline: ~1.23 s fixed overhead per call, throughput per
-            call roughly unchanged from 1 to 8 concurrent callers — the
-            backend batches).
+        concurrency: Number of chunks sent to the server concurrently. Was 1
+            (sequential) by default under the old unpooled transport, where a
+            concurrent caller paid a full fresh-connection handshake (~0.9 s
+            of the ~12 s per call) on top of whatever queuing the backend did
+            — concurrency bought little. Now that requests go through
+            ``http_pool`` (persistent, pooled connections — see that
+            module's docstring), the fixed per-call overhead this used to
+            multiply is gone, and the chat endpoint itself was measured to
+            tolerate concurrency with no latency growth (12.8 s at 1
+            concurrent vs 14.5 s at 32), so a higher default is safe. All
+            calls, regardless of this setting, still share the process-wide
+            cap ``http_pool._INFLIGHT`` (``ANONYMIZER_MAX_INFLIGHT``).
     """
 
     base_url: str = "http://127.0.0.1:11433/v1"
@@ -251,7 +252,7 @@ class LLMConfig:
     allowed_labels: frozenset = _DEFAULT_ALLOWED
     max_chars: int = 3000
     stop: tuple[str, ...] = ("\n\n\n\n",)
-    concurrency: int = 1
+    concurrency: int = 8
 
 
 class _DegenerateReply(Exception):
@@ -387,19 +388,26 @@ class LLMDetector:
             **({"stop": list(cfg.stop)} if cfg.stop else {}),
             **cfg.extra_body,
         }
-        req = urllib.request.Request(
-            cfg.base_url.rstrip("/") + "/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {cfg.api_key}",
-            },
-        )
+        url = cfg.base_url.rstrip("/") + "/chat/completions"
+        body = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {cfg.api_key}",
+        }
         t0 = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
-                data = json.load(resp)
-        except urllib.error.URLError as exc:  # connection refused, timeout, ...
+            status, resp_body = http_pool.post_json(
+                url, body, headers, cfg.timeout, pool="chat"
+            )
+            if status != 200:
+                # Mirrors the old urlopen behaviour, where a non-2xx status
+                # raised HTTPError — a subclass of URLError — and was caught
+                # by the same except clause below with the same message.
+                raise http_pool.PoolConnectionError(
+                    f"HTTP {status}: {resp_body[:200]!r}"
+                )
+            data = json.loads(resp_body)
+        except OSError as exc:  # connection refused, timeout, non-2xx status, ...
             usage_log.record_call(
                 "llm_detect", model=cfg.model, seconds=time.time() - t0,
                 chars=len(text), ok=False, error=str(exc),

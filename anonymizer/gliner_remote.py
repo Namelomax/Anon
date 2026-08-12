@@ -36,11 +36,9 @@ import os
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 
-from . import usage_log
+from . import http_pool, usage_log
 from .chunking import chunk_text
 from .gliner_ner import _DEFAULT_LABEL_MAP
 from .llm import Cancelled
@@ -62,17 +60,23 @@ class RemoteGLiNERConfig:
             перестаёт видеть текст после ~1800 символов (см. докстринг модуля).
         timeout: Таймаут одного запроса.
         label_map: Отображение меток сервиса в метки анонимизатора.
-        concurrency: Число одновременных запросов к ``/extract``. Эндпоинт
-            упирается в задержку сети, а не в вычисления: сама модель отвечает
-            за 10-20 мс, но один вызов целиком занимает ~1.15-1.27 с — это
-            накладные расходы round-trip, постоянные независимо от размера
-            текста. Замер показал почти линейное ускорение без единой ошибки:
-            1 воркер — 40.7 с на 32 вызова, 8 — 5.5 с (7.4x), 16 — 2.8 с
-            (14.6x), 32 — 1.9 с (21.9x). На реальном документе ~73 000
-            символов слой GLiNER делает ~356 запросов по одному на строку:
-            ~460 с последовательно против ~31 с при 16 воркерах. 16 — разумный
-            запас: заметно быстрее единицы, но не настолько агрессивно, чтобы
-            перегрузить общий шлюз.
+        concurrency: Число одновременных запросов к ``/extract``. Раньше (без
+            пула соединений) один вызов целиком занимал ~1.15-1.27 с, хотя
+            сама модель отвечает за 10-20 мс, — остальное было накладными
+            расходами TLS-хендшейка НА КАЖДЫЙ запрос. Замер это подтвердил
+            напрямую: на прогретом переиспользуемом соединении тот же вызов
+            занимает ~68 мс — то есть round-trip был не сетевой задержкой как
+            таковой, а стоимостью установки НОВОГО соединения. Теперь запросы
+            идут через ``http_pool`` (постоянные, переиспользуемые соединения
+            — см. докстринг модуля), и это накладные расходы снимает, а не
+            просто ускоряет: шлюз, который стабильно держит много ОДНОВРЕМЕННЫХ
+            запросов, ложится от резкого всплеска НОВЫХ соединений — именно
+            от этого чувствителен последовательный обход без пула. На
+            реальном документе ~73 000 символов слой GLiNER делает ~356
+            запросов по одному на строку. Все вызовы, независимо от этого
+            параметра, дополнительно ограничены общим для процесса пределом
+            ``http_pool._INFLIGHT`` (``ANONYMIZER_MAX_INFLIGHT``). 16 остаётся
+            без изменений — разумный запас, не поднимаем.
     """
 
     base_url: str = field(
@@ -212,28 +216,18 @@ class RemoteGLiNERDetector:
             "labels": list(cfg.labels),
             "threshold": cfg.threshold,
         }
-        req = urllib.request.Request(
-            cfg.base_url + "/extract",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {cfg.api_key}",
-            },
-        )
+        url = cfg.base_url + "/extract"
+        body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {cfg.api_key}",
+        }
         t0 = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
-                data = json.load(resp)
-        except urllib.error.HTTPError as exc:
-            body = exc.read()[:200].decode("utf-8", "replace")
-            usage_log.record_call(
-                "gliner", seconds=time.time() - t0, chars=len(chunk),
-                ok=False, error=f"HTTP {exc.code}: {body}",
+            status, resp_body = http_pool.post_json(
+                url, body_bytes, headers, cfg.timeout, pool="gliner"
             )
-            raise RuntimeError(
-                f"GLiNER API {cfg.base_url} вернул HTTP {exc.code}: {body}"
-            ) from exc
-        except urllib.error.URLError as exc:
+        except OSError as exc:  # connection refused/reset/timeout, dead pooled socket, ...
             usage_log.record_call(
                 "gliner", seconds=time.time() - t0, chars=len(chunk),
                 ok=False, error=str(exc),
@@ -241,6 +235,16 @@ class RemoteGLiNERDetector:
             raise RuntimeError(
                 f"GLiNER API {cfg.base_url} недоступен: {exc}"
             ) from exc
+        if status != 200:
+            body = resp_body[:200].decode("utf-8", "replace")
+            usage_log.record_call(
+                "gliner", seconds=time.time() - t0, chars=len(chunk),
+                ok=False, error=f"HTTP {status}: {body}",
+            )
+            raise RuntimeError(
+                f"GLiNER API {cfg.base_url} вернул HTTP {status}: {body}"
+            )
+        data = json.loads(resp_body)
         usage_log.record_call("gliner", seconds=time.time() - t0, chars=len(chunk), ok=True)
 
         # Сервис отдаёт {"entities": [...]}; на всякий случай принимаем и голый

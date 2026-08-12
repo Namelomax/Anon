@@ -50,11 +50,9 @@ import json
 import os
 import re
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field, replace
 
-from . import usage_log
+from . import http_pool, usage_log
 from .llm import _extract_json_array  # reuse the same tolerant JSON-array scanner
 from .spans import Span
 
@@ -522,6 +520,31 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
     return out
 
 
+# --- HTTP ---------------------------------------------------------------
+# Shared by all four call sites below (_ask_short_numbers, _ask_adjacent,
+# _ask_recall, _ask): builds the request and POSTs it over the pooled,
+# keep-alive connection (see http_pool.py) instead of a fresh
+# urllib.request.urlopen() connection per call. Raises whatever
+# http_pool.post_json raises (OSError/http_pool.PoolConnectionError on
+# connection failure) or http_pool.PoolConnectionError for a non-2xx status —
+# each call site applies its own usage_log bookkeeping and error wording
+# around this, so the exception is intentionally left unwrapped here.
+def _chat_completion(cfg: "ReviewConfig", payload: dict) -> dict:
+    url = cfg.base_url.rstrip("/") + "/chat/completions"
+    body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {cfg.api_key}",
+    }
+    status, resp_body = http_pool.post_json(url, body, headers, cfg.timeout, pool="chat")
+    if status != 200:
+        # Mirrors the old urlopen behaviour, where a non-2xx status raised
+        # HTTPError (a urllib.error.URLError subclass) and was caught by the
+        # same except clause as any other connection failure.
+        raise http_pool.PoolConnectionError(f"HTTP {status}: {resp_body[:200]!r}")
+    return json.loads(resp_body)
+
+
 _SHORT_NUMBER_SYSTEM_PROMPT = (
     "Ты — контролёр анонимизации русских документов. Каждый кандидат ниже — "
     "КОРОТКОЕ ЧИСЛО (2-3 цифры), которое детектор пометил как конфиденциальное. "
@@ -631,18 +654,9 @@ def _ask_short_numbers(
         "frequency_penalty": 0,
         **cfg.extra_body,
     }
-    req = urllib.request.Request(
-        cfg.base_url.rstrip("/") + "/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {cfg.api_key}",
-        },
-    )
     t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
-            data = json.load(resp)
+        data = _chat_completion(cfg, payload)
     except Exception as exc:  # noqa: BLE001
         usage_log.record_call(
             "review_short_numbers", model=cfg.model, seconds=time.time() - t0,
@@ -820,18 +834,9 @@ def _ask_adjacent(
         "frequency_penalty": 0,
         **cfg.extra_body,
     }
-    req = urllib.request.Request(
-        cfg.base_url.rstrip("/") + "/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {cfg.api_key}",
-        },
-    )
     t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
-            data = json.load(resp)
+        data = _chat_completion(cfg, payload)
     except Exception as exc:  # noqa: BLE001
         usage_log.record_call(
             "review_adjacent", model=cfg.model, seconds=time.time() - t0,
@@ -1032,18 +1037,9 @@ def _ask_recall(interim_text: str, cfg: ReviewConfig) -> list[tuple[str, str]]:
         "frequency_penalty": 0,
         **cfg.extra_body,
     }
-    req = urllib.request.Request(
-        cfg.base_url.rstrip("/") + "/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {cfg.api_key}",
-        },
-    )
     t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
-            data = json.load(resp)
+        data = _chat_completion(cfg, payload)
     except Exception as exc:  # noqa: BLE001
         usage_log.record_call(
             "review_recall", model=cfg.model, seconds=time.time() - t0,
@@ -1171,19 +1167,10 @@ def _ask(batch: list[tuple[str, _Candidate]], cfg: ReviewConfig) -> dict[int, di
         "frequency_penalty": 0,
         **cfg.extra_body,
     }
-    req = urllib.request.Request(
-        cfg.base_url.rstrip("/") + "/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {cfg.api_key}",
-        },
-    )
     t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
-            data = json.load(resp)
-    except urllib.error.URLError as exc:
+        data = _chat_completion(cfg, payload)
+    except OSError as exc:
         usage_log.record_call(
             "review_list", model=cfg.model, seconds=time.time() - t0,
             chars=len("\n".join(lines)), ok=False, error=str(exc),
