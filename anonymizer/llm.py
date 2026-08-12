@@ -30,10 +30,12 @@ import json
 import re
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
+from . import usage_log
 from .chunking import chunk_text
 from .spans import Span
 
@@ -297,7 +299,10 @@ class LLMDetector:
                 for i, (_offset, chunk) in enumerate(chunks):
                     if self.cancel_event is not None and self.cancel_event.is_set():
                         raise Cancelled()
-                    future_to_index[pool.submit(self._complete, chunk)] = i
+                    # run_in_context, НЕ pool.submit напрямую — обычный submit
+                    # не копирует contextvars в поток-воркер, и usage_log
+                    # потеряет request_id (см. usage_log.run_in_context).
+                    future_to_index[usage_log.run_in_context(pool, self._complete, chunk)] = i
                 for future in future_to_index:
                     index = future_to_index[future]
                     try:
@@ -390,14 +395,29 @@ class LLMDetector:
                 "Authorization": f"Bearer {cfg.api_key}",
             },
         )
+        t0 = time.time()
         try:
             with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
                 data = json.load(resp)
         except urllib.error.URLError as exc:  # connection refused, timeout, ...
+            usage_log.record_call(
+                "llm_detect", model=cfg.model, seconds=time.time() - t0,
+                chars=len(text), ok=False, error=str(exc),
+            )
             raise RuntimeError(
                 f"LLM request to {cfg.base_url} failed: {exc}. "
                 "Is LM Studio / Ollama running and the model loaded?"
             ) from exc
+        usage = data.get("usage") or {}
+        usage_log.record_call(
+            "llm_detect",
+            model=cfg.model,
+            prompt_tokens=usage.get("prompt_tokens") or 0,
+            completion_tokens=usage.get("completion_tokens") or 0,
+            seconds=time.time() - t0,
+            chars=len(text),
+            ok=True,
+        )
         choice = data["choices"][0]
         msg = choice["message"]
         finish_reason = choice.get("finish_reason")

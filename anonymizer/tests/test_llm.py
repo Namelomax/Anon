@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
+import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from anonymizer import usage_log  # noqa: E402
 from anonymizer.llm import (  # noqa: E402
+    LLMConfig,
     LLMDetector,
     _extract_json_array,
     _find_all,
@@ -79,6 +85,113 @@ def test_detector_drops_unlocatable_hallucination():
     det = LLMDetector()
     det._complete = lambda t: '[{"text":"Пётр Сидоров","type":"PERSON"}]'  # not in text
     assert det.find(text) == []
+
+
+# --- usage_log instrumentation (see anonymizer/usage_log.py) ----------------
+# No live server here: urllib.request.urlopen is monkeypatched to return a
+# canned vLLM-style response carrying a "usage" object, per the task's
+# constraint against calling the real upstream endpoint.
+
+class _FakeResponse:
+    """Minimal stand-in for the object urllib.request.urlopen() returns."""
+
+    def __init__(self, payload: dict) -> None:
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._body
+
+
+@contextmanager
+def _temp_usage_log():
+    orig = usage_log.LOG_PATH
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "usage.jsonl"
+        usage_log.LOG_PATH = path
+        try:
+            yield path
+        finally:
+            usage_log.LOG_PATH = orig
+
+
+@contextmanager
+def _patched_urlopen(payload: dict):
+    orig = urllib.request.urlopen
+    urllib.request.urlopen = lambda req, timeout=None: _FakeResponse(payload)
+    try:
+        yield
+    finally:
+        urllib.request.urlopen = orig
+
+
+@contextmanager
+def _patched_calls_mode(mode: str):
+    """Force usage_log.USAGE_LOG_CALLS for the duration of the block (see
+    anonymizer/tests/test_usage_log.py's helper of the same name)."""
+    orig = usage_log.USAGE_LOG_CALLS
+    usage_log.USAGE_LOG_CALLS = mode
+    try:
+        yield
+    finally:
+        usage_log.USAGE_LOG_CALLS = orig
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+def test_request_once_records_llm_detect_usage():
+    # Success case: force mode "all" — under the new default ("errors") a
+    # successful call writes no per-call line at all (see test_usage_log.py).
+    payload = {
+        "choices": [{"message": {"content": "NONE"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 42, "completion_tokens": 7},
+    }
+    det = LLMDetector(LLMConfig(model="test-model"))
+    with _temp_usage_log() as log_path, _patched_calls_mode("all"), _patched_urlopen(payload):
+        det._request_once("some chunk of text")
+        lines = _read_jsonl(log_path)
+
+    calls = [l for l in lines if l["kind"] == "llm_detect"]
+    assert len(calls) == 1
+    assert calls[0]["model"] == "test-model"
+    assert calls[0]["prompt_tokens"] == 42
+    assert calls[0]["completion_tokens"] == 7
+    assert calls[0]["ok"] is True
+
+
+def test_request_once_records_failure_on_url_error():
+    import urllib.error
+
+    det = LLMDetector(LLMConfig(model="test-model"))
+    orig = urllib.request.urlopen
+
+    def _boom(req, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    urllib.request.urlopen = _boom
+    try:
+        with _temp_usage_log() as log_path:
+            try:
+                det._request_once("some text")
+            except RuntimeError:
+                pass  # existing error handling untouched — see llm.py
+            lines = _read_jsonl(log_path)
+    finally:
+        urllib.request.urlopen = orig
+
+    calls = [l for l in lines if l["kind"] == "llm_detect"]
+    assert len(calls) == 1
+    assert calls[0]["ok"] is False
+    assert "connection refused" in calls[0]["error"]
 
 
 if __name__ == "__main__":

@@ -49,10 +49,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
 
+from . import usage_log
 from .llm import _extract_json_array  # reuse the same tolerant JSON-array scanner
 from .spans import Span
 
@@ -637,8 +639,26 @@ def _ask_short_numbers(
             "Authorization": f"Bearer {cfg.api_key}",
         },
     )
-    with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
-        data = json.load(resp)
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
+            data = json.load(resp)
+    except Exception as exc:  # noqa: BLE001
+        usage_log.record_call(
+            "review_short_numbers", model=cfg.model, seconds=time.time() - t0,
+            chars=len("\n".join(lines)), ok=False, error=str(exc),
+        )
+        raise
+    usage = data.get("usage") or {}
+    usage_log.record_call(
+        "review_short_numbers",
+        model=cfg.model,
+        prompt_tokens=usage.get("prompt_tokens") or 0,
+        completion_tokens=usage.get("completion_tokens") or 0,
+        seconds=time.time() - t0,
+        chars=len("\n".join(lines)),
+        ok=True,
+    )
     msg = data["choices"][0]["message"]
     content = msg.get("content") or msg.get("reasoning_content") or ""
     blob = _extract_json_array(content)
@@ -808,8 +828,26 @@ def _ask_adjacent(
             "Authorization": f"Bearer {cfg.api_key}",
         },
     )
-    with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
-        data = json.load(resp)
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
+            data = json.load(resp)
+    except Exception as exc:  # noqa: BLE001
+        usage_log.record_call(
+            "review_adjacent", model=cfg.model, seconds=time.time() - t0,
+            chars=len("\n".join(lines)), ok=False, error=str(exc),
+        )
+        raise
+    usage = data.get("usage") or {}
+    usage_log.record_call(
+        "review_adjacent",
+        model=cfg.model,
+        prompt_tokens=usage.get("prompt_tokens") or 0,
+        completion_tokens=usage.get("completion_tokens") or 0,
+        seconds=time.time() - t0,
+        chars=len("\n".join(lines)),
+        ok=True,
+    )
     msg = data["choices"][0]["message"]
     content = msg.get("content") or msg.get("reasoning_content") or ""
     blob = _extract_json_array(content)
@@ -1002,8 +1040,26 @@ def _ask_recall(interim_text: str, cfg: ReviewConfig) -> list[tuple[str, str]]:
             "Authorization": f"Bearer {cfg.api_key}",
         },
     )
-    with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
-        data = json.load(resp)
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
+            data = json.load(resp)
+    except Exception as exc:  # noqa: BLE001
+        usage_log.record_call(
+            "review_recall", model=cfg.model, seconds=time.time() - t0,
+            chars=len(interim_text), ok=False, error=str(exc),
+        )
+        raise
+    usage = data.get("usage") or {}
+    usage_log.record_call(
+        "review_recall",
+        model=cfg.model,
+        prompt_tokens=usage.get("prompt_tokens") or 0,
+        completion_tokens=usage.get("completion_tokens") or 0,
+        seconds=time.time() - t0,
+        chars=len(interim_text),
+        ok=True,
+    )
     msg = data["choices"][0]["message"]
     content = msg.get("content") or msg.get("reasoning_content") or ""
     import sys
@@ -1123,14 +1179,29 @@ def _ask(batch: list[tuple[str, _Candidate]], cfg: ReviewConfig) -> dict[int, di
             "Authorization": f"Bearer {cfg.api_key}",
         },
     )
+    t0 = time.time()
     try:
         with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
             data = json.load(resp)
     except urllib.error.URLError as exc:
+        usage_log.record_call(
+            "review_list", model=cfg.model, seconds=time.time() - t0,
+            chars=len("\n".join(lines)), ok=False, error=str(exc),
+        )
         raise RuntimeError(
             f"Review LLM request to {cfg.base_url} failed: {exc}. "
             "Is LM Studio / Ollama running and the model loaded?"
         ) from exc
+    usage = data.get("usage") or {}
+    usage_log.record_call(
+        "review_list",
+        model=cfg.model,
+        prompt_tokens=usage.get("prompt_tokens") or 0,
+        completion_tokens=usage.get("completion_tokens") or 0,
+        seconds=time.time() - t0,
+        chars=len("\n".join(lines)),
+        ok=True,
+    )
     msg = data["choices"][0]["message"]
     content = msg.get("content") or msg.get("reasoning_content") or ""
     return _parse_verdicts(content)

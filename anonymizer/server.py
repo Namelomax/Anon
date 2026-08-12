@@ -52,6 +52,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from anonymizer import usage_log  # noqa: E402
 from anonymizer.engine import Anonymizer  # noqa: E402
 from anonymizer.llm import Cancelled  # noqa: E402
 
@@ -263,14 +264,15 @@ def _run_anonymize_text(data: dict, cancel_event: threading.Event | None = None)
     """
     text = data.get("text", "")
     stages = {k: data[k] for k in _STAGE_NAMES if k in data}
+    used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
 
     t0 = time.time()
-    with _model_lock():  # only held for local (in-process) models; see _LOCK
-        anon = _compose(stages, data.get("ner_threshold"), cancel_event=cancel_event)
-        res = anon.anonymize(text)
+    with usage_log.request_context(chars=len(text), stages=used) as usage_totals:
+        with _model_lock():  # only held for local (in-process) models; see _LOCK
+            anon = _compose(stages, data.get("ner_threshold"), cancel_event=cancel_event)
+            res = anon.anonymize(text)
     elapsed = time.time() - t0
 
-    used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
     return {
         "anonymized_text": res.anonymized_text,
         "mapping": res.mapping,
@@ -283,6 +285,7 @@ def _run_anonymize_text(data: dict, cancel_event: threading.Event | None = None)
         "elapsed_seconds": round(elapsed, 2),
         "preexisting_placeholders": res.preexisting_placeholders,
         "warnings": list(res.warnings),
+        "usage": usage_totals.as_response_dict(),
     }
 
 
@@ -310,14 +313,16 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
         raise _BadRequest("file_base64 is required")
     raw = base64.b64decode(b64)
     stages = {k: data[k] for k in _STAGE_NAMES if k in data}
+    used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
 
     is_docx = filename.lower().endswith(".docx")
     text = read_text_from_bytes(filename, raw)
 
     t0 = time.time()
-    with _model_lock():  # only held for local (in-process) models; see _LOCK
-        anon = _compose(stages, data.get("ner_threshold"), cancel_event=cancel_event)
-        res = anon.anonymize(text)
+    with usage_log.request_context(filename=filename, chars=len(text), stages=used) as usage_totals:
+        with _model_lock():  # only held for local (in-process) models; see _LOCK
+            anon = _compose(stages, data.get("ner_threshold"), cancel_event=cancel_event)
+            res = anon.anonymize(text)
     elapsed = time.time() - t0
 
     stem = PurePosixPath(filename).stem or "document"
@@ -330,7 +335,6 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
         doc_name = f"{stem}.anon.txt"
         doc_mime = "text/plain"
 
-    used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
     return {
         "filename": filename,
         "is_docx": is_docx,
@@ -348,6 +352,7 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
         "document_base64": base64.b64encode(doc_bytes).decode("ascii"),
         "document_name": doc_name,
         "document_mime": doc_mime,
+        "usage": usage_totals.as_response_dict(),
     }
 
 
@@ -389,6 +394,11 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.rstrip("/")
         if path.endswith("health") or self.path in ("/", ""):
             self._send(200, {"status": "ok", **_INFO})
+            return
+        if path.endswith("usage"):
+            # Только чтение JSONL-лога — не трогает _LOCK/_JOBS_LOCK, поэтому
+            # никогда не стоит в очереди за обрабатывающимся документом.
+            self._send(200, usage_log.usage_summary())
             return
         if "/jobs/" in path:
             job_id = path.rsplit("/jobs/", 1)[1]

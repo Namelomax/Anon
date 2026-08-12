@@ -35,10 +35,12 @@ import json
 import os
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
+from . import usage_log
 from .chunking import chunk_text
 from .gliner_ner import _DEFAULT_LABEL_MAP
 from .llm import Cancelled
@@ -137,7 +139,10 @@ class RemoteGLiNERDetector:
                 for i, (_offset, chunk) in enumerate(chunks):
                     if self.cancel_event is not None and self.cancel_event.is_set():
                         raise Cancelled()
-                    future_to_index[pool.submit(self._extract, chunk)] = i
+                    # run_in_context, НЕ pool.submit напрямую — обычный submit
+                    # не копирует contextvars в поток-воркер, и usage_log
+                    # потеряет request_id (см. usage_log.run_in_context).
+                    future_to_index[usage_log.run_in_context(pool, self._extract, chunk)] = i
                 for future in future_to_index:
                     index = future_to_index[future]
                     try:
@@ -215,18 +220,28 @@ class RemoteGLiNERDetector:
                 "Authorization": f"Bearer {cfg.api_key}",
             },
         )
+        t0 = time.time()
         try:
             with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
                 data = json.load(resp)
         except urllib.error.HTTPError as exc:
             body = exc.read()[:200].decode("utf-8", "replace")
+            usage_log.record_call(
+                "gliner", seconds=time.time() - t0, chars=len(chunk),
+                ok=False, error=f"HTTP {exc.code}: {body}",
+            )
             raise RuntimeError(
                 f"GLiNER API {cfg.base_url} вернул HTTP {exc.code}: {body}"
             ) from exc
         except urllib.error.URLError as exc:
+            usage_log.record_call(
+                "gliner", seconds=time.time() - t0, chars=len(chunk),
+                ok=False, error=str(exc),
+            )
             raise RuntimeError(
                 f"GLiNER API {cfg.base_url} недоступен: {exc}"
             ) from exc
+        usage_log.record_call("gliner", seconds=time.time() - t0, chars=len(chunk), ok=True)
 
         # Сервис отдаёт {"entities": [...]}; на всякий случай принимаем и голый
         # список — контракт у подобных обёрток любит меняться.
