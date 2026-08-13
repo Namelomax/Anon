@@ -987,6 +987,198 @@ def is_non_pii(text: str) -> bool:
     return is_job_title(text) or is_software(text)
 
 
+# --- PERSON un-mask morphological gate --------------------------------------
+# The LLM review layer (review.py) is allowed to DROP a PERSON candidate
+# (``keep=false`` — "this isn't really a name, unmask it") when its own prompt
+# says the value is an ordinary Russian word. In production the model does not
+# reliably obey that instruction: on a real transcript it dropped both
+# "Капитан Яков" and "Вайгус" (a rare surname) as non-PII, exposing a real
+# name. This is a long-standing, documented failure of this project.
+#
+# The fix is a DETERMINISTIC veto applied to every PERSON ``keep=false``
+# verdict, independent of what the model claims: a Russian morphological
+# dictionary (natasha's ``MorphVocab``, which wraps pymorphy2/OpenCorpora) can
+# tell an ordinary word from a personal name far more reliably than a 9B
+# model, and it needs no per-document word list (the project owner has
+# rejected hardcoded value lists before — they don't generalise).
+#
+# A candidate word is droppable by EITHER of two independent, deterministic
+# paths — see ``is_person_word_droppable``:
+#   (a) dictionary path — the word is KNOWN to the dictionary and no parse of
+#       it is tagged as a personal name/surname/patronymic ("День", "Спикер",
+#       "Решение", "ТЗ", "МП" — even short fixed abbreviations are correctly
+#       tagged ``Abbr`` rather than ``Name``/``Surn``/``Patr``).
+#   (b) structural-garbage path — the word is UNKNOWN to the dictionary but is
+#       also structurally impossible as a Russian name by shape alone
+#       (transcription filler like "Ааа"/"Ммм"/"Эээ", consonant-only noise
+#       like "Тк"/"Ннн"). This exists so the gate doesn't leave every ASR
+#       artefact stuck masked forever just because no dictionary will ever
+#       contain it — but it is deliberately narrow: anything with a Cyrillic
+#       vowel, of ordinary name length, is left REFUSED rather than risk
+#       unmasking a real short/rare name ("Ивэ" stays masked; over-masking a
+#       rare name is acceptable, leaking one is not).
+# If NEITHER path applies (unknown to the dictionary AND not structurally
+# impossible — exactly "Вайгус", "Яков", "Дронова", "Смирнов", "ИВАНОВ",
+# "Римский-Корсаков"), the word blocks the drop and the candidate stays
+# masked. Latin-script words ("Telegram", "Skype", "ERP") are never examined
+# at all by ``can_unmask_person`` (see there) — this gate is Russian-specific
+# and out of scope for them by design, so today's behaviour for product/tool
+# names is untouched.
+
+_MORPH_VOCAB = None
+_MORPH_UNAVAILABLE = False
+
+
+def _morph_vocab():
+    """Lazily construct (and cache) the natasha/pymorphy2 dictionary wrapper.
+
+    Returns ``None`` (never raises) if natasha/pymorphy2 fails to import or
+    its dictionaries fail to load for any reason — callers treat that as "the
+    gate cannot run" and fail to the SAFE side (refuse every PERSON drop; see
+    ``morph_gate_available`` / ``can_unmask_person``), never crash.
+    """
+    global _MORPH_VOCAB, _MORPH_UNAVAILABLE
+    if _MORPH_VOCAB is None and not _MORPH_UNAVAILABLE:
+        try:
+            from natasha import MorphVocab
+
+            _MORPH_VOCAB = MorphVocab()
+        except Exception:  # noqa: BLE001 - any import/load failure is fail-safe
+            _MORPH_UNAVAILABLE = True
+    return _MORPH_VOCAB
+
+
+def morph_gate_available() -> bool:
+    """True if the deterministic PERSON-unmask gate can run at all."""
+    return _morph_vocab() is not None
+
+
+# OpenCorpora/pymorphy2 grammemes for the three flavours of personal name.
+# natasha's ``MorphVocab`` converts tags to UD-style ``feats`` for its public
+# ``pos``/``feats`` attributes, and that conversion DROPS these three grams
+# entirely (see natasha/morph/vocab.py: "a number of OC grams are missing:
+# ... Name ... Patr ... Surn ...") — so they must be read off the underlying
+# pymorphy2 ``tag`` object directly (``grammeme in parse.tag``), not off
+# ``parse.feats``.
+_PROPER_NAME_GRAMMEMES = ("Name", "Surn", "Patr")
+
+_CYRILLIC_VOWELS = frozenset("аеёиоуыэюя")
+_RUN_RE = re.compile(r"(.)\1{2,}")  # 3+ repeated identical characters
+
+
+def _is_cyrillic_letter(ch: str) -> bool:
+    return "а" <= ch.lower() <= "я" or ch.lower() == "ё"
+
+
+def _is_garbage_fragment(part: str) -> bool:
+    """Structural check on ONE hyphen-free fragment of a candidate word.
+
+    No dictionary lookup — pure shape signals a real Russian name part never
+    has. All-caps is a garbage signal ONLY at length <=3 ("ТЗ", "МП", "АКТ"):
+    document headers legitimately write real surnames in caps ("ИВАНОВ",
+    "СМИРНОВ АНДРЕЙ ПЕТРОВИЧ"), so this must not fire past 3 characters —
+    generalising "all caps => abbreviation" would reopen the leak.
+    """
+    if len(part) <= 2 or len(part) >= 25:
+        return True
+    if any(ch.isdigit() for ch in part):
+        return True
+    if any(not _is_cyrillic_letter(ch) for ch in part):
+        return True  # any symbol other than a Cyrillic letter (hyphen already split off)
+    if _RUN_RE.search(part):
+        return True
+    if not any(ch.lower() in _CYRILLIC_VOWELS for ch in part):
+        return True
+    if part.isupper() and len(part) <= 3:
+        return True
+    return False
+
+
+def _is_structurally_impossible_name(word: str) -> bool:
+    """Path (b): ``word`` cannot be a real Russian personal name by SHAPE
+    alone (see module comment above ``_MORPH_VOCAB``).
+
+    A hyphen is legitimate inside a real double-barrelled surname
+    ("Римский-Корсаков") and must never by itself count as garbage, so
+    ``word`` is split on ``-`` and EVERY fragment must be individually
+    impossible for the whole to count as garbage — a hyphenated word with
+    even one name-plausible fragment ("Римский", "Корсаков") is NOT garbage,
+    which is what keeps a real double-barrelled surname refused (blocked)
+    rather than incorrectly waved through as noise.
+    """
+    parts = [p for p in word.split("-") if p]
+    if not parts:
+        return True
+    return all(_is_garbage_fragment(p) for p in parts)
+
+
+def is_person_word_droppable(word: str) -> tuple[bool, str]:
+    """Decide ONE capitalised Cyrillic word for the PERSON-unmask gate.
+
+    Returns ``(allowed, why)``. When ``allowed`` is True, ``why`` is
+    ``"dict"`` or ``"garbage"`` — which of the two paths let it through (see
+    module comment). When ``allowed`` is False, ``why`` is a short human
+    reason. Assumes ``morph_gate_available()`` is already True; there is
+    nothing meaningful to decide without a dictionary (see
+    ``can_unmask_person``, which checks that first).
+    """
+    vocab = _morph_vocab()
+    if vocab is None:
+        return False, "dictionary unavailable"
+    known = vocab.word_is_known(word)
+    if known:
+        parses = vocab(word)
+        if not any(
+            any(g in parse.tag for g in _PROPER_NAME_GRAMMEMES) for parse in parses
+        ):
+            return True, "dict"
+        reason = "known word, but tagged as a personal name/surname/patronymic"
+    else:
+        reason = "unknown to the dictionary"
+    if _is_structurally_impossible_name(word):
+        return True, "garbage"
+    return False, reason
+
+
+_CYR_UPPER_START_RE = re.compile(r"^[А-ЯЁ]")
+_PERSON_WORD_STRIP = "«»\"'(),.;:!?"
+
+
+def can_unmask_person(value: str) -> tuple[bool, list[tuple[str, bool, str]]]:
+    """PERSON ``keep=false`` gate: can review.py actually drop this candidate?
+
+    Splits ``value`` on whitespace and examines every word that STARTS with
+    an uppercase Cyrillic letter after stripping surrounding punctuation — a
+    Latin word ("Telegram") or a lowercase connector ("и") is never examined,
+    which is what keeps Latin-script candidates out of scope (see module
+    comment): with zero words to examine, the "every examined word passes" ==
+    True vacuously, i.e. today's behaviour for them is unchanged.
+
+    The drop is allowed only if EVERY examined word is allowed by
+    ``is_person_word_droppable`` (dictionary path OR structural-garbage
+    path); a single blocking word (e.g. "Яков" in "Капитан Яков") refuses the
+    whole candidate.
+
+    Returns ``(allowed, verdicts)`` where ``verdicts`` is
+    ``[(word, allowed, why), ...]`` for every word actually examined, for the
+    caller to log. If the dictionary is unavailable (``morph_gate_available()``
+    is False), this refuses unconditionally and returns an empty ``verdicts``
+    list — nothing WAS checked, which is how a caller distinguishes "refused
+    because unavailable" from "refused because a word blocked it" without a
+    second availability check.
+    """
+    if not morph_gate_available():
+        return False, []
+    words = []
+    for raw in value.split():
+        w = raw.strip(_PERSON_WORD_STRIP)
+        if w and _CYR_UPPER_START_RE.match(w):
+            words.append(w)
+    verdicts = [(w, *is_person_word_droppable(w)) for w in words]
+    allowed = all(ok for _w, ok, _why in verdicts)
+    return allowed, verdicts
+
+
 # NER/LLM labels are "soft": models sometimes tag pronouns or function words
 # ("я", "он", "это") as PERSON/LOCATION/ORG. Masking those is catastrophic with
 # mask_all_occurrences (every "я" inside "сегодня", "друзья" gets replaced), so

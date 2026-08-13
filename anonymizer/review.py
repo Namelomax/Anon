@@ -53,6 +53,15 @@ Design contract, mirroring ``llm.py``:
   high enough to fit a typical meeting transcript's reviewable entities in
   one call; if a document has more, merges across batch boundaries are
   simply not attempted (fails safe to "two separate placeholders").
+* PERSON ``keep=false`` is additionally vetoed by a DETERMINISTIC morphology
+  check (``detectors.can_unmask_person``) before it is applied — the prompt
+  already tells the model that dropping PERSON is only for ordinary Russian
+  words, but it does not reliably obey that (rare/unfamiliar surnames like
+  "Вайгус" get dropped as if they were common words). The model's verdict is
+  only TRUSTED once a Russian morphological dictionary confirms the value is
+  actually an ordinary word (or, failing that, structurally impossible as a
+  name — see the detector for the two-path rule); otherwise the drop is
+  refused and the span stays masked, logged to stderr either way.
 """
 
 from __future__ import annotations
@@ -64,6 +73,7 @@ import time
 from dataclasses import dataclass, field, replace
 
 from . import http_pool, usage_log
+from .detectors import can_unmask_person  # deterministic PERSON-unmask veto
 from .llm import _extract_json_array  # reuse the same tolerant JSON-array scanner
 from .spans import Span
 
@@ -352,6 +362,14 @@ _REVIEW_ADJACENT_FAILED_MESSAGE = (
     "Персональные данные при этом не раскрываются, документ может быть "
     "немного избыточно замаскирован."
 )
+_REVIEW_PERSON_GATE_UNAVAILABLE_MESSAGE = (
+    "Словарная проверка фамилий и имён недоступна (не загрузился морфологический "
+    "словарь natasha/pymorphy2) — модель предложила снять маску с одного или "
+    "нескольких кандидатов ФИО, но эти решения НЕ были применены: без словаря "
+    "нельзя надёжно отличить редкую фамилию от обычного слова, поэтому такие "
+    "кандидаты остались замаскированными. Персональные данные при этом не "
+    "раскрываются, документ может быть немного избыточно замаскирован."
+)
 _RECALL_FAILED_MESSAGE = (
     "Проверка на полноту (recall) не была выполнена ({exc}) — документ не "
     "был дополнительно проверен на персональные данные, пропущенные другими "
@@ -462,6 +480,14 @@ def review_spans(
         return " ".join(s.split()).casefold()
 
     dropped_ids = 0
+    # Кандидаты PERSON, которых модель попросила снять (keep=false), но
+    # детерминированный морфологический шлюз (см. detectors.can_unmask_person)
+    # отказал/разрешил — собираем для одного финального лога и (для отказов
+    # из-за недоступности словаря) единственной записи в warnings, вместо
+    # печати построчно внутри цикла. См. комментарий у can_unmask_person.
+    _person_gate_refused: list[tuple[str, list]] = []
+    _person_gate_allowed: list[tuple[str, list]] = []
+    _person_gate_unavailable = False
     for idx, key in enumerate(keys):
         # ``verdicts`` is exceptions-only (see _build_review_prompt): a
         # candidate the model didn't mention at all simply has no entry here,
@@ -488,6 +514,21 @@ def review_spans(
             dropped_ids += 1
             continue
         if v.get("keep") is False:
+            # Детерминированный шлюз: модель регулярно "прощает" редкие/
+            # незнакомые фамилии как обычные слова (канонический случай —
+            # «Вайгус»), несмотря на явный запрет в промпте. Для PERSON
+            # keep=false доверяем модели ТОЛЬКО если словарная проверка
+            # подтверждает, что значение действительно обычное слово (или,
+            # для неизвестных словарю значений, явный мусор распознавания —
+            # см. detectors.can_unmask_person). Иначе — отказ, маска остаётся.
+            if candidates[key].label == "PERSON":
+                allowed, gate_verdicts = can_unmask_person(candidates[key].text)
+                if not allowed:
+                    if not gate_verdicts:  # словарь недоступен — см. can_unmask_person
+                        _person_gate_unavailable = True
+                    _person_gate_refused.append((candidates[key].text, gate_verdicts))
+                    continue  # keep[key] остаётся True — безопасный дефолт
+                _person_gate_allowed.append((candidates[key].text, gate_verdicts))
             keep[key] = False
             continue
         trim = v.get("trim")
@@ -518,6 +559,44 @@ def review_spans(
             f"[review] discarded {dropped_ids} verdict(s): id/text mismatch "
             "(model's numbering drifted mid-batch) — affected candidates kept masked",
             file=sys.stderr,
+        )
+
+    if _person_gate_refused or _person_gate_allowed:
+        import sys
+
+        for text, gate_verdicts in _person_gate_refused:
+            if not gate_verdicts:
+                print(
+                    f"[review] person-gate: kept masked, dictionary unavailable: {text!r}",
+                    file=sys.stderr,
+                )
+                continue
+            reasons = "; ".join(
+                f"{w!r} — {why}" for w, ok, why in gate_verdicts if not ok
+            )
+            print(
+                f"[review] person-gate: refused model's keep=false for {text!r} "
+                f"({reasons}) — kept masked",
+                file=sys.stderr,
+            )
+        for text, gate_verdicts in _person_gate_allowed:
+            paths = (
+                ", ".join(f"{w!r}={why}" for w, _ok, why in gate_verdicts)
+                if gate_verdicts
+                else "no Cyrillic capitalised words (out of scope)"
+            )
+            print(
+                f"[review] person-gate: confirmed model's keep=false for {text!r} "
+                f"via {paths} — unmasked",
+                file=sys.stderr,
+            )
+
+    if _person_gate_unavailable and warnings is not None:
+        warnings.append(
+            {
+                "kind": "review_person_gate_unavailable",
+                "message": _REVIEW_PERSON_GATE_UNAVAILABLE_MESSAGE,
+            }
         )
 
     # Страховка соседства: PERSON-кандидат, которого ревью сняло, но чей спан
