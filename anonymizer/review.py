@@ -9,8 +9,10 @@ product/technology name (GPT, Telegram, Битрикс), a legal abbreviation (�
 НДА), or a speech-to-text artifact all get masked just like real PII.
 
 This layer asks an LLM to look at each *distinct* detected value together with
-a snippet of its surrounding context and returns one of three verdicts per
-candidate:
+a snippet of its surrounding context and asks it to report EXCEPTIONS ONLY —
+candidates that need one of three actions. Anything not mentioned in the
+model's answer is left masked exactly as detected; silence means "keep this
+span masked". The three actions:
 
 * ``keep=false`` — drop it: not PII, revert to plain text.
 * ``trim`` — the candidate is PII only in *part* (a rank/title/honorific is
@@ -30,9 +32,18 @@ Design contract, mirroring ``llm.py``:
   SNILS, PASSPORT, CREDIT_CARD...) are never sent to the model and always
   stay masked — a regex match on those is essentially never wrong, and an
   LLM should not be given a chance to talk itself into unmasking real PII.
-* Fail-safe: if the LLM is unreachable, times out, or returns something that
-  cannot be parsed, every affected span is kept masked, untrimmed and
-  unmerged (unchanged behaviour).
+* Fail-safe: if the LLM is unreachable, times out, returns something that
+  cannot be parsed, or simply omits a candidate, every affected span is kept
+  masked, untrimmed and unmerged (unchanged behaviour) — every candidate
+  defaults to "keep masked" and only an entry that survives the echo-text
+  check below can change that.
+* Every returned entry must echo the candidate's exact text back (``text``
+  field) so its ``id`` can be verified against what was actually shown at
+  that position; an entry whose echoed text doesn't match the candidate
+  sitting at that id is ignored (span stays masked) and logged to stderr.
+  This is the only positional safety net left once "one verdict per
+  candidate" is gone — a short reply is now the *normal* case, not evidence
+  of drift, so there is no separate check on how many entries came back.
 * Repeat occurrences of the same value (same label, whitespace-collapsed,
   case-folded) are judged once, as a group, using the first occurrence's
   context — mirrors how ``mapping.assign_placeholders`` groups identical
@@ -148,15 +159,26 @@ _REVIEW_PROMPT_TEMPLATE = (
     "« | » — это разные места документа, а не один и тот же фрагмент. Суди по "
     "ВСЕМ показанным фрагментам сразу: если хотя бы в одном из них значение явно "
     "выглядит как настоящее ПДн (реальное обращение к человеку, название "
-    "организации и т.п.), верни keep=true, даже если другие фрагменты выглядят "
-    "более обыденно или неоднозначно — двусмысленность в одном месте не отменяет "
-    "явную ПДн в другом.\n"
-    "Для КАЖДОГО кандидата, СТРОГО по порядку и БЕЗ ПРОПУСКОВ, верни объект "
-    '{"id": <номер>, "text": <значение кандидата>, "keep": true|false, '
-    '"trim": <опционально>, "merge_with": <опционально>}. Поле text должно '
-    "ДОСЛОВНО повторять значение этого кандидата — по нему проверяется, что "
-    "нумерация не сбилась. Если не уверен в решении — не пропускай кандидата: "
-    "верни его с keep=true.\n"
+    "организации и т.п.), считай его keep=true (оставить замаскированным), даже "
+    "если другие фрагменты выглядят более обыденно или неоднозначно — "
+    "двусмысленность в одном месте не отменяет явную ПДн в другом.\n"
+    "ФОРМАТ ОТВЕТА — ТОЛЬКО ИСКЛЮЧЕНИЯ. Не перечисляй всех кандидатов. Верни "
+    "объект ТОЛЬКО для тех кандидатов, с которыми нужно что-то СДЕЛАТЬ: снять "
+    "маску целиком (keep=false), скрыть только часть значения (trim) или "
+    "объединить с другим кандидатом (merge_with). Кандидата, который должен "
+    "остаться замаскированным БЕЗ ИЗМЕНЕНИЙ (keep=true без trim и merge_with), "
+    "в ответ включать НЕ НУЖНО — ПРОСТО ПРОПУСТИ его. Отсутствие кандидата в "
+    "твоём ответе означает «оставить замаскированным как есть» — это "
+    "умолчание, а не ошибка, и большинство кандидатов в него попадут. Не "
+    "перечисляй кандидатов «для полноты» — лишние объекты в ответе не нужны и "
+    "тратят место впустую.\n"
+    'Для каждого включённого кандидата верни объект {"id": <номер>, "text": '
+    '<значение кандидата>, "keep": false (опционально при trim/merge_with), '
+    '"trim": <опционально>, "merge_with": <опционально>}. Поле text ОБЯЗАТЕЛЬНО '
+    "и должно ДОСЛОВНО повторять значение этого кандидата — по нему "
+    "проверяется, что id указан верно. Если сомневаешься, нужно ли действие — "
+    "НЕ включай кандидата в ответ: по умолчанию он останется замаскированным, "
+    "это безопасно.\n"
     "- keep=false — это ОШИБКА детектора: обычное слово, местоимение, день "
     "недели, должность, <<PRODUCT_RULE>>, юридический термин или "
     "аббревиатура (ФЗ, НДА), обрывок "
@@ -202,7 +224,9 @@ _REVIEW_PROMPT_TEMPLATE = (
     "на самом деле не код (случайный счётчик, номер строки/пункта, дата, "
     "процент), т.е. само значение не выглядит как осмысленный шифр. Если не "
     "уверен — keep=true (эти коды почти всегда стоит скрывать).\n"
-    "- keep=true без trim/merge_with — значение целиком ПДн, оставить как есть.\n"
+    "- keep=true без trim/merge_with — значение целиком ПДн, оставить как есть; "
+    "ТАКИХ КАНДИДАТОВ В ОТВЕТ НЕ ВКЛЮЧАЙ (см. правило про исключения выше) — "
+    "это умолчание для любого пропущенного id.\n"
     "- trim — если ПДн является лишь ЧАСТЬЮ значения (к имени приклеено "
     "звание/должность/обращение, например «Капитан Яков» — ПДн только «Яков», "
     "а «Капитан» должен вернуться в текст), укажи в trim ТОЧНУЮ подстроку "
@@ -222,10 +246,11 @@ _REVIEW_PROMPT_TEMPLATE = (
     "официального упоминания (обычно то, что содержит фамилию или требует "
     "trim) — это оно станет отображаемым именем в итоговом документе. В "
     "документе оба получат один и тот же плейсхолдер.\n"
-    "Если сомневаешься — верни keep=true без trim и merge_with: лучше скрыть "
-    "лишнее, чем случайно раскрыть настоящие ПДн.\n"
-    "Ответь ТОЛЬКО JSON-массивом объектов для ВСЕХ кандидатов по порядку, без "
-    "каких-либо пояснений."
+    "Если сомневаешься — НЕ включай кандидата в ответ (что эквивалентно "
+    "keep=true без trim и merge_with): лучше оставить лишнее замаскированным, "
+    "чем случайно раскрыть настоящие ПДн.\n"
+    "Ответь ТОЛЬКО JSON-массивом объектов-исключений, без каких-либо пояснений. "
+    "Если действий не требуется ни для одного кандидата — верни пустой массив []."
 )
 
 # Промпт обычного (не-subject) режима — поведение по умолчанию не изменилось.
@@ -240,10 +265,14 @@ class ReviewConfig:
         base_url: OpenAI-compatible base (LM Studio / Ollama). Typically the
             same server used for the detection LLM layer.
         model: Model id as the server reports it.
-        max_tokens: Output budget for the verdict JSON — a list of
-            ``{id, keep, trim?, merge_with?}`` objects, one per candidate, each
-            echoing the candidate text back, so it grows with document size
-            (1626 completion tokens on a ~90-candidate transcript, measured).
+        max_tokens: Output budget for the verdict JSON — an EXCEPTIONS-ONLY
+            list of ``{id, text, keep?, trim?, merge_with?}`` objects, one per
+            candidate that needs an action (dropped, trimmed or merged);
+            candidates that stay masked as-is are omitted entirely, so the
+            reply is normally a few hundred tokens regardless of document
+            size (down from ~1626 completion tokens on a ~90-candidate
+            transcript under the old one-verdict-per-candidate format). The
+            budget is kept generous anyway as a ceiling, not a target.
             ВНИМАНИЕ: LM Studio отвергает запрос с HTTP 400, если
             ``prompt_tokens + max_tokens`` превышает длину загруженного
             контекста. При 16000 здесь модель должна быть загружена с
@@ -375,6 +404,12 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
 
     dropped_ids = 0
     for idx, key in enumerate(keys):
+        # ``verdicts`` is exceptions-only (see _build_review_prompt): a
+        # candidate the model didn't mention at all simply has no entry here,
+        # and ``keep[key]`` was already initialised to True above — the
+        # correct, safe default. Nothing below this point can *unmask* a
+        # candidate the model was silent about; it can only act on an entry
+        # that was actually returned AND passes the echo-text check next.
         v = verdicts.get(idx)
         if not v:
             continue
@@ -384,7 +419,12 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
         # match what's actually at this id, its numbering has drifted, so we
         # ignore the verdict entirely rather than risk acting on the wrong
         # candidate (this is what caused real names to be dropped in testing:
-        # the model's id/text pairing had silently desynced mid-batch).
+        # the model's id/text pairing had silently desynced mid-batch). This
+        # is now the ONLY positional safety net: under the old "one verdict
+        # per candidate" format a short reply was itself suspicious and could
+        # be flagged by comparing counts, but under exceptions-only a short
+        # (or even empty) reply is the expected, normal case — so there is
+        # deliberately no separate "len(verdicts) != len(candidates)" check.
         if _norm(v.get("text", "")) != _norm(candidates[key].text):
             dropped_ids += 1
             continue
@@ -1195,6 +1235,20 @@ def _ask(batch: list[tuple[str, _Candidate]], cfg: ReviewConfig) -> dict[int, di
 
 
 def _parse_verdicts(content: str) -> dict[int, dict]:
+    """Parse the review reply into ``{id: verdict}``.
+
+    Under the exceptions-only protocol the model only returns entries for
+    candidates it wants to act on, so ``keep`` is now OPTIONAL: an entry with
+    ``trim``/``merge_with`` but no ``keep`` key is valid (and common), and is
+    treated the same as an explicit ``keep=true`` — i.e. it does not drop the
+    span, only trims/merges it. Only ``id`` and ``text`` (the echo-text guard
+    checked by the caller) are mandatory; a malformed entry missing either is
+    skipped entirely, which is safe because a missing id has no effect and
+    the corresponding candidate simply stays masked (the caller's default).
+    Backward-tolerant of the old verbose format too (every candidate present,
+    each with an explicit boolean ``keep``) — that just means every entry is
+    a no-op except the ones with ``keep=false``.
+    """
     blob = _extract_json_array(content)
     if blob is None:
         return {}
@@ -1206,10 +1260,13 @@ def _parse_verdicts(content: str) -> dict[int, dict]:
     for obj in data if isinstance(data, list) else []:
         if not isinstance(obj, dict):
             continue
-        i, k, t = obj.get("id"), obj.get("keep"), obj.get("text")
-        if not (isinstance(i, int) and isinstance(k, bool) and isinstance(t, str)):
+        i, t = obj.get("id"), obj.get("text")
+        if not (isinstance(i, int) and isinstance(t, str)):
             continue
-        verdict: dict = {"keep": k, "text": t}
+        verdict: dict = {"text": t}
+        k = obj.get("keep")
+        if isinstance(k, bool):
+            verdict["keep"] = k
         trim = obj.get("trim")
         if isinstance(trim, str) and trim.strip():
             verdict["trim"] = trim.strip()
