@@ -12,18 +12,44 @@ that failure mode entirely; it isn't just a speedup.
 
 Design, standard library only:
 
-* One ``http.client.HTTPConnection``/``HTTPSConnection`` per
-  ``(scheme, host, port)`` is kept in a ``threading.local()`` and reused
-  across calls FROM THE SAME THREAD — this sidesteps ``http.client``'s lack
-  of thread safety without needing a lock per connection.
+* Connections are kept in a PROCESS-WIDE pool (``_ConnectionPool`` below),
+  one bounded free-list of IDLE connections per ``(scheme, host, port)``,
+  guarded by a lock — NOT a ``threading.local()``. A caller CHECKS OUT a
+  connection for the duration of exactly one request and CHECKS IT IN (or,
+  if it turned out to be dead, DISCARDS it) immediately after. This explicit
+  ownership handoff is what guarantees a connection is never used by two
+  threads at once (``http.client`` is not thread-safe) — the checkout is
+  removed from the free-list under the lock, so only the thread that
+  checked it out can ever touch it, and it can't be handed out again until
+  it's checked back in. Unlike the old per-thread design, connections now
+  survive across THREADS as well as calls: the detection layers spawn a
+  fresh ``ThreadPoolExecutor`` per ``find()`` (16 GLiNER workers, 8-24 LLM
+  workers), so a per-thread pool meant a fresh connection — and a fresh DNS
+  lookup — for every stage of every document. A process-wide pool means the
+  resolver is hit once per host per process lifetime in the steady state,
+  not dozens of times per document. This is not hypothetical: a burst of
+  those simultaneous lookups (several documents at once, each spawning its
+  own worker pools) has reproducibly exhausted the server's DNS resolver in
+  production — see ``_DNS_RETRYABLE`` below.
+* The free-list for each ``(scheme, host, port)`` is bounded so a burst
+  can't leave hundreds of idle sockets parked forever. It's sized from the
+  two in-flight semaphores below (``MAX_INFLIGHT + MAX_INFLIGHT_GLINER``):
+  that sum is already the most connections that could ever be open at once
+  across both pools (see their docstring), so it can never actually turn
+  away a connection a burst legitimately needs to keep idle.
 * A pooled connection that has sat idle can be closed by the server between
   calls; the next request on it then raises (``RemoteDisconnected`` and
   friends — see ``_RETRYABLE``). ``post_json`` treats that as transient: it
-  closes the dead socket, opens a fresh connection to the same
-  ``(scheme, host, port)`` and retries the SAME request exactly once. Only if
-  the retry also fails does the caller see an exception. This is not
-  hypothetical: a bare persistent connection reproducibly died with
-  ``ConnectionAbortedError`` after a 60 s idle pause.
+  discards the dead socket (never returns it to the free-list), checks out
+  a fresh connection to the same ``(scheme, host, port)`` and retries the
+  SAME request exactly once. Only if the retry also fails does the caller
+  see an exception. This is not hypothetical: a bare persistent connection
+  reproducibly died with ``ConnectionAbortedError`` after a 60 s idle pause.
+* DNS resolution failures (``socket.gaierror``, e.g. ``EAI_AGAIN``) get
+  their OWN retry class, separate from the dead-connection retry above —
+  see ``_DNS_RETRYABLE`` for why: retrying instantly into an overloaded
+  resolver just fails again, so this waits a short backoff first and allows
+  a couple of attempts.
 * TWO independent module-level ``threading.BoundedSemaphore``s cap how many
   upstream calls may be in flight AT ONCE across the whole process (not per
   document/thread pool) — one per call PROFILE, not one shared cap. This
@@ -61,7 +87,9 @@ from __future__ import annotations
 
 import http.client
 import os
+import socket
 import threading
+import time
 from urllib.parse import urlsplit
 
 # Exceptions that mean "this pooled connection is dead", not "the request is
@@ -70,12 +98,48 @@ from urllib.parse import urlsplit
 # closes the socket between our request and its response). ``OSError`` covers
 # ``ConnectionError`` and friends (a plain ``ConnectionError`` is itself an
 # ``OSError`` subclass, listed here for clarity since the spec calls it out
-# by name).
+# by name). NOTE: ``socket.gaierror`` is ALSO an ``OSError``, so it would
+# match here too — ``post_json`` checks ``_DNS_RETRYABLE`` first (see below)
+# so DNS failures take the separate, backed-off retry path instead of this
+# immediate-reopen one.
 _RETRYABLE: tuple[type[BaseException], ...] = (
     http.client.BadStatusLine,
     ConnectionError,
     OSError,
 )
+
+# DNS-resolution failures get their own retry class, handled BEFORE (in
+# post_json's except order) the broader _RETRYABLE above even though
+# socket.gaierror is itself an OSError. Reason (production incident): two
+# documents processing concurrently both died with
+#
+#     [Errno -3] Temporary failure in name resolution
+#
+# i.e. socket.gaierror(socket.EAI_AGAIN, ...) — the server's resolver
+# transiently gave up under a burst of parallel getaddrinfo() calls (up to
+# 16 GLiNER + 24 chat workers, times however many documents are processing
+# at once, each spawning its own worker pools). The failure has also been
+# seen killing a single document's recall pass on its own, so this is
+# resolver flakiness that concurrency amplifies, not a purely concurrent
+# bug — process-wide pooling (see module docstring) cuts the NUMBER of
+# lookups, but a residual one can still transiently fail. _RETRYABLE's
+# immediate reopen-and-retry-once walks straight back into the same
+# overloaded resolver, which is why the retry ALSO failed in production. A
+# short backoff before retrying rides out the hiccup instead of hammering
+# the resolver again.
+_DNS_RETRYABLE: tuple[type[BaseException], ...] = (socket.gaierror,)
+
+# A couple of attempts, not just one, at a short backoff: enough to ride out
+# a momentary resolver hiccup. Keep both small — this is meant to smooth
+# over a millisecond-scale blip, not to hang a request for seconds.
+_DNS_RETRY_ATTEMPTS = 3  # initial attempt + up to 2 retries
+_DNS_RETRY_BACKOFF_SECONDS = 0.15  # pause before each DNS-failure retry
+
+# The pre-existing "dead pooled connection" retry (see module docstring):
+# exactly one retry on a freshly checked-out connection, no backoff — a
+# socket the peer already closed is expected to be fixed immediately by
+# opening a new one, unlike a resolver hiccup.
+_MAX_DEAD_CONN_RETRIES = 1
 
 DEFAULT_MAX_INFLIGHT = 24
 DEFAULT_MAX_INFLIGHT_GLINER = 16
@@ -116,24 +180,15 @@ _INFLIGHT_GLINER = threading.BoundedSemaphore(MAX_INFLIGHT_GLINER)
 # picked up rather than a copy captured at import time.
 _POOL_NAMES = ("chat", "gliner")
 
-# One connection per (scheme, host, port) PER THREAD.
-_local = threading.local()
-
 
 class PoolConnectionError(OSError):
-    """The pooled request could not be completed even after one retry on a
-    fresh connection (see ``post_json``). Subclasses ``OSError`` so existing
-    call sites that used to catch ``urllib.error.URLError`` (itself commonly
-    wrapping a plain ``OSError``/socket error) can catch this the same way,
-    with an ``except OSError`` clause."""
-
-
-def _thread_conns() -> dict:
-    conns = getattr(_local, "conns", None)
-    if conns is None:
-        conns = {}
-        _local.conns = conns
-    return conns
+    """The pooled request could not be completed even after retrying (dead
+    pooled connection: once; DNS resolution failure: up to
+    ``_DNS_RETRY_ATTEMPTS`` times — see ``post_json``). Subclasses
+    ``OSError`` so existing call sites that used to catch
+    ``urllib.error.URLError`` (itself commonly wrapping a plain
+    ``OSError``/socket error) can catch this the same way, with an
+    ``except OSError`` clause."""
 
 
 def _split_url(url: str) -> tuple[str, str, int, str]:
@@ -154,24 +209,84 @@ def _new_connection(scheme: str, host: str, port: int) -> http.client.HTTPConnec
     return cls(host, port)
 
 
-def _get_connection(scheme: str, host: str, port: int) -> http.client.HTTPConnection:
-    conns = _thread_conns()
-    key = (scheme, host, port)
-    conn = conns.get(key)
-    if conn is None:
-        conn = _new_connection(scheme, host, port)
-        conns[key] = conn
-    return conn
+def _close_quietly(conn: http.client.HTTPConnection) -> None:
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001 — best-effort cleanup only
+        pass
 
 
-def _drop_connection(scheme: str, host: str, port: int) -> None:
-    conns = _thread_conns()
-    conn = conns.pop((scheme, host, port), None)
-    if conn is not None:
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001 — best-effort cleanup only
-            pass
+def _free_list_limit() -> int:
+    # Sized from the two in-flight caps: their sum is already the most
+    # connections that could ever be open at once across both pools (see
+    # module docstring's "worst case ... 40 simultaneous upstream
+    # requests"), so a burst can never need to park more idle sockets than
+    # that for a given (scheme, host, port). Read live (not cached) so tests
+    # that patch MAX_INFLIGHT/MAX_INFLIGHT_GLINER take effect immediately.
+    return MAX_INFLIGHT + MAX_INFLIGHT_GLINER
+
+
+class _ConnectionPool:
+    """Process-wide keep-alive connection pool: a bounded free-list of IDLE
+    connections per ``(scheme, host, port)``, guarded by a single lock.
+
+    Ownership model — the whole point of this class:
+
+    * ``checkout`` removes (and returns) a connection from the free-list, or
+      opens a fresh one if the list is empty. Removal happens under the
+      lock, so a given connection object can be checked out by at most one
+      caller at a time — the free-list is the ONLY place a connection can be
+      obtained from, so once it's out, it's out.
+    * ``checkin`` puts a connection that finished a request successfully
+      back on the free-list for reuse (subject to the bound above).
+    * ``discard`` closes a connection that raised during use and must NOT be
+      reused — it is deliberately never added back to the free-list.
+
+    A caller must check a connection back in (or discard it) before any
+    other thread can obtain it again; this is what keeps ``http.client``
+    connections (not thread-safe) from ever being touched by two threads at
+    once.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._idle: dict[tuple[str, str, int], list[http.client.HTTPConnection]] = {}
+
+    def checkout(self, scheme: str, host: str, port: int) -> http.client.HTTPConnection:
+        key = (scheme, host, port)
+        with self._lock:
+            idle = self._idle.get(key)
+            if idle:
+                return idle.pop()
+        return _new_connection(scheme, host, port)
+
+    def checkin(
+        self, scheme: str, host: str, port: int, conn: http.client.HTTPConnection
+    ) -> None:
+        key = (scheme, host, port)
+        limit = _free_list_limit()
+        close_it = False
+        with self._lock:
+            idle = self._idle.setdefault(key, [])
+            if len(idle) < limit:
+                idle.append(conn)
+            else:
+                close_it = True
+        if close_it:
+            # Free-list for this key is already at its bound — close outside
+            # the lock so a slow close() can't stall other threads.
+            _close_quietly(conn)
+
+    def discard(self, conn: http.client.HTTPConnection) -> None:
+        """A connection that raised during use is dead — close it, and never
+        return it to the free-list."""
+        _close_quietly(conn)
+
+
+# The pool: shared by every thread, every stage, every document in this
+# process — see module docstring for why that's the fix, not just a
+# convenience.
+_pool = _ConnectionPool()
 
 
 def _inflight_semaphore(pool: str) -> threading.BoundedSemaphore:
@@ -205,22 +320,27 @@ def post_json(
     caller decides whether the status is acceptable.
 
     Raises ``PoolConnectionError`` if the request could not be completed at
-    all (connection refused/reset, dead pooled socket, etc.), even after one
-    retry on a fresh connection — see module docstring. The retry is
-    transparent to the caller: this function is called at most twice
-    internally per invocation, so callers that log/count "one call" (e.g.
-    ``usage_log.record_call``) around this function never double-count it.
+    all, even after retrying — see module docstring for the two distinct
+    retry classes (dead pooled connection: one retry, no backoff; DNS
+    resolution failure: up to ``_DNS_RETRY_ATTEMPTS`` attempts with a short
+    backoff between them). Both retries are transparent to the caller: this
+    function still represents exactly ONE logical call, so callers that
+    log/count "one call" (e.g. ``usage_log.record_call``) around this
+    function never double-count it, regardless of how many internal
+    attempts it took.
 
     Blocks on the selected pool's semaphore for the duration of the call
-    (including any retry) — see module docstring.
+    (including any retries) — see module docstring.
     """
     scheme, host, port, path = _split_url(url)
     semaphore = _inflight_semaphore(pool)
 
     with semaphore:
         last_exc: BaseException | None = None
-        for attempt in range(2):
-            conn = _get_connection(scheme, host, port)
+        dead_conn_retries = 0
+        dns_attempts = 0
+        while True:
+            conn = _pool.checkout(scheme, host, port)
             try:
                 conn.timeout = timeout
                 if conn.sock is not None:
@@ -228,11 +348,24 @@ def post_json(
                 conn.request("POST", path, body=payload_bytes, headers=headers)
                 resp = conn.getresponse()
                 body = resp.read()
-                return resp.status, body
-            except _RETRYABLE as exc:
-                _drop_connection(scheme, host, port)
+            except _DNS_RETRYABLE as exc:
+                _pool.discard(conn)
                 last_exc = exc
+                dns_attempts += 1
+                if dns_attempts >= _DNS_RETRY_ATTEMPTS:
+                    break
+                time.sleep(_DNS_RETRY_BACKOFF_SECONDS)
                 continue
+            except _RETRYABLE as exc:
+                _pool.discard(conn)
+                last_exc = exc
+                dead_conn_retries += 1
+                if dead_conn_retries > _MAX_DEAD_CONN_RETRIES:
+                    break
+                continue
+            else:
+                _pool.checkin(scheme, host, port, conn)
+                return resp.status, body
 
         raise PoolConnectionError(
             f"request to {url} failed after retry on a fresh connection: {last_exc}"

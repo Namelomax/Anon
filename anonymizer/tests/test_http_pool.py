@@ -122,6 +122,130 @@ def test_sequential_requests_from_one_thread_reuse_one_connection():
     assert _CountingHandler.connections == 1  # all 5 requests reused ONE TCP connection
 
 
+def test_connection_reused_across_different_threads():
+    """The core of the process-wide pool (see http_pool.py's module
+    docstring): unlike the old threading.local() design, a connection must
+    survive across THREADS, not just across calls made from the same
+    thread. Two sequential requests issued from two DIFFERENT threads must
+    still reuse a single TCP connection."""
+    _CountingHandler.connections = 0
+    _CountingHandler.requests = 0
+    with _run_server(_CountingHandler) as (host, port):
+        url = f"http://{host}:{port}/extract"
+        headers = {"Content-Type": "application/json"}
+        results: list[tuple[int, bytes]] = []
+
+        def _call():
+            results.append(http_pool.post_json(url, b"{}", headers, 5.0))
+
+        # Sequential on purpose (join before starting the next) so the
+        # second thread can only get a connection FROM THE FREE-LIST left
+        # behind by the first — never a fresh one, since it never runs
+        # concurrently with the first.
+        t1 = threading.Thread(target=_call)
+        t1.start()
+        t1.join()
+
+        t2 = threading.Thread(target=_call)
+        t2.start()
+        t2.join()
+
+    assert len(results) == 2
+    assert all(status == 200 for status, _ in results)
+    assert _CountingHandler.requests == 2
+    assert _CountingHandler.connections == 1  # one TCP connection reused across BOTH threads
+
+
+def test_no_two_threads_share_a_connection_concurrently():
+    """Instrument checkout/checkin on the real pool and prove, from the
+    recorded timestamps, that no connection was ever checked out again
+    while still checked out to someone else — i.e. no two threads ever held
+    the same http.client connection (not thread-safe) at once."""
+    _ConcurrencyTrackingHandler.current = 0
+    _ConcurrencyTrackingHandler.peak = 0
+    events: list[tuple[str, int, float]] = []
+    events_lock = threading.Lock()
+
+    orig_checkout = http_pool._pool.checkout
+    orig_checkin = http_pool._pool.checkin
+
+    def tracking_checkout(scheme, host, port):
+        conn = orig_checkout(scheme, host, port)
+        with events_lock:
+            events.append(("out", id(conn), time.time()))
+        return conn
+
+    def tracking_checkin(scheme, host, port, conn):
+        with events_lock:
+            events.append(("in", id(conn), time.time()))
+        orig_checkin(scheme, host, port, conn)
+
+    with _run_server(_ConcurrencyTrackingHandler) as (host, port), _patched_max_inflight(4):
+        url = f"http://{host}:{port}/extract"
+        headers = {"Content-Type": "application/json"}
+        http_pool._pool.checkout = tracking_checkout
+        http_pool._pool.checkin = tracking_checkin
+        try:
+            def _call(_i):
+                return http_pool.post_json(url, b"{}", headers, 5.0, pool="chat")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+                futures = [executor.submit(_call, i) for i in range(20)]
+                for f in futures:
+                    status, _ = f.result()
+                    assert status == 200
+        finally:
+            http_pool._pool.checkout = orig_checkout
+            http_pool._pool.checkin = orig_checkin
+
+    # Reconstruct, per connection id, the interval it was checked out for;
+    # a checkout while still checked out (no matching "in" first) would mean
+    # two threads used the same connection object at once.
+    checked_out_at: dict[int, float] = {}
+    for kind, conn_id, _ts in sorted(events, key=lambda e: e[2]):
+        if kind == "out":
+            assert conn_id not in checked_out_at, (
+                "connection checked out again while still in use elsewhere"
+            )
+            checked_out_at[conn_id] = _ts
+        else:
+            assert conn_id in checked_out_at, "checked in a connection never checked out"
+            del checked_out_at[conn_id]
+    assert not checked_out_at  # every checkout eventually matched by a checkin
+
+
+def test_idle_free_list_is_bounded_under_a_burst():
+    """The free-list must not grow without bound: it's sized from the two
+    in-flight caps (MAX_INFLIGHT + MAX_INFLIGHT_GLINER) — see
+    http_pool.py's _free_list_limit(). Uses a scratch _ConnectionPool
+    instance (not the shared module-level ``_pool``) so this doesn't leak
+    fake connections into other tests."""
+
+    class _FakeConn:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    key = ("http", "free-list-burst.invalid", 1234)
+    scratch_pool = http_pool._ConnectionPool()
+    with _patched_max_inflight(2), _patched_max_inflight_gliner(2):
+        limit = http_pool.MAX_INFLIGHT + http_pool.MAX_INFLIGHT_GLINER  # 4
+        conns = [_FakeConn() for _ in range(10)]
+        for c in conns:
+            scratch_pool.checkin(*key, c)
+
+        idle = scratch_pool._idle[key]
+        assert len(idle) == limit
+        closed = [c for c in conns if c.closed]
+        kept = [c for c in conns if not c.closed]
+        assert len(kept) == limit
+        assert len(closed) == len(conns) - limit
+        # the surviving connections are exactly the ones left on the free-list
+        assert {id(c) for c in kept} == {id(c) for c in idle}
+
+
 # --- 2. Stale-connection retry -----------------------------------------------
 
 class _CloseAfterFirstHandler(http.server.BaseHTTPRequestHandler):
@@ -182,6 +306,131 @@ def test_stale_pooled_connection_is_retried_transparently():
     # logical requests (the failed write, if any, never reached do_POST).
     assert _CloseAfterFirstHandler.requests == 2
     assert _CloseAfterFirstHandler.connections == 2
+
+
+def test_dead_connection_is_discarded_and_next_caller_gets_a_working_one():
+    """Directly inspects the free-list (not just inferred from connection
+    counts, per the task spec): the connection call 1 leaves behind must be
+    in the free-list; after call 2 discovers it dead and retries, the
+    free-list must hold exactly the FRESH replacement, never both / never
+    the dead one."""
+    _CloseAfterFirstHandler.connections = 0
+    _CloseAfterFirstHandler.requests = 0
+    with _run_server(_CloseAfterFirstHandler) as (host, port):
+        url = f"http://{host}:{port}/extract"
+        headers = {"Content-Type": "application/json"}
+        key = ("http", host, port)
+
+        status1, _ = http_pool.post_json(url, b"{}", headers, 5.0)
+        assert status1 == 200
+        assert len(http_pool._pool._idle.get(key, [])) == 1
+
+        # Give the server a moment to actually close its end before we try
+        # to reuse the (now-stale) pooled connection for the second call.
+        time.sleep(0.1)
+
+        status2, _ = http_pool.post_json(url, b"{}", headers, 5.0)  # must NOT raise
+        assert status2 == 200
+        # The dead connection from call 1 was discarded, not returned to the
+        # free-list — the sole idle connection now is the FRESH one opened
+        # for the retry (the list never grew to 2).
+        assert len(http_pool._pool._idle.get(key, [])) == 1
+
+    assert _CloseAfterFirstHandler.requests == 2
+    assert _CloseAfterFirstHandler.connections == 2
+
+
+# --- 2b. DNS-resolution-failure retry (socket.gaierror / EAI_AGAIN) ---------
+#
+# These simulate the failure by monkeypatching http_pool._new_connection to
+# return a fake connection whose .request() raises socket.gaierror, per the
+# task spec's constraint against touching the real network / DNS.
+
+class _FakeResponse:
+    def __init__(self, status: int, body: bytes):
+        self.status = status
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+
+class _FlakyDNSConnection:
+    """Fails .request() with socket.gaierror(EAI_AGAIN) the first N times,
+    then succeeds — stands in for a real HTTPConnection whose connect()
+    hit an overloaded resolver."""
+
+    def __init__(self, fail_times: int):
+        self.fail_times = fail_times
+        self.attempts = 0
+        self.sock = None
+        self.timeout = None
+        self.closed = False
+
+    def request(self, method, path, body=None, headers=None):
+        self.attempts += 1
+        if self.attempts <= self.fail_times:
+            raise socket.gaierror(
+                socket.EAI_AGAIN, "Temporary failure in name resolution"
+            )
+
+    def getresponse(self):
+        return _FakeResponse(200, b'{"ok": true}')
+
+    def close(self):
+        self.closed = True
+
+
+@contextmanager
+def _patched_new_connection(fail_times: int):
+    """Replace http_pool._new_connection so every checkout-miss returns a
+    fresh _FlakyDNSConnection sharing the SAME attempt counter — modelling
+    "the resolver is still overloaded" persisting across the discarded
+    connection and its replacement, exactly like a real gaierror would."""
+    conn = _FlakyDNSConnection(fail_times)
+    orig = http_pool._new_connection
+
+    def fake_new_connection(scheme, host, port):
+        return conn
+
+    http_pool._new_connection = fake_new_connection
+    try:
+        yield conn
+    finally:
+        http_pool._new_connection = orig
+
+
+def test_gaierror_is_retried_after_backoff_then_succeeds():
+    # Distinct host per DNS test (see the persistent-failure test below) so a
+    # successfully checked-in fake connection from one test can never be
+    # popped off the free-list by another — each key here is used exactly
+    # once, ever.
+    with _patched_new_connection(fail_times=1) as conn:
+        t0 = time.time()
+        status, body = http_pool.post_json(
+            "http://dns-flaky-retries-then-ok.invalid/extract", b"{}", {}, 5.0
+        )
+        elapsed = time.time() - t0
+
+    assert status == 200
+    assert conn.attempts == 2  # one failure, one retry that succeeded
+    # The backoff actually happened (not an immediate retry into the same
+    # overloaded resolver).
+    assert elapsed >= http_pool._DNS_RETRY_BACKOFF_SECONDS * 0.8
+
+
+def test_persistent_gaierror_raises_pool_connection_error_with_message():
+    with _patched_new_connection(fail_times=1000) as conn:
+        try:
+            http_pool.post_json(
+                "http://dns-flaky-never-recovers.invalid/extract", b"{}", {}, 5.0
+            )
+            assert False, "expected PoolConnectionError"
+        except http_pool.PoolConnectionError as exc:
+            assert "Temporary failure in name resolution" in str(exc)
+
+    # Exhausted the DNS-specific retry budget, not just the dead-connection one.
+    assert conn.attempts == http_pool._DNS_RETRY_ATTEMPTS
 
 
 # --- 3. Global in-flight cap --------------------------------------------------
