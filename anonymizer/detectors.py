@@ -997,12 +997,16 @@ def is_non_pii(text: str) -> bool:
 #
 # The fix is a DETERMINISTIC veto applied to every PERSON ``keep=false``
 # verdict, independent of what the model claims: a Russian morphological
-# dictionary (``pymorphy2``'s OpenCorpora dictionary — or, where a bare
-# pymorphy2 import isn't available, natasha's ``MorphVocab``, which wraps the
-# very same pymorphy2/OpenCorpora dictionary internally) can tell an ordinary
-# word from a personal name far more reliably than a 9B model, and it needs
-# no per-document word list (the project owner has rejected hardcoded value
-# lists before — they don't generalise).
+# dictionary (``pymorphy3``'s OpenCorpora dictionary — a maintained fork of
+# ``pymorphy2`` with an identical API and the same dictionaries, needed
+# because ``pymorphy2`` cannot even construct a ``MorphAnalyzer`` on Python
+# 3.11+ (``AttributeError: module 'inspect' has no attribute 'getargspec'``,
+# removed in 3.11) — or, where neither pymorphy package is available,
+# natasha's ``MorphVocab``, which wraps the very same pymorphy2/OpenCorpora
+# dictionary internally) can tell an ordinary word from a personal name far
+# more reliably than a 9B model, and it needs no per-document word list (the
+# project owner has rejected hardcoded value lists before — they don't
+# generalise).
 #
 # A candidate word is droppable by EITHER of two independent, deterministic
 # paths — see ``is_person_word_droppable``:
@@ -1032,33 +1036,43 @@ _MORPH_UNAVAILABLE = False
 
 
 def _morph_vocab():
-    """Lazily construct (and cache) the pymorphy2/natasha dictionary wrapper.
+    """Lazily construct (and cache) the pymorphy3/pymorphy2/natasha dictionary
+    wrapper.
 
-    ``pymorphy2`` is tried FIRST — it is the lighter of the two (just the
-    OpenCorpora dictionary; no NER/embedding/syntax baggage) and is the one
-    ``deploy/requirements-api.txt`` actually installs for production. If a
-    bare ``pymorphy2`` import isn't available, natasha's ``MorphVocab`` is
-    tried as a fallback — it wraps the very same pymorphy2/OpenCorpora
-    dictionary internally, so environments that have natasha but not a bare
-    pymorphy2 (e.g. a local ``--natasha`` NER backend install) still get an
-    identical gate. Returns ``None`` (never raises) if BOTH fail to import or
-    their dictionaries fail to load for any reason — callers treat that as
-    "the gate cannot run" and fail to the SAFE side (refuse every PERSON
-    drop; see ``morph_gate_available`` / ``can_unmask_person``), never crash.
+    ``pymorphy3`` is tried FIRST — it is a maintained fork of ``pymorphy2``
+    with an identical API and the same OpenCorpora dictionaries, and it is
+    the one ``deploy/requirements-api.txt`` actually installs for production.
+    Plain ``pymorphy2`` cannot even construct a ``MorphAnalyzer`` on Python
+    3.11+ (``inspect.getargspec`` was removed there), so it is kept only as a
+    second attempt for environments still on an older interpreter. If
+    neither pymorphy package is available, natasha's ``MorphVocab`` is tried
+    last — it wraps the very same pymorphy2/OpenCorpora dictionary
+    internally, so environments that have natasha but neither pymorphy
+    package (e.g. a local ``--natasha`` NER backend install) still get an
+    identical gate. Returns ``None`` (never raises) if ALL THREE fail to
+    import or their dictionaries fail to load for any reason — callers treat
+    that as "the gate cannot run" and fail to the SAFE side (refuse every
+    PERSON drop; see ``morph_gate_available`` / ``can_unmask_person``), never
+    crash.
     """
     global _MORPH_VOCAB, _MORPH_UNAVAILABLE
     if _MORPH_VOCAB is None and not _MORPH_UNAVAILABLE:
         try:
-            import pymorphy2
+            import pymorphy3
 
-            _MORPH_VOCAB = pymorphy2.MorphAnalyzer()
+            _MORPH_VOCAB = pymorphy3.MorphAnalyzer()
         except Exception:  # noqa: BLE001 - any import/load failure falls back
             try:
-                from natasha import MorphVocab
+                import pymorphy2
 
-                _MORPH_VOCAB = MorphVocab()
-            except Exception:  # noqa: BLE001 - any import/load failure is fail-safe
-                _MORPH_UNAVAILABLE = True
+                _MORPH_VOCAB = pymorphy2.MorphAnalyzer()
+            except Exception:  # noqa: BLE001 - any import/load failure falls back
+                try:
+                    from natasha import MorphVocab
+
+                    _MORPH_VOCAB = MorphVocab()
+                except Exception:  # noqa: BLE001 - any import/load failure is fail-safe
+                    _MORPH_UNAVAILABLE = True
     return _MORPH_VOCAB
 
 

@@ -2,9 +2,12 @@
 # Core (always needed):
 gliner>=0.2          # zero-shot multilingual NER (PERSON/LOCATION/ORG)
 python-docx>=1.0     # read/write .docx (also pulls lxml, used for .xml/.odt)
-pymorphy2>=0.9       # Russian morphological dictionary for the PERSON un-mask
-pymorphy2-dicts-ru   # gate in detectors.py (rare surnames must never be
-                     # un-maskable by the review model)
+pymorphy3            # Russian morphological dictionary for the PERSON un-mask
+pymorphy3-dicts-ru   # gate in detectors.py (rare surnames must never be
+                     # un-maskable by the review model) — pymorphy2 cannot
+                     # even construct a MorphAnalyzer on Python 3.11+
+                     # (removed inspect.getargspec), so the maintained
+                     # pymorphy3 fork is used instead
 
 # Document formats (text extraction for input):
 pypdf>=4.0           # .pdf
