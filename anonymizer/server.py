@@ -698,6 +698,18 @@ def main() -> None:
              "параллельность почти линейно ускоряет обработку. По умолчанию 16.",
     )
     ap.add_argument(
+        "--llm-max-chars",
+        type=int,
+        default=int(os.getenv("ANONYMIZER_LLM_MAX_CHARS", "3000")),
+        help="Размер куска текста (в символах), отправляемого модели за один "
+             "запрос детекции (см. LLMConfig.max_chars). Больше — меньше "
+             "запросов и меньше повторов системного промпта (дешевле и "
+             "быстрее), но ниже recall: модель хуже ловит редкие формы на "
+             "большом куске текста. Дефолт 3000 — измеренное компромиссное "
+             "значение, не меняйте его без сравнения. Переопределяется "
+             "ANONYMIZER_LLM_MAX_CHARS.",
+    )
+    ap.add_argument(
         "--llm-concurrency", type=int, default=24,
         help="Число параллельных запросов к LLM-детектору. По умолчанию 24: "
              "запросы идут через пул постоянных соединений (см. http_pool.py), "
@@ -799,6 +811,7 @@ def main() -> None:
             api_key=args.llm_api_key,
             extra_body=extra,
             concurrency=args.llm_concurrency,
+            max_chars=args.llm_max_chars,
         )
         if args.corporate:  # the LLM (not regex) handles organizations and money sums
             from dataclasses import replace
@@ -854,6 +867,7 @@ def main() -> None:
         "device_requested": args.device,
         "corporate": args.corporate, "llm": args.llm,
         "llm_model": args.llm_model if args.llm else None,
+        "llm_max_chars": args.llm_max_chars if args.llm else None,
         "glossary_terms": len(glossary_entries),
         "review": args.review,
         "review_model": _REVIEW_CFG.model if _REVIEW_CFG else None,

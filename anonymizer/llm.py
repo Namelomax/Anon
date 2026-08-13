@@ -220,7 +220,9 @@ class LLMConfig:
         max_chars: Documents are split into chunks of at most this many chars
             before being sent to the model. Smaller chunks raise recall (the
             model sees less at once, so declined word-forms aren't missed) at the
-            cost of more API calls.
+            cost of more API calls. Overridable at runtime via server.py's
+            ``--llm-max-chars`` flag / ``ANONYMIZER_LLM_MAX_CHARS`` env var
+            (default here is the tested value, unchanged either way).
         stop: Stop sequences sent to the server. The model's known failure mode
             is degenerating into a reasoning block of endless blank lines until
             the token budget runs out (~47s wasted on a single call, measured);
