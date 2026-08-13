@@ -115,11 +115,11 @@ def _anonymizer(recall: bool = True) -> Anonymizer:
 def test_review_and_recall_overlap_in_wall_clock_time():
     delay = 0.25
 
-    def _slow_review(text, spans, cfg):
+    def _slow_review(text, spans, cfg, warnings=None):
         time.sleep(delay)
         return list(spans)
 
-    def _slow_recall(text, spans, cfg):
+    def _slow_recall(text, spans, cfg, warnings=None):
         time.sleep(delay)
         return []
 
@@ -139,10 +139,10 @@ def test_review_and_recall_overlap_in_wall_clock_time():
 # --- 2. recall raising leaves review's result intact -------------------------
 
 def test_recall_exception_leaves_review_result_intact():
-    def _review_drops_nothing(text, spans, cfg):
+    def _review_drops_nothing(text, spans, cfg, warnings=None):
         return list(spans)
 
-    def _recall_boom(text, spans, cfg):
+    def _recall_boom(text, spans, cfg, warnings=None):
         raise RuntimeError("upstream exploded")
 
     anon = _anonymizer()
@@ -155,10 +155,10 @@ def test_recall_exception_leaves_review_result_intact():
 
 
 def test_recall_returning_nothing_leaves_review_result_intact():
-    def _review_drops_nothing(text, spans, cfg):
+    def _review_drops_nothing(text, spans, cfg, warnings=None):
         return list(spans)
 
-    def _recall_empty(text, spans, cfg):
+    def _recall_empty(text, spans, cfg, warnings=None):
         return []
 
     anon = _anonymizer()
@@ -176,10 +176,10 @@ def test_review_exception_leaves_detected_spans_and_still_applies_recall():
     idx = text.index(phone)
     recall_span = Span(idx, idx + len(phone), "PHONE", phone, source="llm-recall")
 
-    def _review_boom(text, spans, cfg):
+    def _review_boom(text, spans, cfg, warnings=None):
         raise RuntimeError("review upstream exploded")
 
-    def _recall_finds_phone(text, spans, cfg):
+    def _recall_finds_phone(text, spans, cfg, warnings=None):
         return [recall_span]
 
     anon = Anonymizer(
@@ -204,21 +204,21 @@ def test_merge_identical_regardless_of_which_call_finishes_first():
     text = _TEXT + " Звоните " + phone + "."
     idx = text.index(phone)
 
-    def _review_drops_nothing(text, spans, cfg):
+    def _review_drops_nothing(text, spans, cfg, warnings=None):
         return list(spans)
 
-    def _recall_finds_phone(text, spans, cfg):
+    def _recall_finds_phone(text, spans, cfg, warnings=None):
         recall_span = Span(idx, idx + len(phone), "PHONE", phone, source="llm-recall")
         return [recall_span]
 
     def _run(review_delay: float, recall_delay: float):
-        def _review(text, spans, cfg):
+        def _review(text, spans, cfg, warnings=None):
             time.sleep(review_delay)
-            return _review_drops_nothing(text, spans, cfg)
+            return _review_drops_nothing(text, spans, cfg, warnings)
 
-        def _recall(text, spans, cfg):
+        def _recall(text, spans, cfg, warnings=None):
             time.sleep(recall_delay)
-            return _recall_finds_phone(text, spans, cfg)
+            return _recall_finds_phone(text, spans, cfg, warnings)
 
         anon = Anonymizer(
             [_FakeDetector("PERSON", _PERSON)],
@@ -258,7 +258,7 @@ def test_recall_spans_land_at_correct_offsets_in_original_text():
     text = _TEXT + " Звоните " + phone + "."
     idx = text.index(phone)
 
-    def _review_identity(text, spans, cfg):
+    def _review_identity(text, spans, cfg, warnings=None):
         return list(spans)  # keep the detected PERSON, don't touch anything
 
     def _fake_post_json(url, payload_bytes, headers, timeout, *, pool="chat"):
@@ -294,11 +294,11 @@ def test_review_and_recall_calls_share_the_same_request_id():
     None in the worker thread."""
     seen_request_ids: list[str | None] = []
 
-    def _review(text, spans, cfg):
+    def _review(text, spans, cfg, warnings=None):
         seen_request_ids.append(usage_log.current_request_id())
         return list(spans)
 
-    def _recall(text, spans, cfg):
+    def _recall(text, spans, cfg, warnings=None):
         seen_request_ids.append(usage_log.current_request_id())
         return []
 

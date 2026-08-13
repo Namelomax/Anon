@@ -320,7 +320,51 @@ class _Candidate:
     context: str
 
 
-def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = None) -> list[Span]:
+# --- Warning messages for AnonymizationResult.warnings -----------------------
+# One template per fail-safe below (see review_spans/recall_spans docstrings
+# for the "warnings" parameter contract). Worded for the END USER, not the
+# developer — the stderr prints alongside these are what's for developers.
+#
+# Review and its two sub-stages (short numbers, adjacent-name re-check) can
+# only make masking MORE permissive when the model actually answers; a failed
+# call there leaves everything masked exactly as detected, so the consequence
+# is "possibly over-masked, never under-masked" — safe, and the wording says
+# so plainly. Recall is the opposite: it is the layer that ADDS masking for
+# PII no earlier layer caught, so a failed recall call means that search never
+# happened — a real coverage gap, and the wording must read as one.
+_REVIEW_FAILED_MESSAGE = (
+    "Слой LLM-проверки (ревью) не смог обработать документ ({exc}). Из-за "
+    "этого потенциально лишние маски не были сняты — документ может быть "
+    "избыточно замаскирован (например, обычное слово осталось скрыто под "
+    "плейсхолдером), но это безопасно: настоящие персональные данные при "
+    "этом не раскрываются."
+)
+_REVIEW_SHORT_NUMBERS_FAILED_MESSAGE = (
+    "Не удалось спросить модель, являются ли короткие числа (2-3 цифры) в "
+    "документе значимыми идентификаторами ({exc}) — по умолчанию такие числа "
+    "остаются НЕЗАМАСКИРОВАННЫМИ, чтобы ошибочная маска не разрушила "
+    "нумерацию документа. Риск невелик: короткое голое число само по себе "
+    "почти никогда не является персональными данными."
+)
+_REVIEW_ADJACENT_FAILED_MESSAGE = (
+    "Дополнительная проверка спорных соседних имён не была выполнена "
+    "({exc}) — такие кандидаты остались замаскированными без изменений. "
+    "Персональные данные при этом не раскрываются, документ может быть "
+    "немного избыточно замаскирован."
+)
+_RECALL_FAILED_MESSAGE = (
+    "Проверка на полноту (recall) не была выполнена ({exc}) — документ не "
+    "был дополнительно проверен на персональные данные, пропущенные другими "
+    "слоями. Часть персональных данных могла остаться незамаскированной."
+)
+
+
+def review_spans(
+    text: str,
+    spans: list[Span],
+    config: "ReviewConfig | None" = None,
+    warnings: list | None = None,
+) -> list[Span]:
     """Ask an LLM to double-check spans: drop false positives, trim titles
     stuck to real names, and merge different wordings of the same entity.
 
@@ -347,6 +391,14 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
     (or if it returns unparsable output) the affected spans are left masked,
     untrimmed and unmerged — this layer can only make anonymization *more*
     permissive when it is confident, never less safe by default.
+
+    ``warnings``, if given, is a list this function APPENDS to (never
+    replaces) whenever one of its internal fail-safes actually fires — same
+    contract as ``LLMDetector.warnings`` / ``RemoteGLiNERDetector.warnings``
+    (see ``llm.py`` / ``gliner_remote.py``): a stage silently degrading must
+    still be visible to the caller, not just logged to stderr. ``None`` (the
+    default) means "don't collect warnings" — used by direct callers (tests,
+    scripts) that don't need them.
     """
     if not spans:
         return spans
@@ -357,7 +409,7 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
     # номером пункта, «777» — кодом подразделения, и различает их только
     # контекст. Отдельный вызов (а не общий батч) потому же, почему и
     # _ask_adjacent: на маленьком прицельном вопросе модель стабильна.
-    drop_short = _judge_short_numbers(text, spans, cfg)
+    drop_short = _judge_short_numbers(text, spans, cfg, warnings)
     if drop_short:
         spans = [s for s in spans if id(s) not in drop_short]
         if not spans:
@@ -385,8 +437,15 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
     verdicts: dict[int, dict] = {}
     try:
         raw = _ask(items, cfg)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
         raw = {}
+        if warnings is not None:
+            warnings.append(
+                {
+                    "kind": "review_failed",
+                    "message": _REVIEW_FAILED_MESSAGE.format(exc=exc),
+                }
+            )
     for idx, v in raw.items():
         if not (0 <= idx < len(items)):
             continue
@@ -475,8 +534,15 @@ def review_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
     if _suspects:
         try:
             _decisions = _ask_adjacent(_suspects, cfg)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
             _decisions = {}
+            if warnings is not None:
+                warnings.append(
+                    {
+                        "kind": "review_adjacent_failed",
+                        "message": _REVIEW_ADJACENT_FAILED_MESSAGE.format(exc=exc),
+                    }
+                )
         _restored, _confirmed = [], []
         for key, _cand_text, _ctx in _suspects:
             if _decisions.get(key, True):  # нет вердикта = маскируем
@@ -617,7 +683,7 @@ def _short_number_spans(spans: list[Span]) -> list[Span]:
 
 
 def _judge_short_numbers(
-    text: str, spans: list[Span], cfg: "ReviewConfig"
+    text: str, spans: list[Span], cfg: "ReviewConfig", warnings: list | None = None
 ) -> set[int]:
     """Спросить модель, какие короткие числа реально стоит маскировать.
 
@@ -629,6 +695,10 @@ def _judge_short_numbers(
     вхождениям и ломает документ (номер пункта «1» дал 127 подстановок и
     превратил нумерацию договора в «[PASSPORT_1].[PASSPORT_2]»), да ещё и
     разрывает более крупные значения, выпуская наружу их остаток.
+
+    ``warnings`` — см. ``review_spans``: список, в который эта функция
+    добавляет запись, если запрос к LLM реально не удался (сеть/HTTP), а не
+    просто вернул нераспознанный JSON.
     """
     shorts = _short_number_spans(spans)
     if not shorts:
@@ -658,6 +728,13 @@ def _judge_short_numbers(
         print(f"[short-num] LLM-запрос упал ({exc}) — короткие числа сняты",
               file=sys.stderr)
         verdicts = {}
+        if warnings is not None:
+            warnings.append(
+                {
+                    "kind": "review_short_numbers_failed",
+                    "message": _REVIEW_SHORT_NUMBERS_FAILED_MESSAGE.format(exc=exc),
+                }
+            )
 
     drop: set[int] = set()
     kept_values: list[str] = []
@@ -1004,14 +1081,27 @@ def _occurrences(text: str, value: str) -> list[tuple[int, int]]:
     return out
 
 
-def recall_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = None) -> list[Span]:
+def recall_spans(
+    text: str,
+    spans: list[Span],
+    config: "ReviewConfig | None" = None,
+    warnings: list | None = None,
+) -> list[Span]:
     """LLM-проход на ПОЛНОТУ: показываем модели уже-замаскированный текст (с
     плейсхолдерами в контексте) и просим найти оставшиеся ВИДНЫМИ ПДн. Найденные
     значения размещаем ДЕТЕРМИНИРОВАННО — ищем точную подстроку в оригинале и
     заводим новый спан только на непересекающихся местах. Модель НЕ двигает
     существующие плейсхолдеры и не переписывает текст — только называет
     пропущенные значения; расстановку делает код (безопасно от галлюцинаций
-    смещений). Fail-safe: любая ошибка LLM → пустой список (поведение не меняется)."""
+    смещений). Fail-safe: любая ошибка LLM → пустой список (поведение не меняется).
+
+    ``warnings`` — см. ``review_spans``: список, в который APPEND'ится запись,
+    если запрос к LLM реально не удался. В отличие от прочих fail-safe'ов
+    этого модуля, у recall'а провал — это НЕ "безопасно, просто перемаскировано":
+    recall — единственный слой, который ДОБАВЛЯЕТ маски на ПДн, пропущенные
+    более ранними слоями, так что его отказ означает, что этот поиск просто
+    не состоялся, а не то, что он ничего не нашёл.
+    """
     if not spans and not text.strip():
         return []
     cfg = config or ReviewConfig()
@@ -1028,6 +1118,13 @@ def recall_spans(text: str, spans: list[Span], config: "ReviewConfig | None" = N
         import sys
 
         print(f"[recall] LLM-запрос упал: {exc}", file=sys.stderr)
+        if warnings is not None:
+            warnings.append(
+                {
+                    "kind": "recall_failed",
+                    "message": _RECALL_FAILED_MESSAGE.format(exc=exc),
+                }
+            )
         return []
 
     taken = [(s.start, s.end) for s in spans]

@@ -226,14 +226,22 @@ class Anonymizer:
         # they run CONCURRENTLY via _review_and_recall (see its docstring for
         # the fail-safe/determinism contract). New recall candidates then go
         # through the same filters and overlap resolution as before.
+        # Populated (only) inside the review/recall branch below with warnings
+        # about a stage that couldn't do its job (see review.py's
+        # review_spans/recall_spans ``warnings`` param and
+        # _review_and_recall's docstring) — merged into the result's
+        # ``warnings`` alongside scan_residual_pii's and the detectors' own,
+        # so a failed review/recall pass is visible to the caller exactly
+        # like a failed GLiNER/LLM chunk is, not just printed to stderr.
+        stage_warnings: list[dict] = []
         if self._review_config is not None:
             detected = spans
             if getattr(self._review_config, "recall", False):
-                spans, recalled = self._review_and_recall(text, detected)
+                spans, recalled = self._review_and_recall(text, detected, stage_warnings)
             else:
                 from .review import review_spans
 
-                spans = review_spans(text, detected, self._review_config)
+                spans = review_spans(text, detected, self._review_config, stage_warnings)
                 recalled = []
             if recalled:
                 recalled = [rebalance_quotes(text, s) for s in recalled]
@@ -281,6 +289,9 @@ class Anonymizer:
             seen_detectors[id(det)] = det
         for det in seen_detectors.values():
             warnings.extend(getattr(det, "warnings", None) or [])
+        # Review/recall stage failures (see above) — same visibility contract
+        # as the detector warnings just above.
+        warnings.extend(stage_warnings)
 
         return AnonymizationResult(
             text=text,
@@ -292,7 +303,7 @@ class Anonymizer:
         )
 
     def _review_and_recall(
-        self, text: str, detected: list[Span]
+        self, text: str, detected: list[Span], warnings: list[dict]
     ) -> tuple[list[Span], list[Span]]:
         """Run ``review_spans`` and ``recall_spans`` CONCURRENTLY.
 
@@ -346,18 +357,38 @@ class Anonymizer:
         by this method's ``return``, not by which future happens to
         complete first — so the resulting span list (and therefore
         placeholder numbering) is identical regardless of completion order.
+
+        ``warnings`` is APPENDED to (never replaced/read) with an entry for
+        each of the two ``except`` branches below AND for whatever
+        review_spans/recall_spans append to their OWN ``warnings`` lists
+        internally (see review.py) — this method's own except blocks are a
+        backstop for the case where one of them raises past its own internal
+        fail-safes entirely, not the normal path. Two separate lists
+        (``review_warnings``/``recall_warnings``) are used while the futures
+        are in flight rather than one shared list, so the two worker threads
+        never mutate the same list concurrently; they're merged into
+        ``warnings`` in the same fixed review-then-recall order as the spans,
+        once both futures have completed.
         """
         from concurrent.futures import ThreadPoolExecutor
 
         from . import usage_log
-        from .review import recall_spans, review_spans
+        from .review import (
+            _RECALL_FAILED_MESSAGE,
+            _REVIEW_FAILED_MESSAGE,
+            recall_spans,
+            review_spans,
+        )
+
+        review_warnings: list[dict] = []
+        recall_warnings: list[dict] = []
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             review_future = usage_log.run_in_context(
-                pool, review_spans, text, detected, self._review_config
+                pool, review_spans, text, detected, self._review_config, review_warnings
             )
             recall_future = usage_log.run_in_context(
-                pool, recall_spans, text, detected, self._review_config
+                pool, recall_spans, text, detected, self._review_config, recall_warnings
             )
 
             try:
@@ -367,6 +398,12 @@ class Anonymizer:
 
                 print(f"[engine] review_spans упал: {exc}", file=sys.stderr)
                 spans = detected
+                review_warnings.append(
+                    {
+                        "kind": "review_failed",
+                        "message": _REVIEW_FAILED_MESSAGE.format(exc=exc),
+                    }
+                )
 
             try:
                 recalled = recall_future.result()
@@ -375,6 +412,15 @@ class Anonymizer:
 
                 print(f"[engine] recall_spans упал: {exc}", file=sys.stderr)
                 recalled = []
+                recall_warnings.append(
+                    {
+                        "kind": "recall_failed",
+                        "message": _RECALL_FAILED_MESSAGE.format(exc=exc),
+                    }
+                )
+
+        warnings.extend(review_warnings)
+        warnings.extend(recall_warnings)
 
         return spans, list(recalled or [])
 
