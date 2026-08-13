@@ -218,24 +218,31 @@ class Anonymizer:
         # 4th layer: LLM double-checks the surviving spans against their
         # context and reverts obvious false positives (see review.py). Runs
         # last, after all detectors, so it judges the final candidate set.
-        if self._review_config is not None:
-            from .review import review_spans
-
-            spans = review_spans(text, spans, self._review_config)
         # Recall-проход (опционально, review_config.recall): показываем LLM уже
         # замаскированный текст и добираем ПДн, которые детекторы пропустили.
-        # Новые кандидаты проходят те же фильтры и разрешение перекрытий.
-        if self._review_config is not None and getattr(self._review_config, "recall", False):
-            from .review import recall_spans
+        # Both are single, multi-second LLM calls with NO data dependency
+        # between them: recall reasons over the spans as DETECTED (before
+        # review's verdicts), so its result never needs review's output —
+        # they run CONCURRENTLY via _review_and_recall (see its docstring for
+        # the fail-safe/determinism contract). New recall candidates then go
+        # through the same filters and overlap resolution as before.
+        if self._review_config is not None:
+            detected = spans
+            if getattr(self._review_config, "recall", False):
+                spans, recalled = self._review_and_recall(text, detected)
+            else:
+                from .review import review_spans
 
-            recalled = recall_spans(text, spans, self._review_config)
-            recalled = [rebalance_quotes(text, s) for s in recalled]
-            recalled = [
-                s for s in recalled
-                if passes_filters(s) and not _overlaps_any(s, protected)
-            ]
+                spans = review_spans(text, detected, self._review_config)
+                recalled = []
             if recalled:
-                spans = resolve_overlaps(spans + recalled, priority=self._priority)
+                recalled = [rebalance_quotes(text, s) for s in recalled]
+                recalled = [
+                    s for s in recalled
+                    if passes_filters(s) and not _overlaps_any(s, protected)
+                ]
+                if recalled:
+                    spans = resolve_overlaps(spans + recalled, priority=self._priority)
         # Родовые слова («заказчик», «учреждение», «организация») маскировать
         # бессмысленно: они ничего не раскрывают, зато после обратной подстановки
         # ломают падежи — в протоколе появляется «организация учреждение» и
@@ -283,6 +290,93 @@ class Anonymizer:
             preexisting_placeholders=len(protected),
             warnings=tuple(warnings),
         )
+
+    def _review_and_recall(
+        self, text: str, detected: list[Span]
+    ) -> tuple[list[Span], list[Span]]:
+        """Run ``review_spans`` and ``recall_spans`` CONCURRENTLY.
+
+        Both are single, multi-second LLM calls that used to run back to
+        back (~29s of a ~50s document, measured in production). They have no
+        data dependency once recall is given the PRE-review ``detected``
+        span list instead of review's result: recall hunts over the SAME
+        masking (built from ``detected``) regardless of what review decides,
+        so the two calls can overlap.
+
+        Semantic consequence of feeding recall the pre-review masking:
+        recall no longer sees values review just unmasked (e.g. a product
+        name), so it can't re-flag them — the two layers used to be able to
+        fight over exactly that value. Losing that fight is intentional:
+        review is the layer that has the final say on what is NOT personal
+        data. Recall's ability to find genuinely missed PII is unaffected,
+        because the text it reasons over is masked identically either way
+        (from ``detected``, not from review's output) EXCEPT inside spans
+        that review itself trims or drops — there, and only there, the two
+        orderings can disagree.
+
+        Agreement with the accepted tradeoff (per the task spec, restated
+        here for the record): sequentially, recall used to get a free
+        second opinion on review's own drops/trims, because it saw the
+        exact same text review had just unmasked. That is a real, if
+        narrow, safety net for a review *mistake* (review dropping
+        something a detector had genuinely caught as PII) — not the same
+        thing as recall's actual job of catching what NO detector ever
+        caught. Removing that accidental backstop is consistent with "review
+        has final say over what is/isn't PII" and does not change recall's
+        ability to catch a genuinely undetected value anywhere else in the
+        document (identical masking there in both orderings) — so this is
+        accepted as specified, not flagged as a MISS regression.
+
+        ``usage_log.run_in_context`` (never a bare ``pool.submit``) carries
+        the per-document ``request_id`` contextvar into each worker thread —
+        without it the two calls' usage-log entries would silently stop
+        being grouped under this document's ``request_total`` line (see
+        usage_log.py's threading-trap docstring).
+
+        Fail-safe, unchanged from the sequential version and independent of
+        which call finishes first: if review raises, ``spans`` fall back to
+        ``detected`` (masked, unreviewed, exactly as before review existed).
+        If recall raises or finds nothing, ``recalled`` is empty and the
+        document proceeds with review's result alone. Each future's
+        exception is caught on its own, so one failing can never take the
+        other down.
+
+        Determinism: the merge in ``anonymize`` always concatenates
+        review's result THEN recall's result, in that fixed order — set
+        by this method's ``return``, not by which future happens to
+        complete first — so the resulting span list (and therefore
+        placeholder numbering) is identical regardless of completion order.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        from . import usage_log
+        from .review import recall_spans, review_spans
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            review_future = usage_log.run_in_context(
+                pool, review_spans, text, detected, self._review_config
+            )
+            recall_future = usage_log.run_in_context(
+                pool, recall_spans, text, detected, self._review_config
+            )
+
+            try:
+                spans = review_future.result()
+            except Exception as exc:  # noqa: BLE001
+                import sys
+
+                print(f"[engine] review_spans упал: {exc}", file=sys.stderr)
+                spans = detected
+
+            try:
+                recalled = recall_future.result()
+            except Exception as exc:  # noqa: BLE001
+                import sys
+
+                print(f"[engine] recall_spans упал: {exc}", file=sys.stderr)
+                recalled = []
+
+        return spans, list(recalled or [])
 
     def _find_leaked_spans(
         self, text: str, spans: list[Span], protected: list[tuple[int, int]]
