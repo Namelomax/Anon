@@ -997,10 +997,12 @@ def is_non_pii(text: str) -> bool:
 #
 # The fix is a DETERMINISTIC veto applied to every PERSON ``keep=false``
 # verdict, independent of what the model claims: a Russian morphological
-# dictionary (natasha's ``MorphVocab``, which wraps pymorphy2/OpenCorpora) can
-# tell an ordinary word from a personal name far more reliably than a 9B
-# model, and it needs no per-document word list (the project owner has
-# rejected hardcoded value lists before — they don't generalise).
+# dictionary (``pymorphy2``'s OpenCorpora dictionary — or, where a bare
+# pymorphy2 import isn't available, natasha's ``MorphVocab``, which wraps the
+# very same pymorphy2/OpenCorpora dictionary internally) can tell an ordinary
+# word from a personal name far more reliably than a 9B model, and it needs
+# no per-document word list (the project owner has rejected hardcoded value
+# lists before — they don't generalise).
 #
 # A candidate word is droppable by EITHER of two independent, deterministic
 # paths — see ``is_person_word_droppable``:
@@ -1030,21 +1032,33 @@ _MORPH_UNAVAILABLE = False
 
 
 def _morph_vocab():
-    """Lazily construct (and cache) the natasha/pymorphy2 dictionary wrapper.
+    """Lazily construct (and cache) the pymorphy2/natasha dictionary wrapper.
 
-    Returns ``None`` (never raises) if natasha/pymorphy2 fails to import or
-    its dictionaries fail to load for any reason — callers treat that as "the
-    gate cannot run" and fail to the SAFE side (refuse every PERSON drop; see
-    ``morph_gate_available`` / ``can_unmask_person``), never crash.
+    ``pymorphy2`` is tried FIRST — it is the lighter of the two (just the
+    OpenCorpora dictionary; no NER/embedding/syntax baggage) and is the one
+    ``deploy/requirements-api.txt`` actually installs for production. If a
+    bare ``pymorphy2`` import isn't available, natasha's ``MorphVocab`` is
+    tried as a fallback — it wraps the very same pymorphy2/OpenCorpora
+    dictionary internally, so environments that have natasha but not a bare
+    pymorphy2 (e.g. a local ``--natasha`` NER backend install) still get an
+    identical gate. Returns ``None`` (never raises) if BOTH fail to import or
+    their dictionaries fail to load for any reason — callers treat that as
+    "the gate cannot run" and fail to the SAFE side (refuse every PERSON
+    drop; see ``morph_gate_available`` / ``can_unmask_person``), never crash.
     """
     global _MORPH_VOCAB, _MORPH_UNAVAILABLE
     if _MORPH_VOCAB is None and not _MORPH_UNAVAILABLE:
         try:
-            from natasha import MorphVocab
+            import pymorphy2
 
-            _MORPH_VOCAB = MorphVocab()
-        except Exception:  # noqa: BLE001 - any import/load failure is fail-safe
-            _MORPH_UNAVAILABLE = True
+            _MORPH_VOCAB = pymorphy2.MorphAnalyzer()
+        except Exception:  # noqa: BLE001 - any import/load failure falls back
+            try:
+                from natasha import MorphVocab
+
+                _MORPH_VOCAB = MorphVocab()
+            except Exception:  # noqa: BLE001 - any import/load failure is fail-safe
+                _MORPH_UNAVAILABLE = True
     return _MORPH_VOCAB
 
 
@@ -1127,7 +1141,12 @@ def is_person_word_droppable(word: str) -> tuple[bool, str]:
         return False, "dictionary unavailable"
     known = vocab.word_is_known(word)
     if known:
-        parses = vocab(word)
+        # ``.parse()`` (not ``vocab(word)``): natasha's ``MorphVocab``
+        # aliases ``__call__`` to ``parse``, but a bare ``pymorphy2.
+        # MorphAnalyzer`` is not callable at all — ``.parse()`` is the one
+        # method both backends share, so the gate works identically either
+        # way (see ``_morph_vocab``).
+        parses = vocab.parse(word)
         if not any(
             any(g in parse.tag for g in _PROPER_NAME_GRAMMEMES) for parse in parses
         ):

@@ -155,6 +155,77 @@ def test_morphology_unavailable_refuses_whole_candidate_with_empty_verdicts(monk
     assert verdicts == []  # nothing WAS checked — distinguishes this from a real refusal
 
 
+# --- Which dictionary backend _morph_vocab() actually resolves to ------------
+# deploy/requirements-api.txt installs a bare `pymorphy2` (lightweight, no
+# NER/embedding baggage) — that must be tried FIRST. natasha's `MorphVocab`
+# (which wraps the identical pymorphy2/OpenCorpora dictionary) is only a
+# fallback for environments that have natasha but not a standalone pymorphy2
+# import path. These three tests force each branch via `sys.modules`
+# patching (rather than relying on whichever backend happened to already be
+# cached) and reset the module-level cache so `_morph_vocab()` re-resolves
+# from scratch; verdicts must be identical no matter which backend answered.
+#
+# Note: constructing a bare `pymorphy2.MorphAnalyzer()` first requires
+# `natasha` to have been imported at least once somewhere in this process —
+# on Python 3.13 with pymorphy2==0.9.1, direct construction raises
+# `AttributeError: module 'inspect' has no attribute 'getargspec'` unless
+# natasha's own import chain has already run once and (as an unrelated side
+# effect of one of its transitive imports) worked around it. This is an
+# environment quirk of THIS pymorphy2/Python combination, unrelated to the
+# gate's own logic — the `import natasha` calls below are priming for it, not
+# something the production code path needs.
+
+
+def _reset_morph_cache(monkeypatch):
+    monkeypatch.setattr(detectors, "_MORPH_VOCAB", None)
+    monkeypatch.setattr(detectors, "_MORPH_UNAVAILABLE", False)
+
+
+def test_prefers_pymorphy2_when_available(monkeypatch):
+    import natasha  # noqa: F401 - priming import, see comment above
+
+    monkeypatch.setitem(sys.modules, "natasha", None)  # block natasha import
+    _reset_morph_cache(monkeypatch)
+
+    assert morph_gate_available() is True
+    vocab = detectors._morph_vocab()
+    assert type(vocab).__module__.startswith("pymorphy2")
+
+    # Same verdicts as the rest of this file, now resolved via pymorphy2.
+    allowed, why = is_person_word_droppable("День")
+    assert allowed is True and why == "dict"
+    allowed, why = is_person_word_droppable("Вайгус")
+    assert allowed is False, f"should refuse, got why={why!r}"
+
+
+def test_falls_back_to_natasha_when_pymorphy2_import_blocked(monkeypatch):
+    import natasha  # noqa: F401 - ensures natasha's own pymorphy2 ref is cached
+
+    monkeypatch.setitem(sys.modules, "pymorphy2", None)  # block bare pymorphy2
+    _reset_morph_cache(monkeypatch)
+
+    assert morph_gate_available() is True
+    vocab = detectors._morph_vocab()
+    assert type(vocab).__module__.startswith("natasha")
+
+    # Same verdicts as the rest of this file, now resolved via natasha.
+    allowed, why = is_person_word_droppable("День")
+    assert allowed is True and why == "dict"
+    allowed, why = is_person_word_droppable("Вайгус")
+    assert allowed is False, f"should refuse, got why={why!r}"
+
+
+def test_unavailable_when_neither_pymorphy2_nor_natasha_importable(monkeypatch):
+    monkeypatch.setitem(sys.modules, "pymorphy2", None)
+    monkeypatch.setitem(sys.modules, "natasha", None)
+    _reset_morph_cache(monkeypatch)
+
+    assert morph_gate_available() is False
+    allowed, verdicts = can_unmask_person("День")  # otherwise-ordinary word
+    assert allowed is False
+    assert verdicts == []  # nothing WAS checked, same fail-safe shape as above
+
+
 if __name__ == "__main__":
     import traceback
 
