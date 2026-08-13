@@ -220,29 +220,86 @@ class Anonymizer:
         # last, after all detectors, so it judges the final candidate set.
         # Recall-проход (опционально, review_config.recall): показываем LLM уже
         # замаскированный текст и добираем ПДн, которые детекторы пропустили.
-        # Both are single, multi-second LLM calls with NO data dependency
-        # between them: recall reasons over the spans as DETECTED (before
-        # review's verdicts), so its result never needs review's output —
-        # they run CONCURRENTLY via _review_and_recall (see its docstring for
-        # the fail-safe/determinism contract). New recall candidates then go
-        # through the same filters and overlap resolution as before.
+        # Recall MUST run AFTER review, on review's RETURNED span list — not
+        # concurrently, and not on the pre-review ``spans``. This used to be
+        # parallelised (feeding recall the pre-review list so the two calls
+        # had no data dependency and could overlap), and that was reverted:
+        # a production A/B on a real document showed PERSON coverage drop
+        # from 33 to 29 masked entities the moment recall stopped seeing
+        # review's output. The canonical case is 'Вайгус' — a rare surname
+        # the review model repeatedly judges as non-PII and unmasks despite
+        # the prompt's instructions. Sequentially, recall then sees that
+        # surname sitting in plain text (review just exposed it) and
+        # re-flags it, restoring the mask — a real "second opinion" on
+        # review's own mistake, not redundant work. Feeding recall the
+        # pre-review list breaks exactly this: recall reasons over spans
+        # review hasn't touched yet, so it can never catch a value review
+        # itself just dropped. The speed motivation for parallelising (~8s
+        # saved on one document) is also void: a separate measurement showed
+        # the upstream endpoint is throughput-limited, so the two concurrent
+        # calls slow each other down instead of overlapping for free (on a
+        # 30-page transcript, review_list alone grew from 20.8s to 26.3s once
+        # recall ran alongside it) — there is no remaining speed argument to
+        # weigh against the leak. Do not re-parallelise this without first
+        # re-solving the Вайгус regression some other way.
+        # New recall candidates then go through the same filters and overlap
+        # resolution as before.
         # Populated (only) inside the review/recall branch below with warnings
         # about a stage that couldn't do its job (see review.py's
-        # review_spans/recall_spans ``warnings`` param and
-        # _review_and_recall's docstring) — merged into the result's
-        # ``warnings`` alongside scan_residual_pii's and the detectors' own,
-        # so a failed review/recall pass is visible to the caller exactly
-        # like a failed GLiNER/LLM chunk is, not just printed to stderr.
+        # review_spans/recall_spans ``warnings`` param) — merged into the
+        # result's ``warnings`` alongside scan_residual_pii's and the
+        # detectors' own, so a failed review/recall pass is visible to the
+        # caller exactly like a failed GLiNER/LLM chunk is, not just printed
+        # to stderr.
         stage_warnings: list[dict] = []
         if self._review_config is not None:
-            detected = spans
-            if getattr(self._review_config, "recall", False):
-                spans, recalled = self._review_and_recall(text, detected, stage_warnings)
-            else:
-                from .review import review_spans
+            from .review import (
+                _RECALL_FAILED_MESSAGE,
+                _REVIEW_FAILED_MESSAGE,
+                recall_spans,
+                review_spans,
+            )
 
+            # Fail-safe: review_spans/recall_spans already catch their own
+            # LLM/parsing errors internally (see review.py) and fall back to
+            # safe defaults without raising. This try/except is a backstop
+            # for the rare case where one of them raises PAST its own
+            # internal fail-safes — it must not take the other stage down.
+            # If review raises, ``spans`` is simply never reassigned, so it
+            # stays exactly as detected (masked, unreviewed).
+            detected = spans
+            try:
                 spans = review_spans(text, detected, self._review_config, stage_warnings)
-                recalled = []
+            except Exception as exc:  # noqa: BLE001
+                import sys
+
+                print(f"[engine] review_spans упал: {exc}", file=sys.stderr)
+                spans = detected
+                stage_warnings.append(
+                    {
+                        "kind": "review_failed",
+                        "message": _REVIEW_FAILED_MESSAGE.format(exc=exc),
+                    }
+                )
+
+            recalled: list[Span] = []
+            if getattr(self._review_config, "recall", False):
+                # Sequential and dependent on review's RETURNED span list —
+                # see the long comment above for why this order (and not the
+                # pre-review ``detected`` list) is load-bearing.
+                try:
+                    recalled = recall_spans(text, spans, self._review_config, stage_warnings)
+                except Exception as exc:  # noqa: BLE001
+                    import sys
+
+                    print(f"[engine] recall_spans упал: {exc}", file=sys.stderr)
+                    recalled = []
+                    stage_warnings.append(
+                        {
+                            "kind": "recall_failed",
+                            "message": _RECALL_FAILED_MESSAGE.format(exc=exc),
+                        }
+                    )
             if recalled:
                 recalled = [rebalance_quotes(text, s) for s in recalled]
                 recalled = [
@@ -301,128 +358,6 @@ class Anonymizer:
             preexisting_placeholders=len(protected),
             warnings=tuple(warnings),
         )
-
-    def _review_and_recall(
-        self, text: str, detected: list[Span], warnings: list[dict]
-    ) -> tuple[list[Span], list[Span]]:
-        """Run ``review_spans`` and ``recall_spans`` CONCURRENTLY.
-
-        Both are single, multi-second LLM calls that used to run back to
-        back (~29s of a ~50s document, measured in production). They have no
-        data dependency once recall is given the PRE-review ``detected``
-        span list instead of review's result: recall hunts over the SAME
-        masking (built from ``detected``) regardless of what review decides,
-        so the two calls can overlap.
-
-        Semantic consequence of feeding recall the pre-review masking:
-        recall no longer sees values review just unmasked (e.g. a product
-        name), so it can't re-flag them — the two layers used to be able to
-        fight over exactly that value. Losing that fight is intentional:
-        review is the layer that has the final say on what is NOT personal
-        data. Recall's ability to find genuinely missed PII is unaffected,
-        because the text it reasons over is masked identically either way
-        (from ``detected``, not from review's output) EXCEPT inside spans
-        that review itself trims or drops — there, and only there, the two
-        orderings can disagree.
-
-        Agreement with the accepted tradeoff (per the task spec, restated
-        here for the record): sequentially, recall used to get a free
-        second opinion on review's own drops/trims, because it saw the
-        exact same text review had just unmasked. That is a real, if
-        narrow, safety net for a review *mistake* (review dropping
-        something a detector had genuinely caught as PII) — not the same
-        thing as recall's actual job of catching what NO detector ever
-        caught. Removing that accidental backstop is consistent with "review
-        has final say over what is/isn't PII" and does not change recall's
-        ability to catch a genuinely undetected value anywhere else in the
-        document (identical masking there in both orderings) — so this is
-        accepted as specified, not flagged as a MISS regression.
-
-        ``usage_log.run_in_context`` (never a bare ``pool.submit``) carries
-        the per-document ``request_id`` contextvar into each worker thread —
-        without it the two calls' usage-log entries would silently stop
-        being grouped under this document's ``request_total`` line (see
-        usage_log.py's threading-trap docstring).
-
-        Fail-safe, unchanged from the sequential version and independent of
-        which call finishes first: if review raises, ``spans`` fall back to
-        ``detected`` (masked, unreviewed, exactly as before review existed).
-        If recall raises or finds nothing, ``recalled`` is empty and the
-        document proceeds with review's result alone. Each future's
-        exception is caught on its own, so one failing can never take the
-        other down.
-
-        Determinism: the merge in ``anonymize`` always concatenates
-        review's result THEN recall's result, in that fixed order — set
-        by this method's ``return``, not by which future happens to
-        complete first — so the resulting span list (and therefore
-        placeholder numbering) is identical regardless of completion order.
-
-        ``warnings`` is APPENDED to (never replaced/read) with an entry for
-        each of the two ``except`` branches below AND for whatever
-        review_spans/recall_spans append to their OWN ``warnings`` lists
-        internally (see review.py) — this method's own except blocks are a
-        backstop for the case where one of them raises past its own internal
-        fail-safes entirely, not the normal path. Two separate lists
-        (``review_warnings``/``recall_warnings``) are used while the futures
-        are in flight rather than one shared list, so the two worker threads
-        never mutate the same list concurrently; they're merged into
-        ``warnings`` in the same fixed review-then-recall order as the spans,
-        once both futures have completed.
-        """
-        from concurrent.futures import ThreadPoolExecutor
-
-        from . import usage_log
-        from .review import (
-            _RECALL_FAILED_MESSAGE,
-            _REVIEW_FAILED_MESSAGE,
-            recall_spans,
-            review_spans,
-        )
-
-        review_warnings: list[dict] = []
-        recall_warnings: list[dict] = []
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            review_future = usage_log.run_in_context(
-                pool, review_spans, text, detected, self._review_config, review_warnings
-            )
-            recall_future = usage_log.run_in_context(
-                pool, recall_spans, text, detected, self._review_config, recall_warnings
-            )
-
-            try:
-                spans = review_future.result()
-            except Exception as exc:  # noqa: BLE001
-                import sys
-
-                print(f"[engine] review_spans упал: {exc}", file=sys.stderr)
-                spans = detected
-                review_warnings.append(
-                    {
-                        "kind": "review_failed",
-                        "message": _REVIEW_FAILED_MESSAGE.format(exc=exc),
-                    }
-                )
-
-            try:
-                recalled = recall_future.result()
-            except Exception as exc:  # noqa: BLE001
-                import sys
-
-                print(f"[engine] recall_spans упал: {exc}", file=sys.stderr)
-                recalled = []
-                recall_warnings.append(
-                    {
-                        "kind": "recall_failed",
-                        "message": _RECALL_FAILED_MESSAGE.format(exc=exc),
-                    }
-                )
-
-        warnings.extend(review_warnings)
-        warnings.extend(recall_warnings)
-
-        return spans, list(recalled or [])
 
     def _find_leaked_spans(
         self, text: str, spans: list[Span], protected: list[tuple[int, int]]
