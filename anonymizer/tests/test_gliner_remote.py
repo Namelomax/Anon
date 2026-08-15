@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from anonymizer import http_pool, usage_log  # noqa: E402
+from anonymizer import gliner_remote, http_pool, usage_log  # noqa: E402
 from anonymizer.gliner_remote import RemoteGLiNERConfig, RemoteGLiNERDetector  # noqa: E402
 
 
@@ -40,6 +40,19 @@ def _patched_post_json(fn):
         yield
     finally:
         http_pool.post_json = orig
+
+
+@contextmanager
+def _no_sleep():
+    """Backoff between retries (see gliner_remote._extract) is real
+    time.sleep — tests exercising retries patch it out so they don't
+    actually wait 0.4/1.2 s per attempt."""
+    orig = gliner_remote.time.sleep
+    gliner_remote.time.sleep = lambda _seconds: None
+    try:
+        yield
+    finally:
+        gliner_remote.time.sleep = orig
 
 
 @contextmanager
@@ -92,11 +105,14 @@ def test_extract_records_gliner_call_with_chars_and_no_tokens():
 
 
 def test_extract_records_failure_on_http_error():
+    # 400, not 500: HTTP 5xx is now retried (see the "Retry" section below),
+    # so it no longer produces exactly one call — a deterministic 4xx is
+    # the case that stays a single, immediate failure.
     seen_pools = []
 
     def _boom(url, payload_bytes, headers, timeout, *, pool="chat"):
         seen_pools.append(pool)
-        return 500, b"internal error"
+        return 400, b"bad request"
 
     det = RemoteGLiNERDetector(RemoteGLiNERConfig())
     with _temp_usage_log() as log_path, _patched_post_json(_boom):
@@ -109,8 +125,114 @@ def test_extract_records_failure_on_http_error():
     calls = [l for l in lines if l["kind"] == "gliner"]
     assert len(calls) == 1
     assert calls[0]["ok"] is False
-    assert "500" in calls[0]["error"]
+    assert "400" in calls[0]["error"]
     assert seen_pools == ["gliner"]
+
+
+# --- Retry (see RemoteGLiNERConfig.retries / gliner_remote._extract) --------
+
+def test_extract_retries_on_transient_oserror_and_succeeds():
+    """A dead pooled connection / timeout (OSError, e.g.
+    http_pool.PoolConnectionError) on attempt 1 must not sink the chunk if
+    attempt 2 succeeds."""
+    payload = {"entities": [{"text": "Иван", "label": "person", "start": 0, "end": 4, "score": 0.9}]}
+    body = json.dumps(payload).encode("utf-8")
+    calls = []
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        calls.append(1)
+        if len(calls) == 1:
+            raise http_pool.PoolConnectionError("connection reset")
+        return 200, body
+
+    det = RemoteGLiNERDetector(RemoteGLiNERConfig())
+    with _temp_usage_log() as log_path, _patched_calls_mode("all"), \
+            _patched_post_json(_fake), _no_sleep():
+        entities = det._extract("Иван пошёл домой")
+        lines = _read_jsonl(log_path)
+
+    assert len(calls) == 2
+    assert entities == payload["entities"]
+    # usage_log.record_call fires for EVERY attempt, not just the last one —
+    # each attempt is a real billed upstream call.
+    gliner_lines = [l for l in lines if l["kind"] == "gliner"]
+    assert len(gliner_lines) == 2
+    assert [l["ok"] for l in gliner_lines] == [False, True]
+
+
+def test_extract_retries_on_http_500_and_succeeds():
+    payload = {"entities": []}
+    body = json.dumps(payload).encode("utf-8")
+    calls = []
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        calls.append(1)
+        if len(calls) == 1:
+            return 500, b"internal error"
+        return 200, body
+
+    det = RemoteGLiNERDetector(RemoteGLiNERConfig())
+    with _temp_usage_log() as log_path, _patched_calls_mode("all"), \
+            _patched_post_json(_fake), _no_sleep():
+        entities = det._extract("some chunk")
+        lines = _read_jsonl(log_path)
+
+    assert len(calls) == 2
+    assert entities == []
+    gliner_lines = [l for l in lines if l["kind"] == "gliner"]
+    assert len(gliner_lines) == 2
+    assert [l["ok"] for l in gliner_lines] == [False, True]
+
+
+def test_extract_does_not_retry_on_http_401():
+    """A deterministic 4xx (bad key, bad payload) must fail immediately —
+    retrying just burns quota for an error a retry cannot fix."""
+    calls = []
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        calls.append(1)
+        return 401, b"unauthorized"
+
+    det = RemoteGLiNERDetector(RemoteGLiNERConfig())
+    with _temp_usage_log() as log_path, _patched_post_json(_fake), _no_sleep():
+        try:
+            det._extract("some chunk")
+            raised = False
+        except RuntimeError:
+            raised = True
+        lines = _read_jsonl(log_path)
+
+    assert raised
+    assert len(calls) == 1  # exactly one call — no retry on a non-retryable status
+    gliner_lines = [l for l in lines if l["kind"] == "gliner"]
+    assert len(gliner_lines) == 1
+    assert gliner_lines[0]["ok"] is False
+
+
+def test_extract_exhausts_all_attempts_and_raises():
+    """retries=2 (default) => up to 3 total attempts; if every one fails,
+    _extract must still raise RuntimeError (find()'s per-chunk warning path
+    is unchanged) and log every attempt."""
+    calls = []
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        calls.append(1)
+        raise http_pool.PoolConnectionError("connection reset")
+
+    det = RemoteGLiNERDetector(RemoteGLiNERConfig())
+    with _temp_usage_log() as log_path, _patched_post_json(_fake), _no_sleep():
+        try:
+            det._extract("some chunk")
+            raised = False
+        except RuntimeError:
+            raised = True
+        lines = _read_jsonl(log_path)
+
+    assert raised
+    assert len(calls) == 3  # 1 initial attempt + 2 retries (default retries=2)
+    gliner_lines = [l for l in lines if l["kind"] == "gliner"]
+    assert len(gliner_lines) == 3
+    assert all(l["ok"] is False for l in gliner_lines)
 
 
 if __name__ == "__main__":

@@ -59,6 +59,15 @@ class RemoteGLiNERConfig:
         max_chars: Размер куска. НЕ поднимать до лимита API (50 000): модель
             перестаёт видеть текст после ~1800 символов (см. докстринг модуля).
         timeout: Таймаут одного запроса.
+        retries: Число повторов ПОСЛЕ первой попытки при транзиентных сбоях
+            (обрыв соединения/`http_pool.PoolConnectionError`, HTTP 5xx, HTTP
+            429) — итого до ``retries + 1`` попыток на кусок. В проде из ~70
+            кусков документа 3 стабильно валятся на разовых сбоях шлюза/TLS
+            под ``concurrency=16`` — при retries они просто пропадают вместо
+            того, чтобы терять фрагмент текста насовсем. Прочие 4xx (неверный
+            ключ, битый payload) НЕ повторяются — они детерминированы, повтор
+            только жжёт квоту впустую. Бэкофф между попытками — 0.4 с, затем
+            1.2 с (см. `_extract`).
         label_map: Отображение меток сервиса в метки анонимизатора.
         concurrency: Число одновременных запросов к ``/extract``. Раньше (без
             пула соединений) один вызов целиком занимал ~1.15-1.27 с, хотя
@@ -95,6 +104,7 @@ class RemoteGLiNERConfig:
     threshold: float = 0.45
     max_chars: int = 800
     timeout: float = 60.0
+    retries: int = 2
     label_map: dict = field(default_factory=lambda: dict(_DEFAULT_LABEL_MAP))
     concurrency: int = 16
 
@@ -171,10 +181,14 @@ class RemoteGLiNERDetector:
         spans: list[Span] = []
         for (offset, chunk), result in zip(chunks, results):
             if isinstance(result, Exception):
+                # Текст сообщения намеренно НЕ содержит {result} (адрес API,
+                # HTTP-код, текст исключения) — это техническая информация не
+                # для конечного пользователя, она остаётся только в stderr
+                # ниже (см. задачу «warnings без технических деталей»).
                 message = (
-                    "Фрагмент текста не удалось проверить через GLiNER API "
-                    f"({result}). Персональные данные в этом фрагменте могли "
-                    "остаться незамаскированными."
+                    "Фрагмент текста не удалось проверить. Персональные "
+                    "данные в этом фрагменте могли остаться "
+                    "незамаскированными."
                 )
                 self.warnings.append(
                     {
@@ -206,10 +220,37 @@ class RemoteGLiNERDetector:
         return spans
 
     # -- HTTP -----------------------------------------------------------
+    # Бэкофф между повторами (см. RemoteGLiNERConfig.retries): 0.4 с перед
+    # вторым вызовом, 1.2 с перед третьим. Индекс — номер УЖЕ провалившейся
+    # попытки (0 для первой), поэтому этих двух значений хватает на дефолтные
+    # retries=2; при большем retries последняя пауза просто повторяется.
+    _RETRY_BACKOFF_SECONDS = (0.4, 1.2)
+
+    def _wait_before_retry(self, attempt: int) -> None:
+        """Пауза перед повтором. Проверяет cancel_event ДО sleep, чтобы
+        отменённая задача не отсиживала бэкофф впустую — тот же контракт
+        отмены, что и в find() (см. Cancelled)."""
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise Cancelled()
+        backoff = self._RETRY_BACKOFF_SECONDS[
+            min(attempt, len(self._RETRY_BACKOFF_SECONDS) - 1)
+        ]
+        time.sleep(backoff)
+
     def _extract(self, chunk: str) -> list[dict]:
-        """Один вызов /extract. Бросает RuntimeError при ошибке HTTP —
-        find() ловит её по-кускам и продолжает с остальными, а не роняет
-        весь документ из-за одного неудачного запроса."""
+        """До ``retries + 1`` попыток одного вызова /extract. Бросает
+        RuntimeError, если ВСЕ попытки исчерпаны — find() ловит её по-кускам
+        и продолжает с остальными, а не роняет весь документ из-за одного
+        неудачного запроса.
+
+        Повторяются ТОЛЬКО транзиентные сбои: обрыв соединения (OSError, в
+        т.ч. http_pool.PoolConnectionError — он наследует OSError), HTTP 5xx,
+        HTTP 429. Прочие 4xx (неверный ключ, битый payload) детерминированы —
+        повтор их не исправит, только зря сожжёт квоту, поэтому они бросаются
+        немедленно. usage_log.record_call пишется на КАЖДУЮ попытку — это
+        реальные оплачиваемые вызовы вышестоящего сервиса, и отчёт по
+        стоимости должен видеть все, а не только последний.
+        """
         cfg = self.config
         payload = {
             "text": chunk,
@@ -222,33 +263,44 @@ class RemoteGLiNERDetector:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {cfg.api_key}",
         }
-        t0 = time.time()
-        try:
-            status, resp_body = http_pool.post_json(
-                url, body_bytes, headers, cfg.timeout, pool="gliner"
-            )
-        except OSError as exc:  # connection refused/reset/timeout, dead pooled socket, ...
-            usage_log.record_call(
-                "gliner", seconds=time.time() - t0, chars=len(chunk),
-                ok=False, error=str(exc),
-            )
-            raise RuntimeError(
-                f"GLiNER API {cfg.base_url} недоступен: {exc}"
-            ) from exc
-        if status != 200:
-            body = resp_body[:200].decode("utf-8", "replace")
-            usage_log.record_call(
-                "gliner", seconds=time.time() - t0, chars=len(chunk),
-                ok=False, error=f"HTTP {status}: {body}",
-            )
-            raise RuntimeError(
-                f"GLiNER API {cfg.base_url} вернул HTTP {status}: {body}"
-            )
-        data = json.loads(resp_body)
-        usage_log.record_call("gliner", seconds=time.time() - t0, chars=len(chunk), ok=True)
+        attempts = cfg.retries + 1
+        for attempt in range(attempts):
+            t0 = time.time()
+            try:
+                status, resp_body = http_pool.post_json(
+                    url, body_bytes, headers, cfg.timeout, pool="gliner"
+                )
+            except OSError as exc:  # connection refused/reset/timeout, dead pooled socket, ...
+                usage_log.record_call(
+                    "gliner", seconds=time.time() - t0, chars=len(chunk),
+                    ok=False, error=str(exc),
+                )
+                if attempt + 1 < attempts:
+                    self._wait_before_retry(attempt)
+                    continue
+                raise RuntimeError(
+                    f"GLiNER API {cfg.base_url} недоступен: {exc}"
+                ) from exc
+            if status != 200:
+                body = resp_body[:200].decode("utf-8", "replace")
+                usage_log.record_call(
+                    "gliner", seconds=time.time() - t0, chars=len(chunk),
+                    ok=False, error=f"HTTP {status}: {body}",
+                )
+                if (status >= 500 or status == 429) and attempt + 1 < attempts:
+                    self._wait_before_retry(attempt)
+                    continue
+                raise RuntimeError(
+                    f"GLiNER API {cfg.base_url} вернул HTTP {status}: {body}"
+                )
+            data = json.loads(resp_body)
+            usage_log.record_call("gliner", seconds=time.time() - t0, chars=len(chunk), ok=True)
 
-        # Сервис отдаёт {"entities": [...]}; на всякий случай принимаем и голый
-        # список — контракт у подобных обёрток любит меняться.
-        if isinstance(data, dict):
-            data = data.get("entities", [])
-        return [e for e in data if isinstance(e, dict)]
+            # Сервис отдаёт {"entities": [...]}; на всякий случай принимаем и
+            # голый список — контракт у подобных обёрток любит меняться.
+            if isinstance(data, dict):
+                data = data.get("entities", [])
+            return [e for e in data if isinstance(e, dict)]
+        # Недостижимо: цикл либо возвращает результат, либо бросает исключение
+        # на последней попытке внутри тела выше.
+        raise AssertionError("unreachable")

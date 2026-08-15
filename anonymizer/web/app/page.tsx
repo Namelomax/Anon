@@ -13,7 +13,14 @@ type AnonResult = {
   summary: Record<string, number>;
   elapsed_seconds?: number;
   preexisting_placeholders?: number;
-  warnings?: { kind: string; value: string; context: string }[];
+  warnings?: {
+    kind: string;
+    value?: string;
+    context?: string;
+    message?: string;
+    offset?: number;
+    chars?: number;
+  }[];
   document_base64: string;
   document_name: string;
   document_mime: string;
@@ -119,6 +126,35 @@ function download(blob: Blob, name: string) {
 
 function labelOf(placeholder: string): string {
   return placeholder.replace(/^\[|\]$/g, "").replace(/_[^_]*$/, "");
+}
+
+// Человекочитаемые подписи для result.warnings[].kind — и для найденных, но
+// не скрытых значений (verify.py), и для сбоев отдельных слоёв проверки
+// (engine.py/gliner_remote.py/llm.py). Незнакомый (будущий) kind просто
+// показывается как есть — см. warningLabel.
+const WARNING_KIND_LABELS: Record<string, string> = {
+  DIGITS: "Длинный номер",
+  EMAIL: "Адрес эл. почты",
+  gliner_chunk_failed: "Фрагмент не проверен",
+  llm_chunk_failed: "Фрагмент не проверен",
+  recall_failed: "Не выполнен поиск пропущенных данных",
+  review_failed: "Не выполнена проверка лишних масок",
+  review_adjacent_failed: "Не выполнена проверка спорных имён",
+  review_short_numbers_failed: "Не выполнена проверка коротких чисел",
+  review_person_gate_unavailable: "Недоступна словарная проверка имён",
+};
+
+function warningLabel(kind: string): string {
+  return WARNING_KIND_LABELS[kind] ?? kind;
+}
+
+// «символы 12 400–13 200» — офсет/длина есть только у чанковых сбоев
+// (gliner_chunk_failed/llm_chunk_failed), чтобы показать, ГДЕ смотреть.
+function warningRange(offset?: number, chars?: number): string | null {
+  if (offset == null || chars == null) return null;
+  const start = offset.toLocaleString("ru");
+  const end = (offset + chars).toLocaleString("ru");
+  return `символы ${start}–${end}`;
 }
 
 // Replace each placeholder token with its original value. Placeholders are
@@ -595,41 +631,77 @@ export default function Home() {
                 )}
               </div>
 
-              {result.warnings && result.warnings.length > 0 && (
-                <div className="card" style={{ borderColor: "#e0a800", background: "#fff9e6" }}>
-                  <h2 style={{ marginTop: 0 }}>⚠️ Проверьте вручную — возможно, не скрыто</h2>
-                  <p className="note" style={{ marginTop: 0 }}>
-                    Автопроверка нашла в результате фрагменты, похожие на неанонимизированные
-                    данные (длинные числа — счета/ОГРН/ИНН/телефоны, адреса эл. почты). Если это
-                    действительно ПДн — фрагмент пропустили детекторы; сообщите, какой это тип, или
-                    отредактируйте документ вручную.
-                  </p>
-                  <div className="scroll-tbl">
-                    <table className="map">
-                      <thead>
-                        <tr>
-                          <th>Тип</th>
-                          <th>Значение</th>
-                          <th>Контекст</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {result.warnings.map((w, i) => (
-                          <tr key={i}>
-                            <td>
-                              <span className="tag">{w.kind}</span>
-                            </td>
-                            <td>
-                              <code>{w.value}</code>
-                            </td>
-                            <td style={{ fontSize: 13, opacity: 0.8 }}>{w.context}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
+              {result.warnings && result.warnings.length > 0 && (() => {
+                // result.warnings — объединение двух разных форм (см.
+                // engine.py): найденные-но-не-скрытые значения (verify.py,
+                // есть value) и сбои отдельных слоёв проверки (есть message).
+                // Делим по наличию поля, а не по конкретным kind — так
+                // незнакомый в будущем kind всё равно попадёт в нужную карточку.
+                const residual = result.warnings!.filter((w) => w.value !== undefined);
+                const failed = result.warnings!.filter((w) => w.value === undefined);
+                return (
+                  <>
+                    {residual.length > 0 && (
+                      <div className="card warn-card">
+                        <h2 style={{ marginTop: 0 }}>⚠️ Проверьте вручную — возможно, не скрыто</h2>
+                        <p className="note" style={{ marginTop: 0 }}>
+                          Автопроверка нашла в результате фрагменты, похожие на неанонимизированные
+                          данные (длинные числа — счета/ОГРН/ИНН/телефоны, адреса эл. почты). Если это
+                          действительно ПДн — фрагмент пропустили детекторы; сообщите, какой это тип, или
+                          отредактируйте документ вручную.
+                        </p>
+                        <div className="scroll-tbl">
+                          <table className="map">
+                            <thead>
+                              <tr>
+                                <th>Тип</th>
+                                <th>Значение</th>
+                                <th>Контекст</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {residual.map((w, i) => (
+                                <tr key={i}>
+                                  <td>
+                                    <span className="tag">{warningLabel(w.kind)}</span>
+                                  </td>
+                                  <td>
+                                    <code>{w.value}</code>
+                                  </td>
+                                  <td style={{ fontSize: 13, opacity: 0.8 }}>{w.context}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {failed.length > 0 && (
+                      <div className="card warn-card">
+                        <h2 style={{ marginTop: 0 }}>⚠️ Часть документа проверена не полностью</h2>
+                        <p className="note" style={{ marginTop: 0 }}>
+                          Некоторые проверочные слои не смогли завершить работу — в этих местах
+                          персональные данные могли остаться незамаскированными. Просмотрите их
+                          вручную.
+                        </p>
+                        <ul style={{ margin: 0, paddingLeft: 20 }}>
+                          {failed.map((w, i) => {
+                            const range = warningRange(w.offset, w.chars);
+                            return (
+                              <li key={i} style={{ marginBottom: 10 }}>
+                                <strong>{warningLabel(w.kind)}</strong>
+                                {range && <span className="note"> ({range})</span>}
+                                <div className="note" style={{ marginTop: 2 }}>{w.message}</div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
 
               <div className="card">
                 <h2>📦 Скачать</h2>

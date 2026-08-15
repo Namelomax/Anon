@@ -89,7 +89,9 @@ def test_recall_failed_warning_reaches_run_anonymize_text_response():
     assert kinds == ["recall_failed"]
     warning = result["warnings"][0]
     assert "kind" in warning and "message" in warning
-    assert "dns lookup failed" in warning["message"]
+    # Product decision: end-user warnings must never carry technical detail
+    # (API URLs, HTTP codes, Python exception text) — only stderr does.
+    assert "dns lookup failed" not in warning["message"]
     # Same field, same shape a gliner_chunk_failed / llm_chunk_failed entry
     # would show up in — see verify.scan_residual_pii's warnings and
     # LLMDetector.warnings / RemoteGLiNERDetector.warnings for the sibling

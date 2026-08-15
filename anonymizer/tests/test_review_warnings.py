@@ -146,7 +146,10 @@ def test_review_failure_produces_review_failed_warning_and_keeps_spans_masked():
     assert len(res.warnings) == 1
     warning = res.warnings[0]
     assert warning["kind"] == "review_failed"
-    assert "dns lookup failed" in warning["message"]
+    # Product decision: end-user warnings must never carry technical detail
+    # (API URLs, HTTP codes, Python exception text) — only stderr does.
+    assert "dns lookup failed" not in warning["message"]
+    assert "проверку" in warning["message"]
     # Fail-safe unchanged: the detected span is still masked.
     assert _PERSON not in res.anonymized_text
     assert "[PERSON_1]" in res.anonymized_text
@@ -175,7 +178,7 @@ def test_recall_failure_produces_recall_failed_warning_stating_pii_may_remain_un
     assert len(res.warnings) == 1
     warning = res.warnings[0]
     assert warning["kind"] == "recall_failed"
-    assert "dns lookup failed" in warning["message"]
+    assert "dns lookup failed" not in warning["message"]
     assert "могла остаться незамаскированной" in warning["message"]
     # Review itself succeeded (empty-array reply) so the detected span is
     # still masked; recall simply never got to look for anything ELSE.
@@ -203,7 +206,7 @@ def test_short_numbers_failure_produces_own_warning_and_leaves_number_unmasked()
     assert len(res.warnings) == 1
     warning = res.warnings[0]
     assert warning["kind"] == "review_short_numbers_failed"
-    assert "dns lookup failed" in warning["message"]
+    assert "dns lookup failed" not in warning["message"]
     # Existing fail-safe unchanged: the bare short number stays visible.
     assert "42" in res.anonymized_text
 
@@ -246,7 +249,7 @@ def test_adjacent_recheck_failure_produces_own_warning_and_keeps_both_spans_mask
     assert len(res.warnings) == 1
     warning = res.warnings[0]
     assert warning["kind"] == "review_adjacent_failed"
-    assert "dns lookup failed" in warning["message"]
+    assert "dns lookup failed" not in warning["message"]
     # Fail-safe unchanged: both stay masked (main review's drop of "Капитан"
     # is overridden back to "keep masked" because the re-check couldn't run).
     assert "Капитан" not in res.anonymized_text

@@ -26,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from anonymizer import http_pool, usage_log  # noqa: E402
+from anonymizer import gliner_remote, http_pool, usage_log  # noqa: E402
 from anonymizer.gliner_remote import RemoteGLiNERConfig, RemoteGLiNERDetector  # noqa: E402
 
 
@@ -623,25 +623,39 @@ class _FiveHundredHandler(http.server.BaseHTTPRequestHandler):
 
 
 def test_extract_maps_http_500_to_runtime_error_with_status():
-    with _run_server(_FiveHundredHandler) as (host, port):
+    # 500 is now retried (see gliner_remote._extract) — sleep is patched out
+    # so the two retries' backoff doesn't slow the test down.
+    orig_sleep = gliner_remote.time.sleep
+    gliner_remote.time.sleep = lambda _seconds: None
+    try:
+        with _run_server(_FiveHundredHandler) as (host, port):
+            cfg = RemoteGLiNERConfig(base_url=f"http://{host}:{port}", api_key="x")
+            det = RemoteGLiNERDetector(cfg)
+            try:
+                det._extract("some chunk")
+                assert False, "expected RuntimeError"
+            except RuntimeError as exc:
+                assert "500" in str(exc)
+    finally:
+        gliner_remote.time.sleep = orig_sleep
+
+
+def test_extract_maps_unreachable_host_to_nedostupen_runtime_error():
+    # An unreachable host is retried too (OSError — see gliner_remote._extract);
+    # sleep is patched out for the same reason as above.
+    orig_sleep = gliner_remote.time.sleep
+    gliner_remote.time.sleep = lambda _seconds: None
+    try:
+        host, port = _free_port_with_nothing_listening()
         cfg = RemoteGLiNERConfig(base_url=f"http://{host}:{port}", api_key="x")
         det = RemoteGLiNERDetector(cfg)
         try:
             det._extract("some chunk")
             assert False, "expected RuntimeError"
         except RuntimeError as exc:
-            assert "500" in str(exc)
-
-
-def test_extract_maps_unreachable_host_to_nedostupen_runtime_error():
-    host, port = _free_port_with_nothing_listening()
-    cfg = RemoteGLiNERConfig(base_url=f"http://{host}:{port}", api_key="x")
-    det = RemoteGLiNERDetector(cfg)
-    try:
-        det._extract("some chunk")
-        assert False, "expected RuntimeError"
-    except RuntimeError as exc:
-        assert "недоступен" in str(exc)
+            assert "недоступен" in str(exc)
+    finally:
+        gliner_remote.time.sleep = orig_sleep
 
 
 # --- 5. Instrumentation survives a real (non-monkeypatched) round trip -------
@@ -682,19 +696,28 @@ def test_successful_call_reaches_usage_log_accumulator_over_real_pool():
 
 
 def test_failed_call_over_real_pool_is_recorded_ok_false():
+    # An unreachable host is a transient OSError (see gliner_remote._extract's
+    # retry logic), so RemoteGLiNERConfig's default retries=2 means up to 3
+    # attempts — and 3 usage_log entries, one per attempt — before it gives
+    # up. The retry backoff is patched out so the test doesn't actually wait.
     host, port = _free_port_with_nothing_listening()
-    with _temp_usage_log() as log_path:
-        cfg = RemoteGLiNERConfig(base_url=f"http://{host}:{port}", api_key="x")
-        det = RemoteGLiNERDetector(cfg)
-        try:
-            det._extract("some chunk")
-        except RuntimeError:
-            pass
-        lines = _read_jsonl(log_path)
+    orig_sleep = gliner_remote.time.sleep
+    gliner_remote.time.sleep = lambda _seconds: None
+    try:
+        with _temp_usage_log() as log_path:
+            cfg = RemoteGLiNERConfig(base_url=f"http://{host}:{port}", api_key="x")
+            det = RemoteGLiNERDetector(cfg)
+            try:
+                det._extract("some chunk")
+            except RuntimeError:
+                pass
+            lines = _read_jsonl(log_path)
+    finally:
+        gliner_remote.time.sleep = orig_sleep
 
     calls = [l for l in lines if l["kind"] == "gliner"]
-    assert len(calls) == 1
-    assert calls[0]["ok"] is False
+    assert len(calls) == 3
+    assert all(c["ok"] is False for c in calls)
 
 
 if __name__ == "__main__":

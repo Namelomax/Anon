@@ -278,7 +278,7 @@ class Anonymizer:
                 stage_warnings.append(
                     {
                         "kind": "review_failed",
-                        "message": _REVIEW_FAILED_MESSAGE.format(exc=exc),
+                        "message": _REVIEW_FAILED_MESSAGE,
                     }
                 )
 
@@ -297,7 +297,7 @@ class Anonymizer:
                     stage_warnings.append(
                         {
                             "kind": "recall_failed",
-                            "message": _RECALL_FAILED_MESSAGE.format(exc=exc),
+                            "message": _RECALL_FAILED_MESSAGE,
                         }
                     )
             if recalled:
