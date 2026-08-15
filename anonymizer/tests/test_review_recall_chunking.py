@@ -16,6 +16,15 @@ smaller ``recall_max_tokens`` budget and cooperative cancellation.
 
 No live upstream calls: ``http_pool.post_json`` is monkeypatched, matching
 the convention in test_review_warnings.py / test_review_usage.py.
+
+Below that, a second block of tests pins ``ReviewConfig.recall_concurrency``
+(chunks dispatched over a ``ThreadPoolExecutor`` instead of sequentially):
+same coverage as above (dedup, one-chunk-failure, all-chunks-failure,
+``Cancelled``) run again under concurrency, PLUS an explicit determinism
+test — completion order is scrambled on purpose (one chunk answers slower
+than the others), yet the merged result must come out byte-for-byte
+identical to the strictly sequential path, because merging happens by
+CHUNK INDEX, never by whichever request finished first.
 """
 
 from __future__ import annotations
@@ -23,6 +32,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -238,6 +248,214 @@ def test_cancelled_propagates_out_of_recall_spans_and_is_not_a_warning():
             assert False, "expected Cancelled to propagate out of recall_spans"
 
     assert warnings == []
+
+
+# =============================================================================
+# recall_concurrency: same fail-safes, now dispatched over a thread pool.
+# =============================================================================
+
+# Три строки-пары, каждая пара — отдельный кусок при recall_max_chars=200
+# (проверено: chunk_text группирует их именно так). У каждого куска — своё
+# "пропущенное" значение, порядок которых в документе: Кузнецова -> Смирнова
+# -> Ромашка. Используется для теста детерминизма слияния (см. ниже).
+_DET_LINES = [
+    "Первая строка текста, где встречается фамилия Кузнецова где-то тут же.",
+    "Вторая строка текста для заполнения объёма документа номер два тут же.",
+    "Третья строка текста, где встречается фамилия Смирнова где-то тут рядом.",
+    "Четвёртая строка текста для заполнения объёма документа номер четыре ещё.",
+    "Пятая строка текста, где встречается организация Ромашка тут же рядышком.",
+    "Шестая строка текста для заполнения объёма документа номер шесть в конце.",
+]
+_DET_TEXT = "\n".join(_DET_LINES)
+
+
+def _det_fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+    user = _user_content(payload_bytes)
+    if "Кузнецова" in user:
+        # Первый по индексу кусок нарочно отвечает МЕДЛЕННЕЕ остальных — под
+        # конкурентным диспетчером он завершится ПОСЛЕДНИМ, хотя ушёл первым.
+        time.sleep(0.05)
+        return 200, _chat_body(json.dumps([{"text": "Кузнецова", "type": "PERSON"}]))
+    if "Смирнова" in user:
+        return 200, _chat_body(json.dumps([{"text": "Смирнова", "type": "PERSON"}]))
+    if "Ромашка" in user:
+        return 200, _chat_body(json.dumps([{"text": "Ромашка", "type": "ORG"}]))
+    return 200, _chat_body(json.dumps([]))
+
+
+# --- 8. Every chunk still requested exactly once; all found values placed ---
+
+def test_concurrent_every_chunk_requested_once_and_all_values_placed():
+    cfg = ReviewConfig(model="test-model", recall_max_chars=200, recall_concurrency=4)
+    calls: list[str] = []
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        user = _user_content(payload_bytes)
+        calls.append(user)
+        if "Смирнова" in user:
+            return 200, _chat_body(json.dumps([{"text": "Смирнова", "type": "PERSON"}]))
+        if "Ромашка" in user:
+            return 200, _chat_body(json.dumps([{"text": "Ромашка", "type": "ORG"}]))
+        return 200, _chat_body(json.dumps([]))
+
+    with _patched_post_json(_fake), _captured_stderr():
+        out = recall_spans(_TEXT, [], cfg)
+
+    assert len(calls) == 3, "each of the three chunks should be requested exactly once"
+    texts = {s.text for s in out}
+    assert "Смирнова" in texts
+    assert "Ромашка" in texts
+
+
+# --- 9. Order determinism: scrambled completion order, same merged result ---
+
+def test_concurrent_merge_order_matches_sequential_despite_scrambled_completion():
+    cfg_seq = ReviewConfig(model="test-model", recall_max_chars=200, recall_concurrency=1)
+    cfg_conc = ReviewConfig(model="test-model", recall_max_chars=200, recall_concurrency=4)
+
+    with _patched_post_json(_det_fake), _captured_stderr():
+        out_seq = recall_spans(_DET_TEXT, [], cfg_seq)
+    with _patched_post_json(_det_fake), _captured_stderr():
+        out_conc = recall_spans(_DET_TEXT, [], cfg_conc)
+
+    seq_order = [s.text for s in out_seq]
+    conc_order = [s.text for s in out_conc]
+    # Документный порядок: Кузнецова (кусок 0) -> Смирнова (кусок 1) ->
+    # Ромашка (кусок 2) — несмотря на то, что под конкурентным диспетчером
+    # кусок 0 физически отвечает ПОСЛЕДНИМ (см. _det_fake).
+    assert seq_order == ["Кузнецова", "Смирнова", "Ромашка"]
+    assert conc_order == seq_order
+
+
+# --- 10. Dedup across chunks still collapses under concurrency --------------
+
+def test_concurrent_value_returned_by_two_chunks_is_placed_once_not_twice():
+    cfg = ReviewConfig(model="test-model", recall_max_chars=200, recall_concurrency=4)
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        # Каждый кусок "находит" одно и то же значение — оно, тем не менее,
+        # встречается в исходном тексте ровно один раз.
+        return 200, _chat_body(json.dumps([{"text": "Смирнова", "type": "PERSON"}]))
+
+    with _patched_post_json(_fake), _captured_stderr():
+        out = recall_spans(_TEXT, [], cfg)
+
+    matches = [s for s in out if s.text == "Смирнова"]
+    assert len(matches) == 1
+
+
+# --- 11. One chunk failing under concurrency: survivors placed, one partial -
+
+def test_concurrent_one_failed_chunk_leaves_survivors_and_warns_partial():
+    cfg = ReviewConfig(model="test-model", recall_max_chars=200, recall_concurrency=4)
+    lines = list(_LINES)
+    lines[0] = lines[0] + " FAILMARK"
+    text = "\n".join(lines)
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        user = _user_content(payload_bytes)
+        if "FAILMARK" in user:
+            raise http_pool.PoolConnectionError("dns lookup failed")
+        if "Смирнова" in user:
+            return 200, _chat_body(json.dumps([{"text": "Смирнова", "type": "PERSON"}]))
+        if "Ромашка" in user:
+            return 200, _chat_body(json.dumps([{"text": "Ромашка", "type": "ORG"}]))
+        return 200, _chat_body(json.dumps([]))
+
+    warnings: list[dict] = []
+    with _patched_post_json(_fake), _captured_stderr():
+        out = recall_spans(text, [], cfg, warnings)
+
+    texts = {s.text for s in out}
+    assert "Смирнова" in texts
+    assert "Ромашка" in texts
+    assert len(warnings) == 1
+    assert warnings[0]["kind"] == "recall_partial"
+    assert warnings[0]["message"] == _RECALL_PARTIAL_MESSAGE
+
+
+# --- 12. All chunks failing under concurrency: exactly one recall_failed ----
+
+def test_concurrent_all_chunks_failing_produces_one_recall_failed_warning():
+    cfg = ReviewConfig(model="test-model", recall_max_chars=200, recall_concurrency=4)
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        raise http_pool.PoolConnectionError("dns lookup failed")
+
+    warnings: list[dict] = []
+    with _patched_post_json(_fake), _captured_stderr():
+        out = recall_spans(_TEXT, [], cfg, warnings)
+
+    assert out == []
+    assert len(warnings) == 1
+    assert warnings[0]["kind"] == "recall_failed"
+    assert warnings[0]["message"] == _RECALL_FAILED_MESSAGE
+
+
+# --- 13. Cancelled inside a worker propagates out of recall_spans, no warning
+
+def test_concurrent_cancelled_in_worker_propagates_and_is_not_a_warning():
+    cfg = ReviewConfig(model="test-model", recall_max_chars=200, recall_concurrency=4)
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        raise Cancelled()
+
+    warnings: list[dict] = []
+    with _patched_post_json(_fake), _captured_stderr():
+        try:
+            recall_spans(_TEXT, [], cfg, warnings)
+        except Cancelled:
+            pass
+        else:
+            assert False, "expected Cancelled to propagate out of recall_spans"
+
+    assert warnings == []
+
+
+# --- 14. recall_concurrency<=1 stays on the strictly-sequential path --------
+
+@contextmanager
+def _boom_if_thread_pool_used():
+    """Патчит ``ThreadPoolExecutor`` так, чтобы его создание падало — чтобы
+    убедиться, что ``recall_concurrency<=1`` вообще не пытается им
+    воспользоваться (см. ``recall_spans``: ветка сохраняется verbatim)."""
+    import concurrent.futures as cf
+
+    orig = cf.ThreadPoolExecutor
+
+    class _Boom(cf.ThreadPoolExecutor):
+        def __init__(self, *a, **k):
+            raise AssertionError(
+                "recall_concurrency<=1 must not use ThreadPoolExecutor"
+            )
+
+    cf.ThreadPoolExecutor = _Boom
+    try:
+        yield
+    finally:
+        cf.ThreadPoolExecutor = orig
+
+
+def test_recall_concurrency_one_stays_sequential_and_behaves_as_before():
+    cfg = ReviewConfig(model="test-model", recall_max_chars=200, recall_concurrency=1)
+    calls: list[str] = []
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        user = _user_content(payload_bytes)
+        calls.append(user)
+        if "Смирнова" in user:
+            return 200, _chat_body(json.dumps([{"text": "Смирнова", "type": "PERSON"}]))
+        if "Ромашка" in user:
+            return 200, _chat_body(json.dumps([{"text": "Ромашка", "type": "ORG"}]))
+        return 200, _chat_body(json.dumps([]))
+
+    with _boom_if_thread_pool_used(), _patched_post_json(_fake), _captured_stderr():
+        out = recall_spans(_TEXT, [], cfg)
+
+    assert len(calls) == 3
+    texts = {s.text for s in out}
+    assert "Смирнова" in texts
+    assert "Ромашка" in texts
 
 
 if __name__ == "__main__":

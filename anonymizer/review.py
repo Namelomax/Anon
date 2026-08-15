@@ -66,6 +66,7 @@ Design contract, mirroring ``llm.py``:
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import re
@@ -324,6 +325,19 @@ class ReviewConfig:
             value is located by an exact substring search over the ORIGINAL
             (un-chunked) text and only claims non-overlapping spots — see
             ``recall_spans``.
+        recall_concurrency: Сколько recall-кусков одного документа слать
+            ОДНОВРЕМЕННО (см. ``recall_spans``). Раньше куски шли строго
+            последовательно: на реальном документе 73000 символов это 7
+            чат-вызовов подряд по ~12 с каждый — почти 84 с только на recall,
+            хотя пул ``http_pool.MAX_INFLIGHT`` держит 24 одновременных
+            чат-слота, и recall-стадия ОДНОГО документа занимала из них ровно
+            один. Значение НЕ поднято выше 4: этот пул общий на ВСЕ
+            параллельно обрабатываемые документы (см. докстринг
+            ``http_pool``, "24 x конкурентно"), и recall-стадия одного
+            документа не должна забирать себе заметную долю пула, пока рядом
+            обрабатываются другие документы — иначе ускорение одного
+            документа обернётся задержкой всех остальных. ``<= 1`` сохраняет
+            прежнее строго последовательное поведение без изменений.
     """
 
     base_url: str = "http://127.0.0.1:11433/v1"
@@ -337,6 +351,7 @@ class ReviewConfig:
     batch_size: int = 35
     recall_max_tokens: int = 2000
     recall_max_chars: int = 12000
+    recall_concurrency: int = 4
     # Включает дополнительный recall-проход (см. recall_spans): один вызов LLM по
     # уже-замаскированному тексту, чтобы ДОБРАТЬ ПДн, которые детекторы пропустили.
     # По умолчанию берётся из окружения ANONYMIZER_LLM_RECALL (1/true/yes/on) —
@@ -1242,6 +1257,15 @@ def recall_spans(
     уровня "куска": она пробрасывается наружу как есть, а не превращается в
     предупреждение — вызывающий код должен узнать об отмене, а не получить
     частичный "успешный" результат.
+
+    Куски отправляются ОДНОВРЕМЕННО (``cfg.recall_concurrency``, по умолчанию
+    4 — см. ``ReviewConfig.recall_concurrency``), если их больше одного;
+    иначе (в т.ч. при ``recall_concurrency <= 1``) — строго последовательно,
+    как раньше. Результаты собираются по ИНДЕКСУ куска, а не по порядку
+    завершения запроса: слияние (дедуп ``(value, type)`` по first-seen)
+    обходит результаты в порядке кусков документа, поэтому итоговый список
+    не зависит от того, какой из параллельных запросов ответил первым —
+    тот же порядок, что и у строго последовательного прохода.
     """
     if not spans and not text.strip():
         return []
@@ -1265,21 +1289,65 @@ def recall_spans(
     seen_pairs: set[tuple[str, str]] = set()
     ok_chunks = 0
     failed_chunks = 0
-    for _offset, chunk in chunks:
-        try:
-            chunk_found = _ask_recall(chunk, cfg)
-        except Cancelled:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            failed_chunks += 1
-            print(f"[recall] LLM-запрос упал: {exc}", file=sys.stderr)
-            continue
-        ok_chunks += 1
-        for pair in chunk_found:
-            if pair in seen_pairs:  # дубликат из другого куска — учли один раз
+
+    if cfg.recall_concurrency > 1 and len(chunks) > 1:
+        # Куски одного документа — параллельно, но их не больше
+        # cfg.recall_concurrency сразу: чат-пул общий на ВСЕ одновременно
+        # обрабатываемые документы (http_pool.MAX_INFLIGHT, 24 слота), и
+        # recall-стадия одного документа не должна забирать себе заметную
+        # долю пула — см. ReviewConfig.recall_concurrency.
+        results: list[list[tuple[str, str]] | Exception] = [None] * len(chunks)  # type: ignore[list-item]
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=cfg.recall_concurrency
+        ) as pool:
+            future_to_index = {}
+            for i, (_offset, chunk) in enumerate(chunks):
+                # run_in_context, НЕ pool.submit напрямую — обычный submit
+                # не копирует contextvars в поток-воркер, и usage_log
+                # потеряет request_id (см. usage_log.run_in_context и
+                # идентичный приём в llm.py / gliner_remote.py).
+                future_to_index[usage_log.run_in_context(pool, _ask_recall, chunk, cfg)] = i
+            for future in future_to_index:
+                index = future_to_index[future]
+                try:
+                    results[index] = future.result()
+                except Cancelled:
+                    # Пробрасываем как есть — см. докстринг recall_spans.
+                    # Остальные future's с `with` уже дожидаются завершения
+                    # (ThreadPoolExecutor.__exit__ ждёт весь пул), это не
+                    # обрывает уже запущенные HTTP-запросы на середине.
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    results[index] = exc
+        # Слияние — СТРОГО по индексу куска (порядку в документе), а не по
+        # порядку завершения запроса: см. докстринг recall_spans.
+        for result in results:
+            if isinstance(result, Exception):
+                failed_chunks += 1
+                print(f"[recall] LLM-запрос упал: {result}", file=sys.stderr)
                 continue
-            seen_pairs.add(pair)
-            found.append(pair)
+            ok_chunks += 1
+            for pair in result:
+                if pair in seen_pairs:  # дубликат из другого куска — учли один раз
+                    continue
+                seen_pairs.add(pair)
+                found.append(pair)
+    else:
+        for _offset, chunk in chunks:
+            try:
+                chunk_found = _ask_recall(chunk, cfg)
+            except Cancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                failed_chunks += 1
+                print(f"[recall] LLM-запрос упал: {exc}", file=sys.stderr)
+                continue
+            ok_chunks += 1
+            for pair in chunk_found:
+                if pair in seen_pairs:  # дубликат из другого куска — учли один раз
+                    continue
+                seen_pairs.add(pair)
+                found.append(pair)
 
     if ok_chunks == 0:
         if warnings is not None:
