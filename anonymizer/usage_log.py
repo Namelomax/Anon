@@ -48,6 +48,19 @@ GLiNER ``gliner_remote.py``). Именно эта строка — биллин�
 usage.jsonl``. Цены — ``ANONYMIZER_PRICE_IN_PER_MTOK`` / ``_OUT_`` (₽ за 1M
 токенов), по умолчанию тариф Selectel Gemma 4 31B.
 
+``cost_rub`` в ``request_total`` — ПОЛНАЯ стоимость документа: LLM
+(``llm_detect`` + все слои ревью) плюс удалённый GLiNER, который биллится тем
+же провайдером по токенам, но не присылает ``usage``-блок в HTTP-ответе.
+Токены LLM — ИЗМЕРЕНЫ (``prompt_tokens``/``completion_tokens`` из ответа);
+токены GLiNER — ОЦЕНЕНЫ из ``chars``, которые ``record_call`` уже получает на
+каждый вызов: ``chars / ANONYMIZER_CHARS_PER_TOKEN +
+ANONYMIZER_GLINER_TOKENS_PER_CALL`` (см. константы ``CHARS_PER_TOKEN`` /
+``GLINER_TOKENS_PER_CALL`` / ``PRICE_GLINER_PER_MTOK`` ниже). Оценка попадает
+ТОЛЬКО в отдельное поле ``gliner_tokens_est`` и в ``cost_rub_gliner`` —
+``prompt_tokens``/``tokens_by_kind`` остаются чисто измеренными, GLiNER там
+всегда 0. ``cost_rub_llm``/``cost_rub_gliner`` — та же ``cost_rub``,
+разложенная на измеренную и оценённую часть, чтобы разбивка не терялась.
+
 ГЛАВНОЕ ПРАВИЛО МОДУЛЯ: сбой логирования НИКОГДА не должен ронять запрос
 анонимизации. Каждая публичная функция обёрнута в максимально широкий
 ``try/except`` и в худшем случае печатает одну строку предупреждения в
@@ -95,6 +108,31 @@ LOG_PATH: Path = Path(os.getenv("ANONYMIZER_USAGE_LOG") or _default_log_path())
 PRICE_IN_PER_MTOK: float = float(os.getenv("ANONYMIZER_PRICE_IN_PER_MTOK", "14.79"))
 PRICE_OUT_PER_MTOK: float = float(os.getenv("ANONYMIZER_PRICE_OUT_PER_MTOK", "43.15"))
 
+# ₽ за 1M токенов удалённого GLiNER (gliner_remote.py) — тот же провайдер, тот
+# же биллинг по токенам, но HTTP-ответ GLiNER не несёт usage-блока (см. ниже
+# про CHARS_PER_TOKEN/GLINER_TOKENS_PER_CALL), поэтому цена нужна отдельно от
+# цены LLM. Дефолт — цена ВХОДНЫХ токенов LLM: консервативный выбор, малая
+# модель классификации вряд ли стоит дороже входа большой.
+PRICE_GLINER_PER_MTOK: float = float(
+    os.getenv("ANONYMIZER_PRICE_GLINER_PER_MTOK", str(PRICE_IN_PER_MTOK))
+)
+
+# Число символов на один токен GLiNER — калибровочный коэффициент, а НЕ
+# измеренная величина: GLiNER-эндпоинт не возвращает usage/prompt_tokens,
+# поэтому его токены оцениваются из chars, которые record_call уже получает
+# на каждый вызов. Дефолт 2.27 измерен на этом корпусе: собственные
+# prompt_tokens LLM минус системные промпты, делённые на отправленные
+# символы, на документе 73 321 символ. Перекалибровать по первому реальному
+# счёту провайдера — единственная причина существования этой переменной.
+CHARS_PER_TOKEN: float = float(os.getenv("ANONYMIZER_CHARS_PER_TOKEN", "2.27"))
+
+# Токены накладных расходов НА КАЖДЫЙ вызов GLiNER — список меток
+# (person/first name/last name/nickname/location/address/organization) плюс
+# JSON-обвязка запроса едут в КАЖДОМ запросе независимо от длины текста. Это
+# не мелочь для округления: на 30-страничном документе это 7120 токенов из
+# 39381 токена GLiNER, то есть 18% всех токенов GLiNER. Дефолт 20.
+GLINER_TOKENS_PER_CALL: float = float(os.getenv("ANONYMIZER_GLINER_TOKENS_PER_CALL", "20"))
+
 # Режим построчного логирования отдельных вызовов (см. докстринг модуля):
 # "errors" (дефолт) — строка только для ok=False; "all" — строка для каждого
 # вызова (старое поведение, для отладки); "off" — строка не пишется никогда,
@@ -114,9 +152,21 @@ _current_request: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 
 class _Accumulator:
     """Итоги ОДНОГО активного ``request_context`` — накапливается со всех
-    потоков, поэтому изменяется только под ``_ACC_LOCK``."""
+    потоков, поэтому изменяется только под ``_ACC_LOCK``.
 
-    __slots__ = ("prompt_tokens", "completion_tokens", "calls", "tokens_by_kind", "seconds_by_kind")
+    ``prompt_tokens``/``completion_tokens``/``tokens_by_kind`` — ИЗМЕРЕННЫЕ
+    значения, взятые как есть из ``usage``-блока ответа провайдера (LLM
+    детекция и ревью присылают его в HTTP-ответе). ``gliner_tokens_est`` —
+    ОЦЕНКА: GLiNER не присылает usage-блок вообще, поэтому его токены
+    оцениваются из ``chars`` каждого вызова (см. ``CHARS_PER_TOKEN`` /
+    ``GLINER_TOKENS_PER_CALL`` выше). Оценка копится ОТДЕЛЬНО и никогда не
+    попадает в ``prompt_tokens``/``tokens_by_kind`` — те обязаны оставаться
+    чисто измеренными числами."""
+
+    __slots__ = (
+        "prompt_tokens", "completion_tokens", "calls", "tokens_by_kind",
+        "seconds_by_kind", "gliner_tokens_est",
+    )
 
     def __init__(self) -> None:
         self.prompt_tokens = 0
@@ -126,6 +176,9 @@ class _Accumulator:
         # kind -> сумма seconds по всем вызовам этого kind. НЕ wall-clock —
         # см. докстринг модуля про параллелизм ThreadPoolExecutor.
         self.seconds_by_kind: dict[str, float] = {}
+        # ОЦЕНКА (не измерение) суммарных токенов GLiNER по всем вызовам
+        # kind=="gliner" — см. докстринг класса выше.
+        self.gliner_tokens_est: float = 0.0
 
 
 # request_id -> _Accumulator, только для документов, чья обработка идёт
@@ -173,6 +226,7 @@ def _append(record: dict) -> None:
 
 def _accumulate(
     request_id: str | None, kind: str, prompt_tokens: int, completion_tokens: int, seconds: float,
+    chars: int = 0,
 ) -> None:
     if not request_id:
         return
@@ -189,6 +243,12 @@ def _accumulate(
             tk["completion_tokens"] += completion_tokens
             # Сумма seconds по kind — НЕ wall-clock, см. докстринг модуля.
             acc.seconds_by_kind[kind] = acc.seconds_by_kind.get(kind, 0.0) + seconds
+            # GLiNER не присылает usage-блок — токены ОЦЕНИВАЮТСЯ из chars
+            # этого конкретного вызова, см. CHARS_PER_TOKEN/
+            # GLINER_TOKENS_PER_CALL и докстринг _Accumulator. Оценка идёт в
+            # отдельное поле, НЕ в prompt_tokens/tokens_by_kind.
+            if kind == "gliner":
+                acc.gliner_tokens_est += chars / CHARS_PER_TOKEN + GLINER_TOKENS_PER_CALL
     except Exception as exc:  # noqa: BLE001
         print(f"[usage_log] учёт итогов запроса не удался: {exc}", file=sys.stderr)
 
@@ -236,7 +296,7 @@ def record_call(
 
     # (1) Агрегат request_total — безусловно, для любого исхода вызова
     # (включая неудачные — их время тоже накапливается в seconds_by_kind).
-    _accumulate(request_id, kind, prompt_tokens, completion_tokens, seconds)
+    _accumulate(request_id, kind, prompt_tokens, completion_tokens, seconds, chars)
 
     # (2) Отдельная per-call строка — только если режим её требует.
     if USAGE_LOG_CALLS == "off":
@@ -258,22 +318,41 @@ def record_call(
     _append(record)
 
 
-def _cost_rub(prompt_tokens: int, completion_tokens: int) -> float:
+def _cost_rub_llm(prompt_tokens: int, completion_tokens: int) -> float:
+    """Стоимость ИЗМЕРЕННЫХ токенов LLM (детекция + все слои ревью) — прямо
+    из ``usage``-блока ответа провайдера, без оценок."""
     cost = prompt_tokens / 1e6 * PRICE_IN_PER_MTOK + completion_tokens / 1e6 * PRICE_OUT_PER_MTOK
     return round(cost, 4)
+
+
+def _cost_rub_gliner(gliner_tokens_est: float) -> float:
+    """Стоимость ОЦЕНЁННЫХ токенов GLiNER (см. ``CHARS_PER_TOKEN`` /
+    ``GLINER_TOKENS_PER_CALL``) — не измерена, но нужна, чтобы полная
+    стоимость документа не занижалась примерно на 19% входного объёма."""
+    return round(gliner_tokens_est / 1e6 * PRICE_GLINER_PER_MTOK, 4)
 
 
 @dataclass
 class RequestTotals:
     """Итоги одного документа. Возвращается ``request_context`` как объект
     ``with``-блока; поля заполняются на ВЫХОДЕ из блока (см. ``as_response_dict``
-    — используется server.py для поля ``usage`` в HTTP-ответе)."""
+    — используется server.py для поля ``usage`` в HTTP-ответе).
+
+    ``cost_rub`` — ПОЛНАЯ стоимость документа (LLM + GLiNER), сверяемая со
+    счётом провайдера. ``cost_rub_llm``/``cost_rub_gliner`` — та же сумма,
+    разложенная на измеренную (LLM) и оценённую (GLiNER, см.
+    ``gliner_tokens_est``) части, чтобы разбивка оставалась видимой."""
 
     request_id: str
     prompt_tokens: int = 0
     completion_tokens: int = 0
     seconds: float = 0.0
     cost_rub: float = 0.0
+    cost_rub_llm: float = 0.0
+    cost_rub_gliner: float = 0.0
+    # ОЦЕНКА (не измерение) суммарных токенов GLiNER по всем вызовам
+    # kind=="gliner" за документ — см. докстринг _Accumulator/модуля.
+    gliner_tokens_est: int = 0
     calls: dict = field(default_factory=dict)  # kind -> количество вызовов
     # kind -> суммарные seconds по всем вызовам этого kind. НЕ wall-clock —
     # вызовы идут параллельно (ThreadPoolExecutor), поэтому сумма по всем
@@ -286,6 +365,9 @@ class RequestTotals:
             "completion_tokens": self.completion_tokens,
             "seconds": self.seconds,
             "cost_rub": self.cost_rub,
+            "cost_rub_llm": self.cost_rub_llm,
+            "cost_rub_gliner": self.cost_rub_gliner,
+            "gliner_tokens_est": self.gliner_tokens_est,
             "calls": dict(self.calls),
             # НЕ wall-clock — см. докстринг модуля / поле RequestTotals.seconds_by_kind.
             "seconds_by_kind": dict(self.seconds_by_kind),
@@ -318,7 +400,16 @@ def request_context(filename: str | None = None, chars: int = 0, stages: dict | 
             acc = _ACTIVE.pop(request_id, None) or _Accumulator()
 
         try:
-            cost_rub = _cost_rub(acc.prompt_tokens, acc.completion_tokens)
+            # ИЗМЕРЕНО: prompt_tokens/completion_tokens — прямо из usage LLM.
+            cost_rub_llm = _cost_rub_llm(acc.prompt_tokens, acc.completion_tokens)
+            # ОЦЕНЕНО: GLiNER не присылает usage, gliner_tokens_est накоплен
+            # из chars каждого вызова (см. _accumulate/CHARS_PER_TOKEN).
+            gliner_tokens_est = round(acc.gliner_tokens_est)
+            cost_rub_gliner = _cost_rub_gliner(acc.gliner_tokens_est)
+            # ПОЛНАЯ стоимость документа — то, что сверяется со счётом
+            # провайдера (см. докстринг RequestTotals): LLM (измерено) +
+            # GLiNER (оценка).
+            cost_rub = round(cost_rub_llm + cost_rub_gliner, 4)
             pages = round(chars / 1800, 1) if chars else 0.0
 
             seconds_by_kind = {k: round(v, 3) for k, v in acc.seconds_by_kind.items()}
@@ -327,6 +418,9 @@ def request_context(filename: str | None = None, chars: int = 0, stages: dict | 
             totals.completion_tokens = acc.completion_tokens
             totals.seconds = elapsed
             totals.cost_rub = cost_rub
+            totals.cost_rub_llm = cost_rub_llm
+            totals.cost_rub_gliner = cost_rub_gliner
+            totals.gliner_tokens_est = gliner_tokens_est
             totals.calls = dict(acc.calls)
             totals.seconds_by_kind = seconds_by_kind
 
@@ -339,6 +433,9 @@ def request_context(filename: str | None = None, chars: int = 0, stages: dict | 
                 "pages": pages,
                 "seconds": elapsed,
                 "calls": dict(acc.calls),
+                # ИЗМЕРЕННЫЕ токены по kind (usage LLM) — GLiNER здесь ВСЕГДА
+                # 0/0, оценка в tokens_by_kind никогда не попадает, см.
+                # gliner_tokens_est ниже.
                 "tokens_by_kind": {k: dict(v) for k, v in acc.tokens_by_kind.items()},
                 # Суммарные (не wall-clock!) seconds по kind — см. докстринг
                 # модуля: сумма по всем kind обычно ПРЕВЫШАЕТ elapsed выше,
@@ -346,7 +443,15 @@ def request_context(filename: str | None = None, chars: int = 0, stages: dict | 
                 "seconds_by_kind": seconds_by_kind,
                 "prompt_tokens_total": acc.prompt_tokens,
                 "completion_tokens_total": acc.completion_tokens,
+                # ОЦЕНКА (не измерение) суммарных токенов GLiNER за документ —
+                # см. CHARS_PER_TOKEN/GLINER_TOKENS_PER_CALL выше.
+                "gliner_tokens_est": gliner_tokens_est,
+                # ПОЛНАЯ стоимость документа (LLM измерено + GLiNER оценка) —
+                # сверяется со счётом провайдера. cost_rub_llm/cost_rub_gliner
+                # — та же сумма, разложенная на составляющие.
                 "cost_rub": cost_rub,
+                "cost_rub_llm": cost_rub_llm,
+                "cost_rub_gliner": cost_rub_gliner,
                 "stages": dict(stages or {}),
             })
         except Exception as exc:  # noqa: BLE001
@@ -442,7 +547,12 @@ def _summarize(records: list[dict]) -> dict:
     pages = sum(float(r.get("pages") or 0) for r in records)
     prompt_tokens = sum(int(r.get("prompt_tokens_total") or 0) for r in records)
     completion_tokens = sum(int(r.get("completion_tokens_total") or 0) for r in records)
+    gliner_tokens_est = sum(int(r.get("gliner_tokens_est") or 0) for r in records)
     cost_rub = sum(float(r.get("cost_rub") or 0) for r in records)
+    # cost_rub_llm/cost_rub_gliner отсутствуют в старых строках лога
+    # (до появления этой фичи) — фолбэк на 0, как и остальные поля здесь.
+    cost_rub_llm = sum(float(r.get("cost_rub_llm") or 0) for r in records)
+    cost_rub_gliner = sum(float(r.get("cost_rub_gliner") or 0) for r in records)
     seconds = sum(float(r.get("seconds") or 0) for r in records)
     total_tokens = prompt_tokens + completion_tokens
     return {
@@ -450,7 +560,13 @@ def _summarize(records: list[dict]) -> dict:
         "pages": round(pages, 1),
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
+        "gliner_tokens_est": gliner_tokens_est,
+        # ПОЛНАЯ стоимость (LLM измерено + GLiNER оценка) — см. докстринг
+        # RequestTotals/request_context. cost_rub_llm/cost_rub_gliner — та же
+        # сумма, разложенная на составляющие.
         "cost_rub": round(cost_rub, 4),
+        "cost_rub_llm": round(cost_rub_llm, 4),
+        "cost_rub_gliner": round(cost_rub_gliner, 4),
         "avg_seconds_per_page": round(seconds / pages, 3) if pages else 0.0,
         "avg_tokens_per_page": round(total_tokens / pages, 1) if pages else 0.0,
         # Разбивка по kind (gliner/llm_detect/review_*): calls/seconds/

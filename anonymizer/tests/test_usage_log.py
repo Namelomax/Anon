@@ -54,6 +54,36 @@ def _patched_prices(price_in: float, price_out: float):
 
 
 @contextmanager
+def _patched_gliner_settings(
+    price_gliner: float | None = None,
+    chars_per_token: float | None = None,
+    tokens_per_call: float | None = None,
+):
+    """Patch the three GLiNER cost-estimation knobs (module constants, same
+    monkeypatch-the-module-attribute convention as ``_patched_prices`` above).
+    Any argument left ``None`` keeps the current value untouched."""
+    orig = (
+        usage_log.PRICE_GLINER_PER_MTOK,
+        usage_log.CHARS_PER_TOKEN,
+        usage_log.GLINER_TOKENS_PER_CALL,
+    )
+    if price_gliner is not None:
+        usage_log.PRICE_GLINER_PER_MTOK = price_gliner
+    if chars_per_token is not None:
+        usage_log.CHARS_PER_TOKEN = chars_per_token
+    if tokens_per_call is not None:
+        usage_log.GLINER_TOKENS_PER_CALL = tokens_per_call
+    try:
+        yield
+    finally:
+        (
+            usage_log.PRICE_GLINER_PER_MTOK,
+            usage_log.CHARS_PER_TOKEN,
+            usage_log.GLINER_TOKENS_PER_CALL,
+        ) = orig
+
+
+@contextmanager
 def _patched_calls_mode(mode: str):
     """Force ANONYMIZER_USAGE_LOG_CALLS's resolved value (errors/all/off) for
     the duration of the block, restoring the original module attribute on
@@ -444,6 +474,202 @@ def test_usage_summary_aggregates_by_stage_across_documents_tolerating_malformed
     assert by_stage["llm_detect"] == {
         "calls": 1, "seconds": 0.4, "avg_seconds": 0.4, "tokens": 15,
     }
+
+
+def test_gliner_tokens_estimated_from_chars_plus_overhead():
+    """gliner_tokens_est must equal chars/CHARS_PER_TOKEN + GLINER_TOKENS_PER_CALL
+    for a single gliner call, using the module's default calibration knobs."""
+    with _temp_log_path() as log_path:
+        with usage_log.request_context(chars=100) as totals:
+            usage_log.record_call("gliner", seconds=0.05, chars=227, ok=True)
+        lines = _read_lines(log_path)
+
+    # 227 chars / 2.27 chars-per-token (default) = 100 tokens, + 20 overhead
+    # (default) = 120.
+    expected = round(227 / usage_log.CHARS_PER_TOKEN + usage_log.GLINER_TOKENS_PER_CALL)
+    assert expected == 120
+    assert totals.gliner_tokens_est == 120
+    summary = next(l for l in lines if l["kind"] == "request_total")
+    assert summary["gliner_tokens_est"] == 120
+
+
+def test_gliner_tokens_estimate_sums_across_multiple_calls():
+    """The per-call overhead is paid on EVERY call, not once per document —
+    two calls must accumulate two overheads, not one."""
+    with _temp_log_path() as log_path:
+        with usage_log.request_context(chars=100) as totals:
+            usage_log.record_call("gliner", seconds=0.05, chars=227, ok=True)
+            usage_log.record_call("gliner", seconds=0.05, chars=454, ok=True)
+        lines = _read_lines(log_path)
+
+    # (227/2.27 + 20) + (454/2.27 + 20) = (100+20) + (200+20) = 340.
+    assert totals.gliner_tokens_est == 340
+    summary = next(l for l in lines if l["kind"] == "request_total")
+    assert summary["gliner_tokens_est"] == 340
+
+
+def test_cost_rub_equals_llm_plus_gliner_split():
+    """cost_rub in both the response object and the logged summary must
+    equal the sum of the LLM and GLiNER components — the whole point of the
+    split fields is that they reconcile to the total."""
+    with _temp_log_path() as log_path, _patched_prices(10.0, 20.0), _patched_gliner_settings(
+        price_gliner=5.0, chars_per_token=2.0, tokens_per_call=10,
+    ):
+        with usage_log.request_context(chars=1000) as totals:
+            usage_log.record_call("llm_detect", prompt_tokens=1_000_000, completion_tokens=500_000, seconds=1)
+            usage_log.record_call("gliner", seconds=0.1, chars=1000, ok=True)
+        lines = _read_lines(log_path)
+
+    # LLM: 1M in @10/Mtok = 10.0; 0.5M out @20/Mtok = 10.0 -> 20.0.
+    assert totals.cost_rub_llm == 20.0
+    # GLiNER: 1000 chars / 2.0 chars-per-token + 10 overhead = 510 tokens,
+    # @5/Mtok -> 0.00255.
+    assert totals.gliner_tokens_est == 510
+    assert totals.cost_rub_gliner == round(510 / 1e6 * 5.0, 4)
+    assert totals.cost_rub == round(totals.cost_rub_llm + totals.cost_rub_gliner, 4)
+
+    summary = next(l for l in lines if l["kind"] == "request_total")
+    assert summary["cost_rub_llm"] == totals.cost_rub_llm
+    assert summary["cost_rub_gliner"] == totals.cost_rub_gliner
+    assert summary["cost_rub"] == totals.cost_rub
+
+    response = totals.as_response_dict()
+    assert response["cost_rub"] == totals.cost_rub
+    assert response["cost_rub_llm"] == totals.cost_rub_llm
+    assert response["cost_rub_gliner"] == totals.cost_rub_gliner
+    assert response["gliner_tokens_est"] == totals.gliner_tokens_est
+
+
+def test_all_three_gliner_env_knobs_change_the_result():
+    """Each of the three calibration knobs (price, chars-per-token, per-call
+    overhead) must independently move gliner_tokens_est/cost_rub_gliner —
+    proving all three are actually wired in, not just one of them."""
+    def _run():
+        with _temp_log_path():
+            with usage_log.request_context(chars=1000) as totals:
+                usage_log.record_call("gliner", seconds=0.1, chars=1000, ok=True)
+        return totals
+
+    with _patched_gliner_settings():
+        baseline = _run()
+
+    with _patched_gliner_settings(chars_per_token=1.0):
+        moved_chars_per_token = _run()
+    assert moved_chars_per_token.gliner_tokens_est != baseline.gliner_tokens_est
+
+    with _patched_gliner_settings(tokens_per_call=999):
+        moved_overhead = _run()
+    assert moved_overhead.gliner_tokens_est != baseline.gliner_tokens_est
+
+    # Unrounded token estimate at default settings (1000 chars), matching
+    # what _cost_rub_gliner actually multiplies by internally (the
+    # UNROUNDED accumulator value, not the rounded gliner_tokens_est field).
+    unrounded_tokens = 1000 / usage_log.CHARS_PER_TOKEN + usage_log.GLINER_TOKENS_PER_CALL
+    tripled_price = usage_log.PRICE_GLINER_PER_MTOK * 3
+    with _patched_gliner_settings(price_gliner=tripled_price):
+        moved_price = _run()
+    # Price does not move the token estimate, only the cost derived from it.
+    assert moved_price.gliner_tokens_est == baseline.gliner_tokens_est
+    assert moved_price.cost_rub_gliner != baseline.cost_rub_gliner
+    assert moved_price.cost_rub_gliner == round(unrounded_tokens / 1e6 * tripled_price, 4)
+
+
+def test_document_with_no_gliner_calls_has_zero_gliner_cost_and_unchanged_total():
+    """A document that never calls GLiNER (e.g. ner stage disabled) must not
+    have GLiNER cost/tokens fabricated out of thin air — cost_rub_gliner and
+    gliner_tokens_est stay 0, and cost_rub equals the LLM-only cost exactly
+    as it did before this feature existed."""
+    with _temp_log_path() as log_path:
+        with usage_log.request_context(chars=1000) as totals:
+            usage_log.record_call("llm_detect", prompt_tokens=1000, completion_tokens=200, seconds=0.1)
+        lines = _read_lines(log_path)
+
+    assert totals.gliner_tokens_est == 0
+    assert totals.cost_rub_gliner == 0
+    assert totals.cost_rub == totals.cost_rub_llm
+
+    summary = next(l for l in lines if l["kind"] == "request_total")
+    assert summary["gliner_tokens_est"] == 0
+    assert summary["cost_rub_gliner"] == 0
+    assert summary["cost_rub"] == summary["cost_rub_llm"]
+    # And the measured per-kind tokens contain no gliner entry at all, since
+    # no gliner call was ever made.
+    assert "gliner" not in summary["tokens_by_kind"]
+
+
+def test_gliner_estimate_never_leaks_into_measured_token_fields():
+    """The estimate lives ONLY in gliner_tokens_est/cost_rub_gliner. The
+    measured fields (prompt_tokens/completion_tokens totals and
+    tokens_by_kind) must keep holding zero for gliner — a reviewer must never
+    be able to mistake the estimate for a measured value."""
+    with _temp_log_path() as log_path:
+        with usage_log.request_context(chars=1000) as totals:
+            usage_log.record_call("llm_detect", prompt_tokens=100, completion_tokens=50, seconds=0.1)
+            usage_log.record_call("gliner", seconds=0.05, chars=5000, ok=True)
+        lines = _read_lines(log_path)
+
+    # The gliner call estimated a large number of tokens...
+    assert totals.gliner_tokens_est > 0
+    # ...yet the measured totals only reflect the llm_detect call.
+    assert totals.prompt_tokens == 100
+    assert totals.completion_tokens == 50
+
+    summary = next(l for l in lines if l["kind"] == "request_total")
+    assert summary["prompt_tokens_total"] == 100
+    assert summary["completion_tokens_total"] == 50
+    assert summary["tokens_by_kind"]["gliner"] == {"prompt_tokens": 0, "completion_tokens": 0}
+
+
+def test_real_30_page_document_shape_lands_near_expected_total():
+    """Reproduces the real measured shape from the task spec: calls =
+    {"gliner": 356, "llm_detect": 54, "review_list": 1, "review_adjacent": 1,
+    "review_recall": 1}, 160681 prompt tokens + 2321 completion tokens of
+    LLM, 73321 characters of text, cost_rub (LLM-only, pre-feature) 2.4766.
+    With GLiNER folded in at default settings (PRICE_GLINER_PER_MTOK ==
+    PRICE_IN_PER_MTOK == 14.79, CHARS_PER_TOKEN 2.27, overhead 20/call) the
+    total should land near 3.06 rubles."""
+    with _temp_log_path() as log_path:
+        with usage_log.request_context(filename="30page.docx", chars=73_321) as totals:
+            # All LLM prompt/completion tokens on the first llm_detect call;
+            # the remaining 53 llm_detect + 3 review calls carry 0 tokens —
+            # cost_rub_llm only depends on the SUM, not the distribution.
+            usage_log.record_call(
+                "llm_detect", prompt_tokens=160_681, completion_tokens=2_321, seconds=1.0, ok=True,
+            )
+            for _ in range(53):
+                usage_log.record_call("llm_detect", seconds=0.1, ok=True)
+            usage_log.record_call("review_list", seconds=0.1, ok=True)
+            usage_log.record_call("review_adjacent", seconds=0.1, ok=True)
+            usage_log.record_call("review_recall", seconds=0.1, ok=True)
+            # All 73321 characters on the first gliner call; the remaining
+            # 355 calls carry 0 chars but each still pays the per-call
+            # overhead (gliner_tokens_est depends on call COUNT too).
+            usage_log.record_call("gliner", seconds=0.05, chars=73_321, ok=True)
+            for _ in range(355):
+                usage_log.record_call("gliner", seconds=0.05, chars=0, ok=True)
+        lines = _read_lines(log_path)
+
+    assert totals.calls == {
+        "gliner": 356, "llm_detect": 54,
+        "review_list": 1, "review_adjacent": 1, "review_recall": 1,
+    }
+    assert totals.prompt_tokens == 160_681
+    assert totals.completion_tokens == 2_321
+    assert totals.cost_rub_llm == 2.4766  # matches the spec's pre-feature cost_rub exactly
+
+    # 73321 chars / 2.27 + 356 * 20 overhead = 32300 + 7120 = 39420 tokens.
+    assert totals.gliner_tokens_est == 39_420
+    assert totals.cost_rub_gliner == round(39_420 / 1e6 * usage_log.PRICE_GLINER_PER_MTOK, 4)
+
+    assert totals.cost_rub == round(totals.cost_rub_llm + totals.cost_rub_gliner, 4)
+    # "near 3.06 rubles" per the task spec.
+    assert 3.0 < totals.cost_rub < 3.15
+
+    summary = next(l for l in lines if l["kind"] == "request_total")
+    assert summary["cost_rub"] == totals.cost_rub
+    assert summary["cost_rub_llm"] == totals.cost_rub_llm
+    assert summary["cost_rub_gliner"] == totals.cost_rub_gliner
+    assert summary["gliner_tokens_est"] == totals.gliner_tokens_est
 
 
 def test_usage_summary_missing_log_file_returns_zeros():

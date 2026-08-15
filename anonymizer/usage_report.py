@@ -18,9 +18,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from anonymizer import usage_log  # noqa: E402
 
+# cost_rub — ПОЛНАЯ стоимость документа (LLM + GLiNER), сверяемая со счётом
+# провайдера; cost_rub_llm/cost_rub_gliner — та же сумма, разложенная на
+# измеренную (LLM, из usage-блока) и оценённую (GLiNER, из chars — HTTP-ответ
+# GLiNER не несёт usage-блока вообще) части. gliner_tokens_est — ОЦЕНКА, не
+# измерение, см. docstring anonymizer/usage_log.py.
 _COLUMNS = (
-    "requests", "pages", "prompt_tokens", "completion_tokens",
-    "cost_rub", "avg_seconds_per_page", "avg_tokens_per_page",
+    "requests", "pages", "prompt_tokens", "completion_tokens", "gliner_tokens_est",
+    "cost_rub_llm", "cost_rub_gliner", "cost_rub", "avg_seconds_per_page", "avg_tokens_per_page",
 )
 
 # Колонки таблицы разбивки по стадиям (usage_log._by_stage): seconds здесь —
