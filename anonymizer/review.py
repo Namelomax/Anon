@@ -286,8 +286,11 @@ class ReviewConfig:
             ВНИМАНИЕ: LM Studio отвергает запрос с HTTP 400, если
             ``prompt_tokens + max_tokens`` превышает длину загруженного
             контекста. При 16000 здесь модель должна быть загружена с
-            контекстом не меньше 32k, иначе recall-проход (он шлёт весь
-            замаскированный документ) будет падать с 400.
+            контекстом не меньше 32k. Recall-проход эту цифру больше НЕ
+            использует — у него отдельный, маленький бюджет
+            ``recall_max_tokens`` (см. ниже) именно потому, что раньше он
+            делил этот бюджет с ревью и переполнял контекст на каждом
+            реальном документе.
         temperature: 0 for deterministic verdicts.
         timeout: Per-request seconds.
         api_key: Sent as Bearer; ignored by LM Studio/Ollama.
@@ -297,6 +300,30 @@ class ReviewConfig:
         batch_size: Deprecated / ignored. The reviewer now sends the whole
             candidate list in a single request (see ``review_spans``); kept
             only so existing configs don't break.
+        recall_max_tokens: Output budget for the recall pass (``_ask_recall``),
+            deliberately SEPARATE from ``max_tokens`` above. Incident: recall's
+            reply is a short list of missed values (a few hundred tokens at
+            most, same shape as the short-numbers/adjacent sub-passes, which
+            already hardcode 2000 for the same reason), yet recall used to
+            share ``max_tokens`` (16000) as its OUTPUT reservation while also
+            being the ONLY call site that sends the whole document as input —
+            on a real transcript that produced ``16000 + 16769 = 32769``
+            prompt+output tokens against a 32768-token context, a fixed
+            HTTP 400 on EVERY real document (``recall`` never actually ran,
+            only ever validated on toy inputs). ``max_tokens`` itself is left
+            untouched — it is the main review pass's batched-candidate budget,
+            a separate concern — and this field is scoped to recall only.
+        recall_max_chars: Recall now chunks the already-placeholder-spliced
+            document (see ``recall_spans``) instead of sending it whole — the
+            other missing half of the same incident: even with its own output
+            budget, recall was still the only layer with no input chunking at
+            all (LLM detection chunks at ``LLMConfig.max_chars``, GLiNER at
+            800 chars), so a large enough document alone can still overflow
+            the context. Chunking recall is safe because placement of found
+            values never depends on which chunk they came from: each returned
+            value is located by an exact substring search over the ORIGINAL
+            (un-chunked) text and only claims non-overlapping spots — see
+            ``recall_spans``.
     """
 
     base_url: str = "http://127.0.0.1:11433/v1"
@@ -308,6 +335,8 @@ class ReviewConfig:
     extra_body: dict = field(default_factory=dict)
     context_chars: int = 60
     batch_size: int = 35
+    recall_max_tokens: int = 2000
+    recall_max_chars: int = 12000
     # Включает дополнительный recall-проход (см. recall_spans): один вызов LLM по
     # уже-замаскированному тексту, чтобы ДОБРАТЬ ПДн, которые детекторы пропустили.
     # По умолчанию берётся из окружения ANONYMIZER_LLM_RECALL (1/true/yes/on) —
@@ -373,6 +402,18 @@ _RECALL_FAILED_MESSAGE = (
     "Не была выполнена проверка на полноту — документ не был дополнительно "
     "проверен на персональные данные, пропущенные другими слоями. Часть "
     "персональных данных могла остаться незамаскированной."
+)
+# Частичный отказ recall'а: документ теперь режется на куски (см.
+# ReviewConfig.recall_max_chars), и один сбойный кусок больше не обнуляет
+# весь слой — но если сбойных кусков несколько, часть документа всё равно
+# осталась непроверенной. В отличие от _RECALL_FAILED_MESSAGE (весь документ)
+# здесь честно говорится "часть документа", без технических деталей (номер/
+# границы куска — в stderr, не в клиентском предупреждении).
+_RECALL_PARTIAL_MESSAGE = (
+    "Проверка на полноту была выполнена только для ЧАСТИ документа — "
+    "оставшаяся часть не была дополнительно проверена на персональные "
+    "данные, пропущенные другими слоями. Персональные данные в этой части "
+    "могли остаться незамаскированными."
 )
 
 
@@ -1177,31 +1218,70 @@ def recall_spans(
     заводим новый спан только на непересекающихся местах. Модель НЕ двигает
     существующие плейсхолдеры и не переписывает текст — только называет
     пропущенные значения; расстановку делает код (безопасно от галлюцинаций
-    смещений). Fail-safe: любая ошибка LLM → пустой список (поведение не меняется).
+    смещений).
 
-    ``warnings`` — см. ``review_spans``: список, в который APPEND'ится запись,
-    если запрос к LLM реально не удался. В отличие от прочих fail-safe'ов
-    этого модуля, у recall'а провал — это НЕ "безопасно, просто перемаскировано":
-    recall — единственный слой, который ДОБАВЛЯЕТ маски на ПДн, пропущенные
-    более ранними слоями, так что его отказ означает, что этот поиск просто
-    не состоялся, а не то, что он ничего не нашёл.
+    Документ (уже со вставленными плейсхолдерами) режется на куски не длиннее
+    ``cfg.recall_max_chars`` (см. ``ReviewConfig.recall_max_chars``) — раньше
+    recall был единственным слоем без входного чанкинга и слал весь документ
+    одним сообщением, из-за чего на реальных документах ``prompt_tokens +
+    max_tokens`` стабильно переполнял контекст модели (HTTP 400 на КАЖДОМ
+    прогоне). Резка безопасна для расстановки: каждое найденное значение всё
+    равно ищется точной подстрокой в ОРИГИНАЛЬНОМ (нечанкованном) тексте и
+    занимает только непересекающееся место — из какого куска пришло значение,
+    для этой логики не имеет значения.
+
+    Fail-safe — ТЕПЕРЬ ПОКУСОЧНЫЙ: один сбойный кусок сам по себе не обнуляет
+    весь recall — результаты остальных, успешных кусков всё равно
+    возвращаются. ``warnings`` (см. ``review_spans`` про контракт списка)
+    получает ровно одну из двух записей:
+    * ``recall_failed`` — если провалились ВСЕ куски (в т.ч. случай одного
+      куска — старое поведение не изменилось): поиск не состоялся вовсе.
+    * ``recall_partial`` — если провалилась ЧАСТЬ кусков, а остальные
+      отработали: часть документа проверку прошла, часть — нет.
+    ``Cancelled`` (кооперативная отмена, см. ``llm.Cancelled``) — НЕ ошибка
+    уровня "куска": она пробрасывается наружу как есть, а не превращается в
+    предупреждение — вызывающий код должен узнать об отмене, а не получить
+    частичный "успешный" результат.
     """
     if not spans and not text.strip():
         return []
     cfg = config or ReviewConfig()
 
+    from .chunking import chunk_text
+    from .llm import Cancelled
     from .mapping import assign_placeholders
 
     ordered = sorted(spans, key=lambda s: s.start)
     _, span_ph = assign_placeholders(ordered)
     interim = _splice_placeholders(text, ordered, span_ph)
 
-    try:
-        found = _ask_recall(interim, cfg)
-    except Exception as exc:  # noqa: BLE001
-        import sys
+    chunks = chunk_text(interim, cfg.recall_max_chars)
+    if not chunks:
+        return []
 
-        print(f"[recall] LLM-запрос упал: {exc}", file=sys.stderr)
+    import sys
+
+    found: list[tuple[str, str]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    ok_chunks = 0
+    failed_chunks = 0
+    for _offset, chunk in chunks:
+        try:
+            chunk_found = _ask_recall(chunk, cfg)
+        except Cancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            failed_chunks += 1
+            print(f"[recall] LLM-запрос упал: {exc}", file=sys.stderr)
+            continue
+        ok_chunks += 1
+        for pair in chunk_found:
+            if pair in seen_pairs:  # дубликат из другого куска — учли один раз
+                continue
+            seen_pairs.add(pair)
+            found.append(pair)
+
+    if ok_chunks == 0:
         if warnings is not None:
             warnings.append(
                 {
@@ -1210,6 +1290,14 @@ def recall_spans(
                 }
             )
         return []
+    if failed_chunks:
+        if warnings is not None:
+            warnings.append(
+                {
+                    "kind": "recall_partial",
+                    "message": _RECALL_PARTIAL_MESSAGE,
+                }
+            )
 
     taken = [(s.start, s.end) for s in spans]
     out: list[Span] = []
@@ -1229,8 +1317,6 @@ def recall_spans(
                 continue
             out.append(Span(a, b, label, text[a:b], source="llm-recall"))
             taken.append((a, b))
-    import sys
-
     print(
         f"[recall] модель вернула {len(found)} кандидат(ов), добавлено спанов: {len(out)}"
         + (f" — примеры: {[v for v, _ in found[:8]]}" if found else ""),
@@ -1252,7 +1338,12 @@ def _ask_recall(interim_text: str, cfg: ReviewConfig) -> list[tuple[str, str]]:
             {"role": "user", "content": interim_text},
         ],
         "temperature": cfg.temperature,
-        "max_tokens": cfg.max_tokens,
+        # НЕ cfg.max_tokens — см. ReviewConfig.recall_max_tokens: recall
+        # отвечает коротким списком пропущенных значений, а не полным
+        # вердиктом по батчу кандидатов, и делить с ревью один общий бюджет
+        # приводило к HTTP 400 (переполнение контекста) на каждом реальном
+        # документе.
+        "max_tokens": cfg.recall_max_tokens,
         # см. комментарий в review._ask
         "presence_penalty": 0,
         "frequency_penalty": 0,

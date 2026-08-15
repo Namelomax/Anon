@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -190,6 +192,119 @@ def test_request_once_records_failure_on_url_error():
     assert calls[0]["ok"] is False
     assert "connection refused" in calls[0]["error"]
     assert seen_pools == ["chat"]
+
+
+# --- transport failures degrade to warnings, not exceptions (see llm.py) ----
+# Reproduces the production 500: post_json raising OSError/PoolConnectionError
+# on one LLM chunk used to escape find() as a bare RuntimeError and take the
+# whole document down. It must now degrade to an llm_chunk_failed warning,
+# exactly like _DegenerateReply already does.
+
+def _multi_chunk_text() -> str:
+    """Text long enough that LLMConfig(max_chars=...) below splits it into
+    exactly 3 chunks, so we can fail one/all and check the others survive."""
+    # Три параграфа-предложения по ~40 символов каждый; max_chars=50 в тестах
+    # ниже гарантирует ровно один параграф на чанк (см. chunking.chunk_text).
+    return (
+        "Меня зовут Иван Петров, я живу в Москве.\n\n"
+        "Мой телефон +7 916 123-45-67 для связи.\n\n"
+        "Пётр Сидоров работает в компании Ромашка.\n\n"
+    )
+
+
+def _boom(url, payload_bytes, headers, timeout, *, pool="chat"):
+    raise http_pool.PoolConnectionError("connection refused")
+
+
+def _reply_for(user_text: str) -> bytes:
+    """Canned successful chat-completion reply for a given chunk of text: a
+    single PERSON entity if the chunk contains "Пётр Сидоров", else NONE."""
+    content = "PERSON|Пётр Сидоров" if "Пётр Сидоров" in user_text else "NONE"
+    reply = {
+        "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    return json.dumps(reply).encode("utf-8")
+
+
+def _one_chunk_fails_others_succeed(url, payload_bytes, headers, timeout, *, pool="chat"):
+    payload = json.loads(payload_bytes.decode("utf-8"))
+    user_text = payload["messages"][1]["content"]
+    if "Пётр Сидоров" in user_text:
+        raise http_pool.PoolConnectionError("connection refused")
+    return 200, _reply_for(user_text)
+
+
+def _run_find_for_concurrency(concurrency: int, fn):
+    det = LLMDetector(LLMConfig(max_chars=50, concurrency=concurrency))
+    text = _multi_chunk_text()
+    with _patched_post_json(fn):
+        spans = det.find(text)
+    return det, text, spans
+
+
+def test_one_chunk_transport_failure_degrades_to_warning_sequential():
+    det, text, spans = _run_find_for_concurrency(1, _one_chunk_fails_others_succeed)
+    # Другие фрагменты обработаны нормально — их span'ы на месте.
+    by_text = {text[s.start : s.end] for s in spans}
+    assert "Пётр Сидоров" not in by_text  # этот фрагмент упал
+    assert len(det.warnings) == 1
+    assert det.warnings[0]["kind"] == "llm_chunk_failed"
+    assert "offset" in det.warnings[0] and "chars" in det.warnings[0]
+
+
+def test_one_chunk_transport_failure_degrades_to_warning_concurrent():
+    det, text, spans = _run_find_for_concurrency(4, _one_chunk_fails_others_succeed)
+    by_text = {text[s.start : s.end] for s in spans}
+    assert "Пётр Сидоров" not in by_text
+    assert len(det.warnings) == 1
+    assert det.warnings[0]["kind"] == "llm_chunk_failed"
+
+
+def test_all_chunks_transport_failure_returns_empty_not_raises_sequential():
+    det, text, spans = _run_find_for_concurrency(1, _boom)
+    assert spans == []
+    assert len(det.warnings) == 3
+    assert all(w["kind"] == "llm_chunk_failed" for w in det.warnings)
+
+
+def test_all_chunks_transport_failure_returns_empty_not_raises_concurrent():
+    det, text, spans = _run_find_for_concurrency(4, _boom)
+    assert spans == []
+    assert len(det.warnings) == 3
+    assert all(w["kind"] == "llm_chunk_failed" for w in det.warnings)
+
+
+def test_transport_failure_warning_message_has_no_technical_detail():
+    det, _text, _spans = _run_find_for_concurrency(1, _boom)
+    for w in det.warnings:
+        message = w["message"]
+        assert "http" not in message.lower()
+        assert "connection refused" not in message
+        assert "PoolConnectionError" not in message
+        assert not re.search(r"\b\d{3}\b", message)  # no HTTP status code
+
+
+def test_cancelled_still_propagates_and_is_not_a_warning():
+    from anonymizer.llm import Cancelled
+
+    det = LLMDetector(LLMConfig(max_chars=50, concurrency=1))
+    det.cancel_event = threading.Event()
+    det.cancel_event.set()
+    with _patched_post_json(_boom):
+        try:
+            det.find(_multi_chunk_text())
+        except Cancelled:
+            pass
+        else:
+            assert False, "expected Cancelled to propagate"
+    assert det.warnings == []
+
+
+def test_transport_failure_class_is_a_runtime_error_subclass():
+    from anonymizer.llm import _TransportFailure
+
+    assert issubclass(_TransportFailure, RuntimeError)
 
 
 if __name__ == "__main__":

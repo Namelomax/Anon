@@ -262,6 +262,19 @@ class _DegenerateReply(Exception):
     reasoning block and returned no usable content, even after one retry."""
 
 
+class _TransportFailure(RuntimeError):
+    """Обрыв соединения с upstream chat-эндпоинтом или ответ с не-2xx статусом
+    (см. ``http_pool.PoolConnectionError``, подкласс ``OSError``).
+
+    Наследуется от ``RuntimeError``, а не от произвольного базового класса,
+    чтобы существующие вызовы и тесты, ловящие ``except RuntimeError``,
+    продолжали работать без изменений. Отдельный класс нужен, чтобы
+    ``find()`` мог отличить именно транспортный сбой (соединение недоступно,
+    сервер не отвечает, HTTP-код не 200) от программной ошибки — голый
+    ``except RuntimeError`` проглотил бы заодно и настоящие баги.
+    """
+
+
 class LLMDetector:
     """Detector that asks a local LLM for PII substrings and locates them."""
 
@@ -293,7 +306,7 @@ class LLMDetector:
         # Either way results are collected by chunk index, not completion
         # order, so the output is deterministic regardless of which request
         # answers first.
-        results: list[str | _DegenerateReply] = [None] * len(chunks)  # type: ignore[list-item]
+        results: list[str | _DegenerateReply | _TransportFailure] = [None] * len(chunks)  # type: ignore[list-item]
         if self.config.concurrency > 1:
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=self.config.concurrency
@@ -310,7 +323,7 @@ class LLMDetector:
                     index = future_to_index[future]
                     try:
                         results[index] = future.result()
-                    except _DegenerateReply as exc:
+                    except (_DegenerateReply, _TransportFailure) as exc:
                         results[index] = exc
                 # In-flight requests above have already run to completion (we
                 # don't kill HTTP calls mid-flight — see Change 1's docstring
@@ -324,12 +337,17 @@ class LLMDetector:
                     raise Cancelled()
                 try:
                     results[i] = self._complete(chunk)
-                except _DegenerateReply as exc:
+                except (_DegenerateReply, _TransportFailure) as exc:
                     results[i] = exc
 
         spans: list[Span] = []
         for (offset, chunk), result in zip(chunks, results):
-            if isinstance(result, _DegenerateReply):
+            if isinstance(result, (_DegenerateReply, _TransportFailure)):
+                # Сообщение для клиента намеренно НЕ содержит технических
+                # деталей (URL, HTTP-код, текст исключения) — см. правило
+                # «warnings без технических деталей» в gliner_remote.py /
+                # review.py. Технические подробности остаются только в stderr
+                # ниже.
                 message = (
                     "Фрагмент текста не удалось проанализировать. "
                     "Персональные данные в этом фрагменте могли остаться "
@@ -343,10 +361,14 @@ class LLMDetector:
                         "message": message,
                     }
                 )
+                reason = (
+                    "пустой ответ после повторной попытки"
+                    if isinstance(result, _DegenerateReply)
+                    else str(result)
+                )
                 print(
                     f"[warn] LLM: фрагмент {offset}-{offset + len(chunk)} "
-                    "не обработан (пустой ответ после повторной попытки) — "
-                    "возможна утечка ПДн",
+                    f"не обработан ({reason}) — возможна утечка ПДн",
                     file=sys.stderr,
                 )
                 continue
@@ -413,7 +435,7 @@ class LLMDetector:
                 "llm_detect", model=cfg.model, seconds=time.time() - t0,
                 chars=len(text), ok=False, error=str(exc),
             )
-            raise RuntimeError(
+            raise _TransportFailure(
                 f"LLM request to {cfg.base_url} failed: {exc}. "
                 "Is LM Studio / Ollama running and the model loaded?"
             ) from exc

@@ -138,6 +138,7 @@ const WARNING_KIND_LABELS: Record<string, string> = {
   gliner_chunk_failed: "Фрагмент не проверен",
   llm_chunk_failed: "Фрагмент не проверен",
   recall_failed: "Не выполнен поиск пропущенных данных",
+  recall_partial: "Поиск пропущенных данных выполнен частично",
   review_failed: "Не выполнена проверка лишних масок",
   review_adjacent_failed: "Не выполнена проверка спорных имён",
   review_short_numbers_failed: "Не выполнена проверка коротких чисел",
