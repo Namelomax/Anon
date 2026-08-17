@@ -1,6 +1,6 @@
 """Детерминированные детекторы реквизитов: даты с днём в кавычках, банк/филиал."""
 
-from anonymizer.detectors import DATE, BANK
+from anonymizer.detectors import DATE, BANK, HOUSE, HOUSE_STANDALONE, DEFAULT_DETECTORS, run_detectors
 
 
 def _mask(det, text):
@@ -53,3 +53,71 @@ def test_contract_numeric_number_masked():
     # разделы/приложения/пункты НЕ трогаем
     assert CONTRACT_NUM.find('Приложение № 1 к настоящему Договору') == []
     assert CONTRACT_NUM.find('п. № 5 договора') == []
+
+
+# --- HOUSE (номерной хвост адреса) -----------------------------------------
+# Реальная утечка из ГПХ-договора: GLiNER маскировал город+улицу как LOCATION,
+# а «д. 15, офис 301» оставался в чистом тексте целиком — самая идентифицирующая
+# часть адреса.
+
+def test_house_tail_with_office_one_span():
+    got = HOUSE.find('г. Москва, ул. Тверская, д. 15, офис 301')
+    assert any(s.text == 'д. 15, офис 301' for s in got)
+
+
+def test_house_tail_with_flat_one_span():
+    got = HOUSE.find('г. Москва, ул. Арбат, д. 10, кв. 45')
+    assert any(s.text == 'д. 10, кв. 45' for s in got)
+
+
+def test_house_number_variants():
+    assert any(s.text == 'д. 15А' for s in HOUSE.find('проживает по адресу д. 15А'))
+    assert any(s.text == 'д. 12/3' for s in HOUSE.find('корпус дома д. 12/3'))
+    assert any(
+        s.text == 'д. 5, корп. 2, кв. 7'
+        for s in HOUSE.find('зарегистрирован: д. 5, корп. 2, кв. 7')
+    )
+
+
+def test_house_standalone_office_and_flat():
+    assert any(s.text == 'офис 301' for s in HOUSE_STANDALONE.find('приём ведётся в офис 301'))
+    assert any(s.text == 'кв. 45' for s in HOUSE_STANDALONE.find('прописан в кв. 45'))
+
+
+def test_house_no_false_positive_i_tak_dalee():
+    # «и т.д.» — «так далее», не «дом»; цифра рядом не должна давать матч.
+    assert HOUSE.find('перечень товаров и т.д. 5 лет действует') == []
+
+
+def test_house_no_false_positive_str_as_page():
+    # «стр.» одиночное — «страница», не «строение»: без дома перед ним не матчим.
+    assert HOUSE.find('см. стр. 12') == []
+    assert HOUSE_STANDALONE.find('см. стр. 12') == []
+
+
+def test_house_no_false_positive_kvartal():
+    # «IV кв. 2025 г.» — квартал года, не квартира; существующее поведение
+    # DATE-детектора (квартал) не должно ломаться.
+    assert HOUSE_STANDALONE.find('отчёт за IV кв. 2025 г.') == []
+    assert DATE.find('отчёт за IV кв. 2025 г.') and DATE.find('IV кв. 2025 г.')[0].text == 'IV кв. 2025 г.'
+
+
+def test_house_no_false_positive_square_meters():
+    # «кв. м» — квадратные метры, маркер требует цифру сразу после себя.
+    assert HOUSE_STANDALONE.find('площадью 45 кв. м') == []
+
+
+def test_house_no_false_positive_village_no_digits():
+    # «д. Ивановка» — деревня без номера дома, цифры нет вовсе.
+    assert HOUSE.find('д. Ивановка') == []
+
+
+def test_house_end_to_end_with_default_detectors():
+    # Полный прогон через DEFAULT_DETECTORS: хвост адреса должен быть среди спанов.
+    text1 = 'г. Москва, ул. Тверская, д. 15, офис 301'
+    spans1 = run_detectors(text1, DEFAULT_DETECTORS)
+    assert any(s.label == 'HOUSE' and s.text == 'д. 15, офис 301' for s in spans1)
+
+    text2 = 'г. Москва, ул. Арбат, д. 10, кв. 45'
+    spans2 = run_detectors(text2, DEFAULT_DETECTORS)
+    assert any(s.label == 'HOUSE' and s.text == 'д. 10, кв. 45' for s in spans2)
