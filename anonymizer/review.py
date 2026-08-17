@@ -338,6 +338,20 @@ class ReviewConfig:
             обрабатываются другие документы — иначе ускорение одного
             документа обернётся задержкой всех остальных. ``<= 1`` сохраняет
             прежнее строго последовательное поведение без изменений.
+        recall_allow_unknown_types: По умолчанию ``False`` — recall-кандидат
+            с типом ВНЕ ``_RECALL_LABELS`` (даже после нормализации и сверки
+            с ``_RECALL_TYPE_ALIASES``, см. ``_normalize_recall_type``)
+            ОТБРАСЫВАЕТСЯ целиком, а не маскируется под общей меткой
+            SENSITIVE. Причина: замер на 3 живых документах показал, что ВСЕ
+            43 значения, ранее попавшие под SENSITIVE, не были ПДн (Excel,
+            FoxPro, "22 года", "10:00-12:30" и т.п.), маскирование их портит
+            читаемость документа, а сама метка была самой нестабильной между
+            повторными прогонами (9->35 масок на одном документе). Каждый
+            отброшенный кандидат при этом печатается в stderr (см.
+            ``recall_spans``) — это и делает решение обратимым: если среди
+            отброшенного когда-нибудь реально обнаружится ПДн под незнакомым
+            типом, поведение можно вернуть к старому (маскировать под
+            SENSITIVE) выставив этот флаг в ``True``, без правки кода.
     """
 
     base_url: str = "http://127.0.0.1:11433/v1"
@@ -352,6 +366,7 @@ class ReviewConfig:
     recall_max_tokens: int = 2000
     recall_max_chars: int = 12000
     recall_concurrency: int = 4
+    recall_allow_unknown_types: bool = False
     # Включает дополнительный recall-проход (см. recall_spans): один вызов LLM по
     # уже-замаскированному тексту, чтобы ДОБРАТЬ ПДн, которые детекторы пропустили.
     # По умолчанию берётся из окружения ANONYMIZER_LLM_RECALL (1/true/yes/on) —
@@ -1142,7 +1157,9 @@ def _ask_adjacent(
 
 
 # --- Recall-проход: добор пропущенного через LLM -----------------------------
-# Метки, которые LLM разрешено «дорисовать». Незнакомый тип → SENSITIVE.
+# Метки, которые LLM разрешено «дорисовать». Незнакомый тип (после
+# нормализации и сверки с алиасами ниже) КАНДИДАТ ОТБРАСЫВАЕТСЯ — см.
+# _normalize_recall_type и комментарий у решения по label в recall_spans.
 _RECALL_LABELS = frozenset({
     "PERSON", "ORG", "LOCATION", "ADDRESS", "CITY", "REGION", "STREET", "HOUSE",
     "DATE", "PHONE", "EMAIL", "URL", "IP_ADDRESS", "AMOUNT",
@@ -1153,6 +1170,66 @@ _RECALL_LABELS = frozenset({
     # вернёт этот тип, метка должна сохраниться, а не выродиться в SENSITIVE.
     "SUBJECT",
 })
+
+# Синонимы/варианты типов, под которыми модель иногда возвращает НАСТОЯЩИЙ ПДн
+# из таксономии выше, но не тем именем, что в _RECALL_LABELS (перевод,
+# сокращение, другой порядок слов). Ключи здесь уже приведены к виду ПОСЛЕ
+# нормализации (см. _normalize_recall_type: верхний регистр, пробелы/дефисы
+# схлопнуты в «_») — так «phone_number», «Phone-Number» и «PHONE NUMBER»
+# одинаково становятся ключом "PHONE_NUMBER". Список НАМЕРЕННО скромный:
+# только реалистичные варианты для самых частых типов, а не всё, что можно
+# придумать — экзотические синонимы не добавляем.
+_RECALL_TYPE_ALIASES: dict[str, str] = {
+    # PERSON
+    "NAME": "PERSON", "FULL_NAME": "PERSON", "FULLNAME": "PERSON",
+    "FIO": "PERSON", "PERSON_NAME": "PERSON",
+    # ORG
+    "COMPANY": "ORG", "ORGANIZATION": "ORG", "ORGANISATION": "ORG",
+    "COMPANY_NAME": "ORG", "ORGANIZATION_NAME": "ORG",
+    # PHONE
+    "PHONE_NUMBER": "PHONE", "PHONENUMBER": "PHONE", "TELEPHONE": "PHONE",
+    "TEL": "PHONE", "MOBILE": "PHONE", "MOBILE_PHONE": "PHONE",
+    # EMAIL
+    "E_MAIL": "EMAIL", "MAIL": "EMAIL", "EMAIL_ADDRESS": "EMAIL",
+    # ADDRESS
+    "FULL_ADDRESS": "ADDRESS", "ADDRESS_FULL": "ADDRESS",
+    "POSTAL_ADDRESS": "ADDRESS",
+    # DATE
+    "BIRTH_DATE": "DATE", "BIRTHDATE": "DATE", "DOB": "DATE",
+    # BANK_ACCOUNT
+    "ACCOUNT": "BANK_ACCOUNT", "ACCOUNT_NUMBER": "BANK_ACCOUNT",
+    "BANK_ACCOUNT_NUMBER": "BANK_ACCOUNT", "IBAN": "BANK_ACCOUNT",
+    # INN
+    "TAX_ID": "INN", "TAXPAYER_ID": "INN", "INN_NUMBER": "INN",
+    # OGRN
+    "OGRN_NUMBER": "OGRN",
+    # PASSPORT
+    "PASSPORT_NUMBER": "PASSPORT", "PASSPORT_NO": "PASSPORT",
+    # SNILS
+    "SNILS_NUMBER": "SNILS",
+    # AMOUNT
+    "SUM": "AMOUNT", "MONEY": "AMOUNT", "PRICE": "AMOUNT", "SALARY": "AMOUNT",
+    # LOCATION
+    "PLACE": "LOCATION", "GEO": "LOCATION",
+    # URL
+    "WEBSITE": "URL", "SITE": "URL", "LINK": "URL",
+}
+
+
+def _normalize_recall_type(typ: str) -> str:
+    """Приводит тип, вернувшийся от recall-модели, к виду, сравнимому с
+    ``_RECALL_LABELS``: снимает края-пробелы/дефисы/подчёркивания, переводит
+    в верхний регистр, схлопывает внутренние пробелы и дефисы в «_» (так
+    «phone_number», «Phone-Number» и «PHONE NUMBER» становятся одинаковым
+    «PHONE_NUMBER»), затем заменяет известный синоним на канонический тип из
+    ``_RECALL_LABELS`` через ``_RECALL_TYPE_ALIASES``. Если синонима нет,
+    возвращает нормализованную строку как есть — вызывающий код сам решает,
+    что делать с типом, которого нет в таксономии (см. recall_spans).
+    """
+    t = typ.strip().strip("-_ ").upper()
+    t = re.sub(r"[\s\-]+", "_", t)
+    return _RECALL_TYPE_ALIASES.get(t, t)
+
 
 _RECALL_SYSTEM_PROMPT = (
     "Ты — контролёр ПОЛНОТЫ обезличивания. Ниже текст, где часть персональных и "
@@ -1369,22 +1446,51 @@ def recall_spans(
 
     taken = [(s.start, s.end) for s in spans]
     out: list[Span] = []
+    # Кандидаты с типом, которого нет в _RECALL_LABELS (даже после
+    # нормализации/алиасов) — см. решение по label ниже и docstring
+    # ReviewConfig.recall_allow_unknown_types.
+    unknown_dropped: list[tuple[str, str]] = []
     for value, typ in found:
         val = value.strip()
         if len(val) < 3:
             continue
         if _PLACEHOLDER_LIKE.search(val):  # модель вернула плейсхолдер — игнор
             continue
+        norm_typ = _normalize_recall_type(typ)
+        if norm_typ in _RECALL_LABELS:
+            label = norm_typ
+        elif cfg.recall_allow_unknown_types:
+            # Старое поведение, включаемое явно — см.
+            # ReviewConfig.recall_allow_unknown_types.
+            label = "SENSITIVE"
+        else:
+            # Замерено на 3 живых документах: ВСЕ 43 значения, попавшие под
+            # SENSITIVE (незнакомый тип), не были ПДн — «Excel», «FoxPro»,
+            # «Microsoft SQL Server», «2012», «Dell PowerEdge R740»,
+            # «10:00-12:30», «22 года», «GPT» и т.п. Маскирование таких
+            # значений портит читаемость документа («в [SENSITIVE_8]-таблицах»
+            # вместо «в Excel-таблицах») без выгоды для приватности, а сама
+            # метка SENSITIVE была САМОЙ НЕСТАБИЛЬНОЙ между повторными
+            # прогонами одного документа (9->35 масок на одном и том же
+            # документе). Поэтому кандидат с незнакомым типом отбрасывается
+            # целиком, а не маскируется под общей меткой.
+            unknown_dropped.append((val, typ))
+            continue
         occ = _occurrences(text, val)
         # Слишком много вхождений — вероятно, это обычное слово; не перемаскировываем.
         if not occ or len(occ) > 40:
             continue
-        label = typ if typ in _RECALL_LABELS else "SENSITIVE"
         for a, b in occ:
             if any(a < e and st < b for st, e in taken):
                 continue
             out.append(Span(a, b, label, text[a:b], source="llm-recall"))
             taken.append((a, b))
+    if unknown_dropped:
+        print(
+            "[recall] отброшено кандидатов с неизвестным типом: "
+            f"{len(unknown_dropped)} — примеры: {unknown_dropped[:8]}",
+            file=sys.stderr,
+        )
     print(
         f"[recall] модель вернула {len(found)} кандидат(ов), добавлено спанов: {len(out)}"
         + (f" — примеры: {[v for v, _ in found[:8]]}" if found else ""),

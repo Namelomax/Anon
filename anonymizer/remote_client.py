@@ -48,7 +48,11 @@ def anonymize_remote(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = "Bearer " + api_key
-    payload = {"text": text, **(stages or {})}
+    # include_span_text: этот клиент реконструирует объекты Span из ответа
+    # (см. RemoteAnonymizer.anonymize), поэтому исходный текст фрагментов ему
+    # действительно нужен. Сервер с версии от 16.08.2026 не возвращает
+    # spans[].text по умолчанию — его нужно запросить явно.
+    payload = {"text": text, "include_span_text": True, **(stages or {})}
     body = json.dumps(payload).encode("utf-8")
     last_exc: Exception | None = None
     for attempt in range(retries):

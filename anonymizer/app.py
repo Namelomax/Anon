@@ -80,11 +80,21 @@ def _build_zip(stem: str, doc_name: str, doc_bytes: bytes, mapping_json: str) ->
     return buf.getvalue()
 
 
-# --- Remote GPU backend (fixed; server.py on JupyterHub) -------------------
-# Сервер не меняется — адрес и токен зашиты. Вся обработка (GLiNER + LLM +
-# корпоративные данные) идёт на GPU-сервере; здесь — только интерфейс.
-REMOTE_URL = "https://jh.interfonica.cloud/user/ts-bdfzametjv73gxxu/proxy/8000"
-REMOTE_KEY = "1913de7b07f34d61a28792a88f613767"
+# --- Remote backend --------------------------------------------------------
+# Вся обработка (GLiNER + LLM + корпоративные данные) идёт на удалённом
+# сервере; здесь — только интерфейс. Адрес и токен задаются окружением.
+# ВНИМАНИЕ (ИБ, P0): ранее адрес и Bearer-токен были захардкожены в этом файле
+# в открытом виде. Токен следует считать скомпрометированным и отозвать —
+# исходный код передавался/будет передаваться третьим лицам (аудит, заказчик).
+# Секреты берутся только из окружения. См. ЮРИДИЧЕСКИЙ_АНАЛИЗ.md, п. Б.13.
+REMOTE_URL = os.getenv("ANONYMIZER_BACKEND_URL", "").rstrip("/")
+REMOTE_KEY = os.getenv("ANONYMIZER_BACKEND_KEY", "")
+if not REMOTE_URL:
+    st.error(
+        "Не задан ANONYMIZER_BACKEND_URL. Укажите адрес бэкенда в переменных "
+        "окружения — в код секреты и адреса не помещаются."
+    )
+    st.stop()
 
 st.sidebar.header("🌐 Бэкенд")
 st.sidebar.success("GPU-сервер (GLiNER + LLM + корпоративные данные)")

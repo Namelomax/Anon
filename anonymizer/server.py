@@ -52,6 +52,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from anonymizer import depersonalization_log  # noqa: E402
 from anonymizer import usage_log  # noqa: E402
 from anonymizer.engine import Anonymizer  # noqa: E402
 from anonymizer.llm import Cancelled  # noqa: E402
@@ -94,6 +95,56 @@ _JOB_TTL_SECONDS = 10 * 60  # evict finished jobs after 10 minutes
 
 _TERMINAL_STATUSES = ("done", "error", "cancelled")
 
+# Источники, которым разрешён кросс-доменный доступ из браузера. По умолчанию
+# пусто: текущая архитектура кросс-доменных браузерных запросов не делает
+# (подробное обоснование — в Handler._cors). "*" намеренно не поддерживается.
+_CORS_ALLOWED_ORIGINS = frozenset(
+    o.strip()
+    for o in (os.getenv("ANONYMIZER_CORS_ORIGINS") or "").split(",")
+    if o.strip() and o.strip() != "*"
+)
+
+# Возвращать ли исходный текст найденных фрагментов в поле spans[].text.
+# По умолчанию ВЫКЛЮЧЕНО: spans с исходными подстроками и смещениями являются
+# самостоятельным ключом деанонимизации — по ним документ восстанавливается
+# посимвольно даже без mapping. Хранить и передавать их вместе с результатом
+# означает свести эффект маскирования к нулю (приказ РКН № 140, п. 1.6 и
+# приложение № 2 п. 3). Клиент, которому текст спанов действительно нужен
+# (anonymizer/remote_client.py), запрашивает его явным флагом.
+_SPAN_TEXT_DEFAULT = (os.getenv("ANONYMIZER_SPAN_TEXT") or "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+# Удалять задание сразу после первой выдачи терминального результата.
+# Выключено по умолчанию: клиенты с ретраями должны иметь возможность забрать
+# результат повторно. См. комментарий в _handle_job_status.
+_JOB_ONESHOT = (os.getenv("ANONYMIZER_JOB_ONESHOT") or "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+
+def _harden_process() -> None:
+    """Запретить сброс core dump процесса.
+
+    В дампе памяти оказываются и исходный текст документа, и таблица
+    соответствий — то есть дамп является полноценной утечкой ПДн, происходящей
+    в обход всех прикладных мер. Заявление «мы ничего не пишем на диск» без
+    этого вызова недостоверно: при аварийном завершении ядро запишет всё.
+
+    Ограничение: в CPython строки неизменяемы и копируются сборщиком, поэтому
+    гарантированное затирание значений в памяти средствами языка недостижимо.
+    Остаточный риск (чтение памяти процесса, попадание страниц в swap)
+    устраняется не здесь, а мерами уровня ОС — отдельный пользователь,
+    отключённый swap либо шифрование раздела подкачки, запрет ptrace — и
+    подлежит фиксации в модели угроз как принятый.
+    """
+    try:
+        import resource
+
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except Exception as exc:  # noqa: BLE001 — платформа без resource (Windows)
+        print(f"[server] не удалось отключить core dump: {exc}", file=sys.stderr)
+
 
 def _sweep_jobs() -> None:
     """Drop finished jobs older than the TTL. Called lazily on each submit —
@@ -105,6 +156,53 @@ def _sweep_jobs() -> None:
     ]
     for jid in stale:
         del _JOBS[jid]
+        # Уничтожение результата и ключа — тоже «операция, совершаемая с
+        # персональными данными, полученными в результате обезличивания»
+        # (п. 1.7 приказа РКН № 140), поэтому фиксируется наравне с самим
+        # обезличиванием. Без этой записи подтвердить факт уничтожения нечем.
+        depersonalization_log.record_event(
+            event="job_destroyed",
+            request_id=jid,
+            detail={"reason": "ttl", "ttl_seconds": _JOB_TTL_SECONDS},
+        )
+
+
+def _serialize_spans(spans, include_text: bool) -> list:
+    """Serialise spans for an HTTP response.
+
+    ``include_text`` controls the ``text`` field only. Offsets and labels are
+    always returned: the UI needs them to highlight, and on their own they do
+    not disclose the masked values.
+
+    Why the default is off — see ``_SPAN_TEXT_DEFAULT``: ``text`` plus
+    ``start``/``end`` reconstructs the source document character-for-character
+    without ever touching ``mapping``, so it is a second, more complete
+    deanonymisation key. Shipping it next to the masked result defeats the
+    masking entirely.
+    """
+    if include_text:
+        return [
+            {"start": s.start, "end": s.end, "label": s.label, "text": s.text}
+            for s in spans
+        ]
+    return [{"start": s.start, "end": s.end, "label": s.label} for s in spans]
+
+
+def _response_flags(data: dict) -> tuple[bool, bool]:
+    """Read the two disclosure flags from a request body.
+
+    Returns ``(include_span_text, irreversible)``.
+
+    ``irreversible=true`` suppresses the deanonymisation key entirely: no
+    ``mapping``, no span texts. In that mode the result satisfies п. 9 ст. 3
+    152-ФЗ literally — the additional information required to re-identify the
+    subject is never produced, so it cannot leak, be requested, or be stored
+    alongside the result. The masked document itself is unaffected.
+    """
+    irreversible = bool(data.get("irreversible", False))
+    if irreversible:
+        return False, True
+    return bool(data.get("include_span_text", _SPAN_TEXT_DEFAULT)), False
 
 
 def _model_lock():
@@ -268,19 +366,35 @@ def _run_anonymize_text(data: dict, cancel_event: threading.Event | None = None)
 
     t0 = time.time()
     with usage_log.request_context(chars=len(text), stages=used) as usage_totals:
+        # Снимаем request_id ВНУТРИ контекста: на выходе из request_context
+        # contextvar сбрасывается, и снаружи вернулся бы None.
+        req_id = usage_log.current_request_id()
         with _model_lock():  # only held for local (in-process) models; see _LOCK
             anon = _compose(stages, data.get("ner_threshold"), cancel_event=cancel_event)
             res = anon.anonymize(text)
     elapsed = time.time() - t0
 
+    include_span_text, irreversible = _response_flags(data)
+    # Учёт действий по обезличиванию — форма учёта по п. 1.7 требований,
+    # утв. приказом Роскомнадзора от 19.06.2025 № 140. В журнал идут только
+    # количества по категориям, без значений; см. depersonalization_log.
+    depersonalization_log.record_operation(
+        request_id=req_id,
+        labels=res.summary,
+        chars=len(text),
+        seconds=elapsed,
+        irreversible=irreversible,
+    )
+    depersonalization_log.record_event(
+        event="key_withheld" if irreversible else "key_issued",
+        request_id=req_id,
+    )
     return {
         "anonymized_text": res.anonymized_text,
-        "mapping": res.mapping,
+        "mapping": {} if irreversible else res.mapping,
+        "irreversible": irreversible,
         "summary": res.summary,
-        "spans": [
-            {"start": s.start, "end": s.end, "label": s.label, "text": s.text}
-            for s in res.spans
-        ],
+        "spans": _serialize_spans(res.spans, include_span_text),
         "stages": used,
         "elapsed_seconds": round(elapsed, 2),
         "preexisting_placeholders": res.preexisting_placeholders,
@@ -320,6 +434,8 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
 
     t0 = time.time()
     with usage_log.request_context(filename=filename, chars=len(text), stages=used) as usage_totals:
+        # см. комментарий в _run_anonymize_text — request_id снимается внутри
+        req_id = usage_log.current_request_id()
         with _model_lock():  # only held for local (in-process) models; see _LOCK
             anon = _compose(stages, data.get("ner_threshold"), cancel_event=cancel_event)
             res = anon.anonymize(text)
@@ -335,16 +451,29 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
         doc_name = f"{stem}.anon.txt"
         doc_mime = "text/plain"
 
+    include_span_text, irreversible = _response_flags(data)
+    # Учёт по п. 1.7 приказа РКН № 140. Имя файла в журнал не пишется —
+    # сохраняется только его хеш (source_ref), см. depersonalization_log.
+    depersonalization_log.record_operation(
+        request_id=req_id,
+        labels=res.summary,
+        chars=len(text),
+        seconds=elapsed,
+        irreversible=irreversible,
+        filename=filename,
+    )
+    depersonalization_log.record_event(
+        event="key_withheld" if irreversible else "key_issued",
+        request_id=req_id,
+    )
     return {
         "filename": filename,
         "is_docx": is_docx,
         "anonymized_text": res.anonymized_text,
-        "mapping": res.mapping,
+        "mapping": {} if irreversible else res.mapping,
+        "irreversible": irreversible,
         "summary": res.summary,
-        "spans": [
-            {"start": s.start, "end": s.end, "label": s.label, "text": s.text}
-            for s in res.spans
-        ],
+        "spans": _serialize_spans(res.spans, include_span_text),
         "stages": used,
         "elapsed_seconds": round(elapsed, 2),
         "preexisting_placeholders": res.preexisting_placeholders,
@@ -358,14 +487,32 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
 
 class Handler(BaseHTTPRequestHandler):
     def _cors(self) -> None:
-        # Allow the Next.js UI (Vercel / localhost) to call us from the browser.
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # CORS-заголовок по умолчанию НЕ отправляется.
+        #
+        # Обоснование (проверено по коду 16.08.2026): ни один компонент
+        # архитектуры не обращается к этому серверу кросс-доменно из браузера.
+        # web/app/page.tsx ходит только на собственный origin (`/api/...`);
+        # Next.js-роуты — серверный прокси (`runtime = "nodejs"`), то есть
+        # запрос к бэкенду идёт с сервера, а не из браузера; Streamlit-клиент
+        # (app.py) — обычный HTTP-клиент, к которому CORS неприменим.
+        # Ранее здесь отдавалось "*", что в связке с отсутствием проверки
+        # входящего Authorization давало возможность отправить документ на
+        # бэкенд с любого стороннего сайта при наличии сетевой доступности.
+        # См. ЮРИДИЧЕСКИЙ_АНАЛИЗ.md, п. Б.13 (R9).
+        #
+        # Если появится клиент, которому CORS действительно нужен, перечислите
+        # источники через ANONYMIZER_CORS_ORIGINS (запятая-разделитель).
+        # Значение "*" намеренно не поддерживается.
+        origin = self.headers.get("Origin")
+        if origin and origin in _CORS_ALLOWED_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
     def _send(self, code: int, obj: dict) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        # Клиент (Vercel, лимит 300с) может отвалиться, пока мы ещё пишем ответ —
+        # Клиент (фронтенд с лимитом ~300 с) может отвалиться, пока мы ещё пишем ответ —
         # тогда send_response/end_headers/write кидают BrokenPipeError, а
         # обработчик исключения в _handle_* пытается отправить 500 и падает
         # ВТОРОЙ раз с того же места, удваивая трейсбек в логах. Ловим здесь и
@@ -456,7 +603,7 @@ class Handler(BaseHTTPRequestHandler):
 
         Shared by the text and file job routes. The HTTP request itself lasts
         milliseconds — which is the whole point: any gateway between us and the
-        client (Vercel, a VS Code dev tunnel) enforces a fixed per-request
+        client (a serverless frontend host, a VS Code dev tunnel) enforces a fixed per-request
         timeout that a multi-minute pipeline can never satisfy, no matter how
         the budget is configured on either end. Polling GET /jobs/<id> keeps
         every request short, so the gateway limit stops mattering.
@@ -536,12 +683,39 @@ class Handler(BaseHTTPRequestHandler):
         # slow client would otherwise hold _JOBS_LOCK for the whole socket
         # write, stalling job submits and worker status updates.
         with _JOBS_LOCK:
+            # Подметаем на КАЖДОМ обращении, а не только при submit. Раньше
+            # очистка вызывалась лениво из submit, поэтому при отсутствии новых
+            # заданий завершённая задача с ключом деанонимизации могла лежать в
+            # памяти неограниченно долго — то есть фактический срок хранения не
+            # совпадал с декларируемым. Приказ РКН № 140, п. 1.6.
+            _sweep_jobs()
             job = _JOBS.get(job_id)
             payload = None if job is None else {
                 "status": job["status"],
                 "result": job["result"],
                 "error": job["error"],
             }
+            # Одноразовая выдача: после отдачи терминального результата задание
+            # удаляется, ключ в памяти не остаётся. По умолчанию ВЫКЛЮЧЕНО —
+            # клиент с ретраями (web/app/api/_shared.ts повторяет запрос при
+            # обрыве соединения) должен иметь возможность забрать результат
+            # повторно. Включать вместе с переходом на раздельную выдачу
+            # документа и ключа.
+            if (
+                _JOB_ONESHOT
+                and job is not None
+                and job["status"] in _TERMINAL_STATUSES
+            ):
+                del _JOBS[job_id]
+                depersonalization_log.record_event(
+                    event="job_destroyed",
+                    request_id=job_id,
+                    detail={"reason": "oneshot"},
+                )
+        if payload is not None and payload["status"] in _TERMINAL_STATUSES:
+            depersonalization_log.record_event(
+                event="result_issued", request_id=job_id
+            )
         if payload is None:
             self._send(404, {"error": "unknown job"})
             return
@@ -877,6 +1051,7 @@ def main() -> None:
         "stages": dict(_DEFAULTS), "toggleable": True,
         "ner_threshold": _GLINER_CFG.threshold if _GLINER_CFG else None,
     }
+    _harden_process()
     print(f"Сервер готов: http://{args.host}:{args.port}  {_INFO}", flush=True)
     ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
 

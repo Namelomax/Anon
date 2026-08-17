@@ -2,7 +2,7 @@
   "name": "anonymizer-web",
   "version": "0.1.0",
   "private": true,
-  "description": "Тестовый веб-интерфейс анонимизатора ПДн (Next.js, деплой на Vercel).",
+  "description": "Веб-интерфейс сервиса маскирования (псевдонимизации) ПДн (Next.js). Размещение — на территории РФ.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

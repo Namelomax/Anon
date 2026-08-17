@@ -10,13 +10,13 @@ import { request as httpRequest } from "node:http";
  * whole response with "Invalid header value char". Node's classic http/https
  * client accepts it when `insecureHTTPParser: true` is set, so we use that here
  * instead of `fetch`. (curl and browsers are lenient too, which is why manual
- * checks worked while the Vercel function did not.)
+ * checks worked while the serverless function did not.)
  */
 // Connection-establishment error codes worth retrying: these all mean the TCP
 // handshake to the backend never completed, so nothing was sent to it and
-// retrying is trivially idempotent. Vercel's default region is far from the
-// backend VPS (jh.interfonica.cloud), which occasionally shows up as a
-// connect-phase ETIMEDOUT/ECONNREFUSED even though the backend is healthy.
+// retrying is trivially idempotent. Network distance between the frontend host
+// and the backend occasionally shows up as a connect-phase
+// ETIMEDOUT/ECONNREFUSED even though the backend is healthy.
 const _RETRYABLE_CONNECT_CODES = new Set([
   "ECONNREFUSED",
   "ETIMEDOUT",
@@ -189,8 +189,8 @@ export function describeError(e: unknown, backendUrl: string): string {
   const HINTS: Record<string, string> = {
     ENOTFOUND: "DNS не резолвится — проверьте домен в ANONYMIZER_BACKEND_URL.",
     ECONNREFUSED: "Соединение отклонено — бэкенд не слушает этот адрес/порт снаружи.",
-    ETIMEDOUT: "Таймаут — хост, вероятно, недоступен из облака Vercel (firewall).",
-    UND_ERR_CONNECT_TIMEOUT: "Таймаут соединения — хост недоступен из облака Vercel.",
+    ETIMEDOUT: "Таймаут — хост, вероятно, недоступен из среды размещения фронтенда (firewall).",
+    UND_ERR_CONNECT_TIMEOUT: "Таймаут соединения — хост недоступен из среды размещения фронтенда.",
     ECONNRESET: "Соединение сброшено сервером/прокси во время запроса.",
     CERT_HAS_EXPIRED: "Просрочен TLS-сертификат бэкенда.",
   };
