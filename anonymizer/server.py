@@ -18,6 +18,12 @@ Expose it through JupyterHub's proxy (like Ollama): the URL becomes
     https://<hub>/user/<id>/proxy/8000/
 and clients authenticate with the JupyterHub Bearer token.
 
+Все маршруты, кроме ``OPTIONS`` (CORS preflight) и ``GET /health`` (последний
+без ключа отдаёт только ``{"status": "ok"}``, полную информацию — лишь
+аутентифицированному вызову), требуют заголовок ``Authorization: Bearer
+<секрет>``; см. ``ANONYMIZER_API_KEYS``/``ANONYMIZER_API_KEY`` и
+``_authenticate`` ниже.
+
 API:
     GET  /health           -> {"status": "ok", ...}
     POST /anonymize  {text, regex?, corporate?, ner?, llm?, review?, subject?}
@@ -41,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hmac
 import json
 import os
 import sys
@@ -121,6 +128,133 @@ _SPAN_TEXT_DEFAULT = (os.getenv("ANONYMIZER_SPAN_TEXT") or "").strip().lower() i
 _JOB_ONESHOT = (os.getenv("ANONYMIZER_JOB_ONESHOT") or "").strip().lower() in (
     "1", "true", "yes", "on",
 )
+
+# --- Аутентификация входящих запросов -------------------------------------
+# Секрет -> имя субъекта (principal). Заполняется ОДИН РАЗ при старте
+# (``_configure_auth``, вызывается из ``main()``); тесты подменяют напрямую.
+# Пустой словарь по умолчанию — значит НИЧЕГО не аутентифицируется, что и
+# требуется до явной настройки (см. ``_configure_auth`` про отказ стартовать
+# без ключей).
+_API_KEYS: dict = {}
+# --allow-anonymous — единственный сознательный обход проверки, только для
+# локальной разработки (см. _configure_auth).
+_ALLOW_ANONYMOUS = False
+
+
+def _load_api_keys() -> dict:
+    """Прочитать секреты доступа из окружения: секрет -> имя субъекта (principal).
+
+    ``ANONYMIZER_API_KEYS`` — список пар ``имя:секрет`` через запятую,
+    например ``web:s3cr3t,cli:0th3r``; имя — принципал, попадающий в поле
+    ``actor`` журнала обезличивания (см. ``depersonalization_log.py``).
+    ``ANONYMIZER_API_KEY`` — устаревший одиночный секрет без имени, принципал
+    для него всегда ``"default"``. Если заданы обе переменные, ключи из обеих
+    объединяются в один словарь.
+
+    Значения секретов НИКОГДА не печатаются и не логируются: при некорректной
+    записи в ``ANONYMIZER_API_KEYS`` в stderr идёт только факт ошибки, без
+    содержимого записи.
+    """
+    keys: dict = {}
+    legacy = (os.getenv("ANONYMIZER_API_KEY") or "").strip()
+    if legacy:
+        keys[legacy] = "default"
+    raw = os.getenv("ANONYMIZER_API_KEYS") or ""
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name, sep, secret = item.partition(":")
+        name = name.strip()
+        secret = secret.strip()
+        if not sep or not name or not secret:
+            print(
+                "[server] игнорирую некорректную запись в ANONYMIZER_API_KEYS "
+                "(ожидался формат имя:секрет)",
+                file=sys.stderr,
+            )
+            continue
+        keys[secret] = name
+    return keys
+
+
+def _authenticate(headers) -> str | None:
+    """Проверить заголовок ``Authorization: Bearer <секрет>`` и вернуть имя
+    аутентифицированного субъекта (principal), либо ``None``, если проверка
+    не пройдена (заголовок отсутствует, неверный формат или секрет не
+    совпал ни с одним из ``_API_KEYS``).
+
+    Сравнение — ``hmac.compare_digest`` (постоянное время выполнения):
+    обычное ``==`` прерывается на первом несовпадающем байте, что
+    теоретически позволяет подобрать секрет по времени ответа
+    (тайминг-атака). ``==`` для сравнения с секретом использовать нельзя
+    нигде в этой функции.
+
+    ``_ALLOW_ANONYMOUS`` (флаг ``--allow-anonymous``, только для локальной
+    разработки — см. ``_configure_auth``) отключает проверку целиком и
+    возвращает фиксированное имя ``"anonymous"``, не читая заголовок.
+    """
+    if _ALLOW_ANONYMOUS:
+        return "anonymous"
+    auth = headers.get("Authorization") or ""
+    prefix = "Bearer "
+    if not auth.startswith(prefix):
+        return None
+    supplied = auth[len(prefix):].strip()
+    if not supplied:
+        return None
+    for secret, name in _API_KEYS.items():
+        if hmac.compare_digest(supplied, secret):
+            return name
+    return None
+
+
+def _configure_auth(args) -> None:
+    """Загрузить ключи доступа и, если ни один не задан, ОТКАЗАТЬСЯ СТАРТОВАТЬ.
+
+    Дефолт «безопасность выключена, пока её явно не включат» здесь
+    неприемлем: один забытый ``ANONYMIZER_API_KEY``/``ANONYMIZER_API_KEYS``
+    означает бэкенд, открытый любому с сетевым доступом — тот слепо тратит
+    бюджет владельца на вышестоящие модели и отдаёт ``/usage`` (токены,
+    стоимость) кому угодно. Ошибка конфигурации ДОЛЖНА быть громкой и
+    происходить при запуске процесса, а не тихо оставлять дверь открытой до
+    первого инцидента — отсюда ``sys.exit(1)`` вместо запуска с пустым
+    ``_API_KEYS`` (при котором ``_authenticate`` и так отвергла бы любой
+    запрос, но молча, без объяснения при старте, что именно не так).
+
+    Единственный сознательный обход — флаг ``--allow-anonymous`` для
+    локальной разработки: он печатает громкое предупреждение в stderr при
+    каждом запуске и полностью отключает проверку (см. ``_authenticate``).
+    """
+    global _API_KEYS, _ALLOW_ANONYMOUS
+    _API_KEYS = _load_api_keys()
+    _ALLOW_ANONYMOUS = bool(args.allow_anonymous)
+
+    if _ALLOW_ANONYMOUS:
+        print(
+            "[server] ВНИМАНИЕ: сервер запущен с --allow-anonymous — проверка "
+            "Authorization ПОЛНОСТЬЮ ОТКЛЮЧЕНА. Любой, у кого есть сетевой "
+            "доступ к этому адресу, может отправлять документы на "
+            "анонимизацию (за счёт бюджета владельца) и читать статистику "
+            "/usage. Используйте только для локальной разработки, никогда — "
+            "в проде.",
+            file=sys.stderr,
+        )
+        return
+    if not _API_KEYS:
+        print(
+            "[server] ОШИБКА: не задан ни один ключ доступа — сервер не "
+            "будет запущен. Задайте ANONYMIZER_API_KEYS в формате "
+            '"имя:секрет,имя2:секрет2" (по паре на клиента) либо, для '
+            "одного секрета без разделения по клиентам, "
+            "ANONYMIZER_API_KEY=<секрет> (субъект будет называться "
+            "'default'). Тот же секрет должен быть прописан как "
+            "ANONYMIZER_BACKEND_KEY на стороне Next.js-прокси и в настройках "
+            "Streamlit-клиента. Для локальной разработки без ключа запустите "
+            "с флагом --allow-anonymous.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def _harden_process() -> None:
@@ -531,64 +665,99 @@ class Handler(BaseHTTPRequestHandler):
                 file=sys.stderr,
             )
 
-    def do_OPTIONS(self):  # CORS preflight
+    def do_OPTIONS(self):  # CORS preflight — НИКОГДА не требует Authorization,
+        # иначе браузер не смог бы даже дойти до реального запроса.
         self.send_response(204)
         self._cors()
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _authenticate_or_401(self) -> str | None:
+        """Проверить ``Authorization`` и, если проверка не пройдена, сразу
+        отправить 401 и вернуть ``None`` — вызывающий код обязан прекратить
+        обработку маршрута в этом случае (см. использования ниже).
+
+        Тело ответа минимально (``{"error": "unauthorized"}``) и не намекает,
+        что именно не так (нет заголовка / неверный формат / неверный
+        секрет) и не отражает присланное значение — иначе ответ сам стал бы
+        оракулом для подбора секрета.
+        """
+        principal = _authenticate(self.headers)
+        if principal is None:
+            self._send(401, {"error": "unauthorized"})
+        return principal
+
     def do_GET(self):
         path = self.path.rstrip("/")
         if path.endswith("health") or self.path in ("/", ""):
-            self._send(200, {"status": "ok", **_INFO})
+            # /health обязан отвечать БЕЗ авторизации (мониторинг), но полный
+            # _INFO (конфигурация бэкенда, модель, стадии) — только
+            # аутентифицированному вызову; см. докстринг задачи в верхнем
+            # комментарии файла.
+            principal = _authenticate(self.headers)
+            payload = {"status": "ok", **_INFO} if principal is not None else {"status": "ok"}
+            self._send(200, payload)
             return
-        if path.endswith("usage"):
-            # Только чтение JSONL-лога — не трогает _LOCK/_JOBS_LOCK, поэтому
-            # никогда не стоит в очереди за обрабатывающимся документом.
-            self._send(200, usage_log.usage_summary())
+        principal = self._authenticate_or_401()
+        if principal is None:
             return
-        if "/jobs/" in path:
-            job_id = path.rsplit("/jobs/", 1)[1]
-            self._handle_job_status(job_id)
-            return
-        self._send(404, {"error": "not found"})
+        with depersonalization_log.actor_context(principal):
+            if path.endswith("usage"):
+                # Только чтение JSONL-лога — не трогает _LOCK/_JOBS_LOCK,
+                # поэтому никогда не стоит в очереди за обрабатывающимся
+                # документом.
+                self._send(200, usage_log.usage_summary())
+                return
+            if "/jobs/" in path:
+                job_id = path.rsplit("/jobs/", 1)[1]
+                self._handle_job_status(job_id)
+                return
+            self._send(404, {"error": "not found"})
 
     def do_DELETE(self):
         # Only route here is /jobs/<job_id> — cooperative job cancellation.
         # There is no "jobs/anonymize-file"-style ambiguity to worry about
         # (unlike do_POST) since DELETE has no other endpoints at all.
-        path = self.path.rstrip("/")
-        if "/jobs/" in path:
-            job_id = path.rsplit("/jobs/", 1)[1]
-            self._handle_job_cancel(job_id)
+        principal = self._authenticate_or_401()
+        if principal is None:
             return
-        self._send(404, {"error": "not found"})
+        with depersonalization_log.actor_context(principal):
+            path = self.path.rstrip("/")
+            if "/jobs/" in path:
+                job_id = path.rsplit("/jobs/", 1)[1]
+                self._handle_job_cancel(job_id)
+                return
+            self._send(404, {"error": "not found"})
 
     def _read_json(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
     def do_POST(self):
-        path = self.path.rstrip("/")
-        # NB: check the jobs routes first — "jobs/anonymize-file" also ends
-        # with "anonymize-file", so it would otherwise be swallowed below.
-        if path.endswith("jobs/anonymize-file"):
-            self._submit_job(_run_anonymize_file)
+        principal = self._authenticate_or_401()
+        if principal is None:
             return
-        if path.endswith("jobs/anonymize"):
-            self._submit_job(_run_anonymize_text)
-            return
-        # NB: check "deanonymize-file" first — it also ends with "anonymize-file".
-        if path.endswith("deanonymize-file"):
-            self._handle_deanon_file()
-            return
-        if path.endswith("anonymize-file"):
-            self._handle_file()
-            return
-        if path.endswith("anonymize"):
-            self._handle_text()
-            return
-        self._send(404, {"error": "not found"})
+        with depersonalization_log.actor_context(principal):
+            path = self.path.rstrip("/")
+            # NB: check the jobs routes first — "jobs/anonymize-file" also ends
+            # with "anonymize-file", so it would otherwise be swallowed below.
+            if path.endswith("jobs/anonymize-file"):
+                self._submit_job(_run_anonymize_file)
+                return
+            if path.endswith("jobs/anonymize"):
+                self._submit_job(_run_anonymize_text)
+                return
+            # NB: check "deanonymize-file" first — it also ends with "anonymize-file".
+            if path.endswith("deanonymize-file"):
+                self._handle_deanon_file()
+                return
+            if path.endswith("anonymize-file"):
+                self._handle_file()
+                return
+            if path.endswith("anonymize"):
+                self._handle_text()
+                return
+            self._send(404, {"error": "not found"})
 
     def _handle_text(self):
         try:
@@ -607,6 +776,16 @@ class Handler(BaseHTTPRequestHandler):
         timeout that a multi-minute pipeline can never satisfy, no matter how
         the budget is configured on either end. Polling GET /jobs/<id> keeps
         every request short, so the gateway limit stops mattering.
+
+        The worker runs in its own thread, started via
+        ``depersonalization_log.run_in_context`` rather than a bare
+        ``threading.Thread`` — that carries the ``actor`` contextvar
+        (set by ``do_POST`` just above) into the worker, so
+        ``_run_anonymize_text``/``_run_anonymize_file`` still see the
+        authenticated principal when they call
+        ``depersonalization_log.record_operation``/``record_event`` from
+        inside this new thread (see that function's docstring for the
+        propagation trap a bare ``Thread`` would fall into).
         """
         try:
             data = self._read_json()
@@ -653,7 +832,7 @@ class Handler(BaseHTTPRequestHandler):
                     job["status"] = "done"
                     job["result"] = result
 
-        threading.Thread(target=_worker, daemon=True).start()
+        depersonalization_log.run_in_context(_worker).start()
         self._send(202, {"job_id": job_id})
 
     def _handle_file(self):
@@ -930,7 +1109,20 @@ def main() -> None:
         help="Path to a glossary file of always-mask terms (see glossary.py). "
              "Defaults to anonymizer/custom_terms.txt if it exists.",
     )
+    ap.add_argument(
+        "--allow-anonymous", action="store_true", default=False,
+        help="Отключить проверку Authorization целиком. ТОЛЬКО для локальной "
+             "разработки — печатает предупреждение в stderr при каждом "
+             "запуске и никогда не используется в проде. Без этого флага и "
+             "без ANONYMIZER_API_KEYS/ANONYMIZER_API_KEY сервер откажется "
+             "стартовать, см. _configure_auth.",
+    )
     args = ap.parse_args()
+
+    # Проверка ключей доступа — ДО загрузки моделей: ошибка конфигурации
+    # должна остановить процесс сразу, а не после многосекундного прогрева
+    # (см. докстринг _configure_auth).
+    _configure_auth(args)
 
     global _INFO, _GLINER_CFG, _REVIEW_CFG, _NER_BACKEND, _NEEDS_MODEL_LOCK
     print("Загружаю модели…", flush=True)

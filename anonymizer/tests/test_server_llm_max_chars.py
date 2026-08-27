@@ -55,6 +55,10 @@ def _run_main(argv_extra: list[str]) -> None:
         "--no-review", "--no-second-pass", "--no-recall", "--no-corporate",
         "--llm-base-url", _DEAD_LLM_URL,
         "--host", "127.0.0.1", "--port", "0",
+        # Иначе main() отказывается стартовать без ключа доступа — см.
+        # server._configure_auth. Эти тесты не проверяют аутентификацию, им
+        # достаточно локального обхода.
+        "--allow-anonymous",
     ] + argv_extra
     old_argv = sys.argv
     sys.argv = argv

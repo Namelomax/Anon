@@ -31,6 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from anonymizer import http_pool  # noqa: E402
 from anonymizer.review import (  # noqa: E402
+    _RECALL_LABELS,
+    _RECALL_SYSTEM_PROMPT,
     ReviewConfig,
     _normalize_recall_type,
     recall_spans,
@@ -161,6 +163,83 @@ def test_dropped_candidates_are_printed_to_stderr_not_in_warnings():
     assert warnings == []
     for w in warnings:
         assert "Excel" not in json.dumps(w, ensure_ascii=False)
+
+
+# --- 7. Production regression: Cyrillic "ФИО" is kept and lands on PERSON --
+# Exact scenario from the prod log this fix closes: the recall model answered
+# with the Russian type name "ФИО" for a real surname, and it was silently
+# dropped instead of masked. See _RECALL_TYPE_ALIASES.
+
+def test_cyrillic_fio_type_is_kept_and_lands_on_person():
+    cfg = ReviewConfig(model="test-model")
+    text = "Автор текста — Бальмонт, он же поэт."
+    fake = _found_fake([{"text": "Бальмонт", "type": "ФИО"}])
+
+    with _patched_post_json(fake), _captured_stderr():
+        out = recall_spans(text, [], cfg)
+
+    assert len(out) == 1
+    assert out[0].label == "PERSON"
+    assert out[0].text == "Бальмонт"
+
+
+# --- 8. More Cyrillic type names land on their canonical labels -------------
+
+def test_cyrillic_type_variants_land_on_canonical_labels():
+    cfg = ReviewConfig(model="test-model")
+    text = "Значение здесь: Тест123 для проверки типов."
+    variants = [
+        ("ОРГАНИЗАЦИЯ", "ORG"),
+        ("ТЕЛЕФОН", "PHONE"),
+        ("АДРЕС", "ADDRESS"),
+        ("СЧЁТ", "BANK_ACCOUNT"),
+        ("СЧЕТ", "BANK_ACCOUNT"),
+    ]
+    for raw_type, canonical in variants:
+        fake = _found_fake([{"text": "Тест123", "type": raw_type}])
+        with _patched_post_json(fake), _captured_stderr():
+            out = recall_spans(text, [], cfg)
+        assert len(out) == 1, (raw_type, out)
+        assert out[0].label == canonical, (raw_type, out[0].label)
+        assert out[0].text == "Тест123"
+
+
+# --- 9. Lower-case / spaced Cyrillic normalizes the same way ----------------
+
+def test_lowercase_and_spaced_cyrillic_normalize_correctly():
+    assert _normalize_recall_type("фио") == "PERSON"
+    assert _normalize_recall_type("эл почта") == "EMAIL"
+
+
+# --- 10. Non-PII types stay dropped (regression guard) ----------------------
+# PERSON_ROLE / EVENT_NAME / APP_NAME are genuinely not PII (see module
+# docstring's example log). ОРГАНИЗАЦИЯ/ПРОГРАММНОЕ ОБЕСПЕЧЕНИЕ must also stay
+# dropped: "1С ERP" is a product, not an organisation, and splitting the
+# compound type on "/" to take the first half would start masking software
+# names again.
+
+def test_non_pii_and_compound_types_still_dropped():
+    cfg = ReviewConfig(model="test-model")
+    text = "Значение: Штука для проверки."
+    for typ in (
+        "PERSON_ROLE",
+        "EVENT_NAME",
+        "APP_NAME",
+        "ОРГАНИЗАЦИЯ/ПРОГРАММНОЕ ОБЕСПЕЧЕНИЕ",
+    ):
+        fake = _found_fake([{"text": "Штука", "type": typ}])
+        with _patched_post_json(fake), _captured_stderr():
+            out = recall_spans(text, [], cfg)
+        assert out == [], (typ, out)
+
+
+# --- 11. Prompt enumerates every label from _RECALL_LABELS -------------------
+# Built programmatically over the frozenset so the test fails the moment the
+# prompt's type list and _RECALL_LABELS drift apart (see _RECALL_TYPE_LIST).
+
+def test_prompt_lists_every_recall_label():
+    for label in _RECALL_LABELS:
+        assert label in _RECALL_SYSTEM_PROMPT, label
 
 
 if __name__ == "__main__":

@@ -47,11 +47,13 @@ stderr.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import os
 import sys
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -88,6 +90,60 @@ LOG_PATH: Path = Path(
 )
 
 _LOCK = threading.Lock()
+
+# Аутентифицированный субъект (principal) текущего запроса — тем же способом,
+# каким usage_log несёт request_id (см. usage_log._current_request и его
+# докстринг про ловушку с потоками). server.py выставляет это значение сразу
+# после проверки Authorization (см. Handler._authenticate_or_401) и НИКОГДА —
+# из клиентского поля тела/заголовка: иначе запись в журнале о том, кто
+# выполнил обезличивание, была бы фальсифицируемой, то есть бесполезной как
+# подтверждение (см. п. 1.7 приказа РКН № 140 в докстринге модуля).
+_current_actor: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_current_actor", default=None
+)
+
+
+def current_actor() -> str | None:
+    """Субъект текущего запроса, если ``actor_context`` выставлен в этом же
+    (или скопированном через ``run_in_context``) contextvars-контексте,
+    иначе ``None``."""
+    return _current_actor.get()
+
+
+@contextmanager
+def actor_context(actor: str | None):
+    """Выставить субъекта текущего запроса на время блока.
+
+    ``server.py`` открывает этот контекст сразу после успешной проверки
+    ``Authorization`` и держит его открытым на всё время обработки маршрута —
+    тогда ``record_operation``/``record_event`` ниже подхватывают ``actor``
+    сами, без явной передачи через сигнатуры модульных функций
+    (``_run_anonymize_text``/``_run_anonymize_file``), у которых нет доступа к
+    объекту запроса.
+    """
+    token = _current_actor.set(actor)
+    try:
+        yield
+    finally:
+        _current_actor.reset(token)
+
+
+def run_in_context(fn, *args, **kwargs) -> threading.Thread:
+    """Вернуть ``threading.Thread``, запускающий ``fn(*args, **kwargs)`` с
+    ТЕКУЩИМ contextvars-контекстом (в первую очередь — ``actor``,
+    см. ``actor_context`` выше), но ещё не запущенный (вызывающий код сам
+    решает, когда ``.start()``).
+
+    Обычный ``threading.Thread(target=fn)`` контекст НЕ наследует — поток
+    стартует с чистым контекстом, и внутри него ``current_actor()`` читался
+    бы как ``None`` даже для запроса, который аутентифицировался секундой
+    раньше. Та же ловушка, что описана для ``ThreadPoolExecutor`` в докстринге
+    ``usage_log`` (см. ``usage_log.run_in_context``) — здесь роль пула играет
+    воркер асинхронного задания (``_submit_job`` в ``server.py``,
+    ``/jobs/anonymize`` и ``/jobs/anonymize-file``).
+    """
+    ctx = contextvars.copy_context()
+    return threading.Thread(target=lambda: ctx.run(fn, *args, **kwargs), daemon=True)
 
 
 def _now_iso() -> str:
@@ -152,15 +208,20 @@ def record_operation(
         irreversible: Формировался ли ключ деанонимизации. ``True`` означает,
             что ключ не создавался вовсе.
         method: Применённый метод обезличивания, см. ``METHOD_IDENTIFIERS``.
-        actor: Субъект доступа, инициировавший операцию. Заполняется после
-            ввода аутентификации входящих запросов; до этого — ``None``,
-            что честно фиксирует отсутствие идентификации инициатора.
+        actor: Субъект доступа, инициировавший операцию. Если не передан явно,
+            берётся из текущего contextvars-контекста (``current_actor()`` —
+            см. ``actor_context``/``run_in_context`` выше), который
+            ``server.py`` выставляет по результату проверки
+            ``Authorization``. НИКОГДА не должен браться из клиентского
+            заголовка/поля тела запроса — только из аутентификации.
         filename: Имя исходного файла. В журнал НЕ пишется — сохраняется
             только его хеш, см. ``source_ref``.
         ok: Успешность операции.
         error: Класс ошибки. Текст исключения не пишется: в него может попасть
             фрагмент документа.
     """
+    if actor is None:
+        actor = current_actor()
     counts = dict(labels or {})
     _append(
         {
@@ -197,10 +258,16 @@ def record_event(
 
     ``detail`` — только технические сведения (например, причина удаления
     задания). Персональные данные в него не помещаются.
+
+    ``actor`` — как и в ``record_operation``: если не передан явно, берётся из
+    текущего contextvars-контекста (``current_actor()``), НИКОГДА из
+    клиентского заголовка/поля тела запроса.
     """
     if event not in EVENTS:
         print(f"[depersonalization_log] неизвестное событие: {event}", file=sys.stderr)
         return
+    if actor is None:
+        actor = current_actor()
     _append(
         {
             "ts": _now_iso(),
