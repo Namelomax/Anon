@@ -1,6 +1,8 @@
 "use client";
 
 import JSZip from "jszip";
+import Link from "next/link";
+import { signOut, useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type StageKey = "regex" | "corporate" | "ner" | "llm" | "review" | "subject";
@@ -168,6 +170,10 @@ function deanonClient(text: string, m: Record<string, string>): string {
 }
 
 export default function Home() {
+  // Только отображение личности/выход — проверка прав и квоты в этой задаче
+  // сознательно не делается (см. спеку: "не строить проверки квоты в этой
+  // задаче"), поэтому статус сессии здесь ни на что не влияет, кроме шапки.
+  const { data: session, status: sessionStatus } = useSession();
   const [tab, setTab] = useState<"anon" | "deanon">("anon");
 
   // --- Anonymize state ---
@@ -457,6 +463,25 @@ export default function Home() {
   return (
     <div className="wrap">
       <header>
+        <div className="row" style={{ justifyContent: "flex-end", marginBottom: 12 }}>
+          {sessionStatus === "authenticated" && session?.user?.email ? (
+            <div className="row" style={{ gap: 10 }}>
+              <span className="note">{session.user.email}</span>
+              <button className="ghost" onClick={() => signOut({ callbackUrl: "/" })}>
+                Выйти
+              </button>
+            </div>
+          ) : sessionStatus !== "loading" ? (
+            <div className="row" style={{ gap: 10 }}>
+              <Link className="ghost" href="/login">
+                Войти
+              </Link>
+              <Link className="ghost" href="/register">
+                Регистрация
+              </Link>
+            </div>
+          ) : null}
+        </div>
         <h1>🛡️ Анонимизатор персональных данных</h1>
         <p>Загрузите документ — получите обезличенную версию и ключ восстановления (mapping).</p>
       </header>

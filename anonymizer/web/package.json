@@ -9,9 +9,15 @@
     "start": "next start",
     "lint": "next lint"
   },
+  "prisma": {
+    "seed": "npx tsx prisma/seed.ts"
+  },
   "dependencies": {
+    "@node-rs/argon2": "^2.1.0",
+    "@prisma/client": "^6.19.3",
     "jszip": "^3.10.1",
     "next": "15.5.19",
+    "next-auth": "^5.0.0-beta.32",
     "react": "19.0.0",
     "react-dom": "19.0.0"
   },
@@ -19,6 +25,8 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "prisma": "^6.19.3",
+    "tsx": "^4.19.2",
     "typescript": "^5"
   }
 }

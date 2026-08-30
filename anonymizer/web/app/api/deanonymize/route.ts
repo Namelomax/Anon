@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callBackend, describeError } from "../_shared";
+import { resolveIdentity } from "@/lib/auth-guard";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -13,8 +14,15 @@ const BACKEND_KEY = process.env.ANONYMIZER_BACKEND_KEY || "";
  *  - multipart form: file (anonymized doc) + mapping (JSON string), or
  *  - JSON: { filename, file_base64, mapping }  (used by "восстановить последний")
  * Uses callBackend (not fetch) to tolerate the JupyterHub proxy's malformed CSP.
+ *
+ * Требует сессию Auth.js (см. lib/auth-guard.ts) — дезанонимизация не
+ * тарифицируется квотой (нет проверки лимита), но всё равно не должна быть
+ * доступна анонимным вызывающим.
  */
 export async function POST(req: NextRequest) {
+  const { error: authError } = await resolveIdentity();
+  if (authError) return authError;
+
   try {
     let payload: { filename: string; file_base64: string; mapping: unknown };
 

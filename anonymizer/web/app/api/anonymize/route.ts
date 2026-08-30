@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callBackend, callBackendGet, callBackendDelete, describeError } from "../_shared";
+import { resolveIdentity } from "@/lib/auth-guard";
+import { checkQuota } from "@/lib/quota";
 
 export const runtime = "nodejs";
 // Ни один запрос сюда не длится дольше нескольких секунд: POST только СТАВИТ
@@ -47,8 +49,24 @@ const _CANCEL_TIMEOUT_MS = 10_000;
  * Bearer-токен подставляется на сервере и до клиента не доходит. Обращения идут
  * через callBackend/callBackendGet, а не через fetch: прокси JupyterHub шлёт
  * многострочный заголовок CSP, который undici отвергает как невалидный.
+ *
+ * ПЕРЕД постановкой задачи: требуем сессию (см. lib/auth-guard.ts) и, если
+ * она есть, проверяем лимит страниц аккаунта (см. lib/quota.ts) — задача НЕ
+ * ставится, если лимит уже исчерпан. Резервирования нет (см. шапку
+ * prisma/schema.prisma): это только проверка "уже исчерпан?", фактический
+ * расход списывается отдельно, импортом биллингового лога.
  */
 export async function POST(req: NextRequest) {
+  const { identity, error: authError } = await resolveIdentity();
+  if (authError) return authError;
+
+  if (identity) {
+    const quota = await checkQuota(identity.accountId);
+    if (!quota.ok) {
+      return NextResponse.json({ error: quota.message }, { status: quota.status });
+    }
+  }
+
   try {
     const form = await req.formData();
     const file = form.get("file");
@@ -67,7 +85,15 @@ export async function POST(req: NextRequest) {
     }
 
     const buf = Buffer.from(await file.arrayBuffer());
-    const payload = { filename: file.name, file_base64: buf.toString("base64"), ...stages };
+    const payload = {
+      filename: file.name,
+      file_base64: buf.toString("base64"),
+      ...stages,
+      // Биллинговая привязка для usage_log.request_context на стороне
+      // Python (см. server.py:_coerce_id) — отсутствует, если сессии нет и
+      // ANONYMIZER_REQUIRE_AUTH=false (переходный режим, см. lib/auth-guard.ts).
+      ...(identity ? { account_id: identity.accountId, user_id: identity.userId } : {}),
+    };
 
     const submitResp = await callBackend(
       `${BACKEND_URL}/jobs/anonymize-file`,
@@ -116,6 +142,9 @@ export async function POST(req: NextRequest) {
  * браузер должен остановить опрос и показать нейтральное сообщение.
  */
 export async function GET(req: NextRequest) {
+  const { error: authError } = await resolveIdentity();
+  if (authError) return authError;
+
   const jobId = new URL(req.url).searchParams.get("jobId");
   if (!jobId) {
     return NextResponse.json({ error: "jobId обязателен" }, { status: 400 });
@@ -177,6 +206,9 @@ export async function GET(req: NextRequest) {
  * закрытие страницы.
  */
 export async function DELETE(req: NextRequest) {
+  const { error: authError } = await resolveIdentity();
+  if (authError) return authError;
+
   const jobId = req.nextUrl.searchParams.get("jobId");
   if (!jobId) {
     return NextResponse.json({ error: "jobId обязателен" }, { status: 400 });

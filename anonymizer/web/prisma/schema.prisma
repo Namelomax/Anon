@@ -1,0 +1,252 @@
+// Схема биллинга/авторизации сервиса анонимизации.
+//
+// СУБД — SQLite, не Postgres (см. `lib/db.ts` про WAL/busy_timeout): нагрузка
+// измерена (~2 запроса на документ, ~0.17 записи/сек при 10 док/мин,
+// ~5 чтений сессии/сек на пике поллинга job-статуса), апстрим-шлюз LLM сам
+// ограничивает пропускную способность ~5 док/мин, так что БД никогда не
+// станет узким местом. Имена таблиц/колонок — snake_case через @@map/@map,
+// поля в Prisma-коде — camelCase: это даёт читаемый сырой SQL и не ломает
+// код при будущем переезде на Postgres (меняется только `provider`).
+//
+// ДЕНЬГИ И СТРАНИЦЫ — ТОЛЬКО Int, никогда Decimal/Float. Prisma мапит
+// Decimal на SQLite в float, что для биллинга неприемлемо (потеря точности
+// при накоплении). Деньги — копейки (`*Kopecks`). Страницы — десятые доли
+// страницы (`*Tenths`): Python-сторона (`anonymizer/usage_log.py`) уже
+// округляет `pages = chars / 1800` до одного знака, так что десятые —
+// точное представление, а не округление в лишний раз.
+//
+// НЕТ ПРЕДВАРИТЕЛЬНОГО РЕЗЕРВИРОВАНИЯ КВОТЫ. Продуктовое решение: если лимит
+// кончился в середине запроса, работа уже СДЕЛАНА и отдаётся клиенту, отказ
+// получает только СЛЕДУЮЩИЙ запрос. Поэтому здесь нет `pagesReserved`, нет
+// TTL резервации и нет сборщика мусора по зависшим резервациям — только
+// проверка лимита на входе ("аккаунт уже превысил лимит?") и запись
+// фактического расхода на выходе.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// Тарифный план: что почём и с каким ограничением продаётся аккаунтам.
+model Plan {
+  id               Int      @id @default(autoincrement())
+  code             String   @unique
+  title            String
+  /// null = безлимитный план (см. Account.pageLimitOverrideTenths для
+  /// индивидуальных исключений поверх плана).
+  pagesPerMonth    Int?     @map("pages_per_month")
+  maxUsers         Int?     @map("max_users")
+  priceKopecks     Int      @map("price_kopecks")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  accounts Account[]
+
+  @@map("plans")
+}
+
+/// Единица биллинга. Квота — общая для ВСЕХ пользователей аккаунта (root/
+/// admin со своими sub-пользователями расходуют один и тот же лимит) —
+/// поэтому счётчики расхода (QuotaCounter) и лимиты привязаны к аккаунту, а
+/// не к пользователю.
+model Account {
+  id                      Int      @id @default(autoincrement())
+  name                    String
+  planId                  Int      @map("plan_id")
+  plan                    Plan     @relation(fields: [planId], references: [id])
+  /// Индивидуальный лимит поверх плана (в десятых долях страницы). null —
+  /// лимит берётся из Plan.pagesPerMonth без исключений.
+  pageLimitOverrideTenths Int?     @map("page_limit_override_tenths")
+  isActive                Boolean  @default(true) @map("is_active")
+  createdAt               DateTime @default(now()) @map("created_at")
+
+  users         User[]
+  usageRecords  UsageRecord[]
+  quotaCounters QuotaCounter[]
+  quotaGrants   QuotaGrant[]
+
+  @@map("accounts")
+}
+
+/// Учётная запись человека. Принадлежит одному Account и расходует его общую
+/// квоту. `role` — без enum (SQLite его не поддерживает нативно, Prisma бы
+/// эмулировала строкой всё равно), допустимые значения:
+///   root   — полный доступ, единственная роль, которая может управлять
+///            другими root/admin-аккаунтами (заводится сидом, не через UI);
+///   admin  — управляет своим Account: создаёт/отключает member-пользователей
+///            и API-ключи в пределах общей квоты аккаунта;
+///   member — обычный пользователь аккаунта, может расходовать квоту, но не
+///            управлять пользователями.
+model User {
+  id           Int      @id @default(autoincrement())
+  accountId    Int      @map("account_id")
+  account      Account  @relation(fields: [accountId], references: [id])
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  /// 'root' | 'admin' | 'member' — см. комментарий к модели выше.
+  role         String
+  isActive     Boolean  @default(true) @map("is_active")
+  /// Кто создал этого пользователя (для аудита). SetNull, а не Restrict: не
+  /// хотим блокировать удаление создателя из-за созданных им пользователей.
+  createdById  Int?     @map("created_by_id")
+  createdBy    User?    @relation("UserCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdUsers User[]   @relation("UserCreatedBy")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  apiKeys      ApiKey[]
+  usageRecords UsageRecord[]
+  quotaGrants  QuotaGrant[] @relation("QuotaGrantGrantedBy")
+  consents     Consent[]
+
+  @@map("users")
+}
+
+/// API-ключ для программного доступа (минуя логин/пароль). Хранится только
+/// хеш — как и пароль, значение целиком показывается пользователю один
+/// единственный раз, в момент выдачи.
+model ApiKey {
+  id         Int       @id @default(autoincrement())
+  userId     Int       @map("user_id")
+  user       User      @relation(fields: [userId], references: [id])
+  keyHash    String    @unique @map("key_hash")
+  /// Первые символы ключа — чтобы показать в списке ("sk_live_ab3f…"), не
+  /// раскрывая ключ целиком и не требуя его расшифровки (хеш необратим).
+  prefix     String
+  name       String?
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastUsedAt DateTime? @map("last_used_at")
+  revokedAt  DateTime? @map("revoked_at")
+
+  @@map("api_keys")
+}
+
+/// Одна запись биллинга — зеркало строки `kind="request_total"`, которую уже
+/// пишет `anonymizer/usage_log.py` по каждому обработанному документу, плюс
+/// два идентификатора (`accountId`/`userId`), которых на Python-стороне нет.
+/// `requestId` — тот самый `request_id` из usage_log.py, и именно он делает
+/// коммит идемпотентным: повторный commit того же документа (например,
+/// повтор запроса после сетевого сбоя ответа) не спишет квоту дважды,
+/// поскольку `requestId` уникален и повторная вставка отклоняется на уровне
+/// БД.
+model UsageRecord {
+  id                  Int      @id @default(autoincrement())
+  accountId           Int      @map("account_id")
+  account             Account  @relation(fields: [accountId], references: [id])
+  userId              Int?     @map("user_id")
+  user                User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  /// Формат 'YYYY-MM' — период, за который расход учитывается в квоте.
+  period              String
+  requestId           String   @unique @map("request_id")
+  chars               Int
+  pagesTenths         Int      @map("pages_tenths")
+  /// Может отличаться от pagesTenths, если часть страниц не подлежит
+  /// биллингу (например, часть работы была нашей ошибкой — см. правило
+  /// "нет резервации": на входе только проверка лимита, здесь пишется
+  /// фактически списываемая величина).
+  billablePagesTenths Int      @map("billable_pages_tenths")
+  promptTokens        Int      @map("prompt_tokens")
+  completionTokens    Int      @map("completion_tokens")
+  glinerTokensEst     Int      @map("gliner_tokens_est")
+  costKopecks         Int      @map("cost_kopecks")
+  seconds             Float
+  ok                  Boolean
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  @@index([accountId, period])
+  @@index([userId, period])
+  @@map("usage_records")
+}
+
+/// Денормализованный счётчик расхода квоты за период — чтобы проверка
+/// лимита ("аккаунт уже превысил лимит?") была ОДНИМ чтением одной строки, а
+/// не агрегатом SUM по UsageRecord на каждый запрос.
+model QuotaCounter {
+  accountId       Int      @map("account_id")
+  account         Account  @relation(fields: [accountId], references: [id])
+  period          String
+  pagesUsedTenths Int      @default(0) @map("pages_used_tenths")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@id([accountId, period])
+  @@map("quota_counters")
+}
+
+/// Журнал согласий субъекта (см. 10_Авторизация_и_биллинг_правовая_фиксация.md,
+/// раздел 9, пункт 1). ЗАПИСИ НИКОГДА НЕ ОБНОВЛЯЮТСЯ — таблица append-only.
+/// Отзыв согласия — это НОВАЯ строка с `granted=false`, а не изменение старой:
+/// весь смысл таблицы в том, чтобы быть доказательной цепочкой ("что именно и
+/// когда принял/отозвал этот субъект"), а UPDATE эту цепочку бы уничтожил.
+/// Действующее состояние согласия — последняя по `createdAt` строка с данным
+/// `kind` для пользователя.
+model Consent {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @map("user_id")
+  user            User     @relation(fields: [userId], references: [id])
+  /// Вид согласия, например 'pd_processing' (обработка ПДн) или 'offer'
+  /// (принятие оферты). Без enum по той же причине, что и User.role — SQLite
+  /// не поддерживает enum нативно.
+  kind            String
+  /// Редакция документа (Политики/Оферты), под которой дано/отозвано согласие
+  /// — при изменении условий это единственное доказательство того, ЧТО именно
+  /// принял пользователь (см. раздел 9, пункт 2 того же документа).
+  documentVersion String   @map("document_version")
+  /// IP на момент действия. Nullable — на случай серверных/сидовых операций
+  /// без запроса от браузера (например, согласие root, заведённого сидом).
+  ip              String?
+  /// true — согласие дано; false — отозвано (см. комментарий к модели выше).
+  granted         Boolean
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([userId, kind])
+  @@map("consents")
+}
+
+/// Прогресс инкрементального импорта биллингового JSONL-лога
+/// (`anonymizer/usage_log.py`, см. `lib/usage-import.ts`) — единственная
+/// строка, хранящая байтовое смещение, ДО которого лог уже разобран и внесён
+/// в UsageRecord/QuotaCounter. Смысл — не перечитывать весь файл при каждом
+/// импорте (лог растёт всю жизнь сервиса). "Однострочность" не выражена
+/// схемой (SQLite не умеет constraint "не более одной строки") — обеспечена
+/// на уровне приложения: код всегда обращается по фиксированному `id=1`.
+model ImportState {
+  id          Int      @id @default(1)
+  offsetBytes Int      @default(0) @map("offset_bytes")
+  /// Абсолютный (resolve'нутый) путь к файлу, к которому относится
+  /// `offsetBytes`. Nullable, а не с дефолтом-строкой: пустой строки как
+  /// "правдоподобного" пути не бывает, а null честно означает "импорт ещё ни
+  /// разу не запускался" — на существующей до этого поля строке (offset уже
+  /// накоплен, путь неизвестен) это тоже корректно читается как "путь
+  /// неизвестен, надо сравнить и, скорее всего, перечитать с начала" (см.
+  /// `importUsageLog`). Без этого поля смена ANONYMIZER_USAGE_LOG на другой
+  /// файл молча продолжает читать НОВЫЙ файл со СТАРОГО байтового смещения
+  /// — попадает в середину строки, парсинг ломается, импорт останавливается
+  /// и учёт использования тихо замирает.
+  logPath     String?  @map("log_path")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("import_state")
+}
+
+/// Разовая или бессрочная добавка к лимиту аккаунта — ручной грант (админом
+/// сервиса) или задел под будущую онлайн-оплату (`externalPaymentId`).
+model QuotaGrant {
+  id                Int      @id @default(autoincrement())
+  accountId         Int      @map("account_id")
+  account           Account  @relation(fields: [accountId], references: [id])
+  /// null = бессрочный грант (не привязан к конкретному 'YYYY-MM').
+  period            String?
+  pagesTenths       Int      @map("pages_tenths")
+  reason            String
+  grantedByUserId   Int?     @map("granted_by_user_id")
+  grantedByUser     User?    @relation("QuotaGrantGrantedBy", fields: [grantedByUserId], references: [id], onDelete: SetNull)
+  /// Идентификатор платежа во внешней системе — задел под будущую онлайн-
+  /// оплату, сейчас всегда null для ручных грантов.
+  externalPaymentId String?  @map("external_payment_id")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([accountId, period])
+  @@map("quota_grants")
+}

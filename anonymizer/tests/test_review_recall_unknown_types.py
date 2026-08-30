@@ -242,6 +242,50 @@ def test_prompt_lists_every_recall_label():
         assert label in _RECALL_SYSTEM_PROMPT, label
 
 
+# --- 12. DATE is deliberately NOT a recall label — masking dates is disabled
+# on purpose (see detectors.py's rationale near CORPORATE_DETECTORS, and the
+# comment above _RECALL_LABELS in review.py). A recall candidate returned with
+# type "DATE" must be dropped, same as any other unknown type.
+
+def test_date_type_produces_no_span():
+    cfg = ReviewConfig(model="test-model")
+    text = "Работы должны быть закрыты 12.03.2025."
+    fake = _found_fake([{"text": "12.03.2025", "type": "DATE"}])
+
+    with _patched_post_json(fake), _captured_stderr():
+        out = recall_spans(text, [], cfg)
+
+    assert out == []
+    assert "12.03.2025" in text  # sanity: value untouched in the source text
+
+
+# --- 13. Same for the Cyrillic alias "ДАТА" — it must no longer resolve to
+# DATE (the alias was removed together with DATE from _RECALL_LABELS).
+
+def test_cyrillic_data_type_produces_no_span():
+    cfg = ReviewConfig(model="test-model")
+    text = "Срок сдачи — 01.09."
+    fake = _found_fake([{"text": "01.09", "type": "ДАТА"}])
+
+    with _patched_post_json(fake), _captured_stderr():
+        out = recall_spans(text, [], cfg)
+
+    assert out == []
+
+
+# --- 14. DATE never appears in the rendered prompt's allowed-values list ----
+# _RECALL_TYPE_LIST is derived from _RECALL_LABELS, so this is really a
+# regression guard on _RECALL_LABELS itself: nobody should re-add DATE there
+# without reading the rationale in detectors.py first.
+
+def test_prompt_allowed_values_list_has_no_date():
+    from anonymizer.review import _RECALL_TYPE_LIST
+
+    assert "DATE" not in _RECALL_LABELS
+    allowed_values = [v.strip() for v in _RECALL_TYPE_LIST.split(",")]
+    assert "DATE" not in allowed_values
+
+
 if __name__ == "__main__":
     import traceback
 

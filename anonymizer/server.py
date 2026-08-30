@@ -481,10 +481,30 @@ class _BadRequest(Exception):
     """Raised by _run_anonymize_file for a 400-worthy input error."""
 
 
+def _coerce_id(value) -> int | None:
+    """Лёгкая валидация ``account_id``/``user_id`` из тела запроса.
+
+    Разрешены целое число или строка, целиком состоящая из цифр — вернётся
+    ``int``. Любое другое значение (``None``, отсутствие поля, произвольная
+    строка, dict/list, число с плавающей точкой) даёт ``None`` — идентификатор
+    считается отсутствующим, а НЕ ошибкой запроса: кривой ``account_id`` от
+    клиента не должен стоить пользователю документа (см. задачу — раздел
+    BACKGROUND). ``bool`` намеренно исключён, хотя в Python это подкласс
+    ``int`` — ``True``/``False`` не являются осмысленными идентификаторами.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
 def _run_anonymize_text(data: dict, cancel_event: threading.Event | None = None) -> dict:
     """Run the text-anonymization pipeline for a parsed /anonymize body.
 
-    Body: {text, regex?, corporate?, ner?, llm?, ner_threshold?}
+    Body: {text, regex?, corporate?, ner?, llm?, ner_threshold?, account_id?, user_id?}
     Returns the same shape the synchronous /anonymize handler replies with.
     Shared by the synchronous handler and the async job worker so the two can
     never drift apart (same contract as ``_run_anonymize_file``).
@@ -493,13 +513,24 @@ def _run_anonymize_text(data: dict, cancel_event: threading.Event | None = None)
     ``_submit_job``); the synchronous handler leaves it at the default
     ``None``, so ``anon.anonymize(text)`` can raise ``Cancelled`` only for
     jobs, never for a direct /anonymize call.
+
+    ``account_id``/``user_id`` — опциональная биллинговая привязка (см.
+    ``usage_log.request_context``): Streamlit-клиент и прямые вызовы API их
+    пока не присылают, сервер обязан продолжать работать без них в точности
+    как сегодня. Значения валидируются мягко (``_coerce_id``): что угодно,
+    кроме целого числа или строки из цифр, тихо становится ``None``, а не
+    ошибкой запроса.
     """
     text = data.get("text", "")
     stages = {k: data[k] for k in _STAGE_NAMES if k in data}
     used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
+    account_id = _coerce_id(data.get("account_id"))
+    user_id = _coerce_id(data.get("user_id"))
 
     t0 = time.time()
-    with usage_log.request_context(chars=len(text), stages=used) as usage_totals:
+    with usage_log.request_context(
+        chars=len(text), stages=used, account_id=account_id, user_id=user_id,
+    ) as usage_totals:
         # Снимаем request_id ВНУТРИ контекста: на выходе из request_context
         # contextvar сбрасывается, и снаружи вернулся бы None.
         req_id = usage_log.current_request_id()
@@ -540,7 +571,7 @@ def _run_anonymize_text(data: dict, cancel_event: threading.Event | None = None)
 def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None) -> dict:
     """Run the file-anonymization pipeline for a parsed /anonymize-file body.
 
-    Body: {filename, file_base64, regex?, corporate?, ner?, llm?}
+    Body: {filename, file_base64, regex?, corporate?, ner?, llm?, account_id?, user_id?}
     Returns: {filename, is_docx, anonymized_text, mapping, summary, spans,
               stages, document_base64, document_name, document_mime}
     Raises _BadRequest for a malformed request (missing file_base64), or lets
@@ -549,6 +580,10 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
 
     ``cancel_event`` — see ``_run_anonymize_text``'s docstring; only the async
     job worker ever passes one.
+
+    ``account_id``/``user_id`` — see ``_run_anonymize_text``'s docstring:
+    optional, mildly validated via ``_coerce_id``, absent/malformed values
+    never fail the request.
     """
     import base64
     from pathlib import PurePosixPath
@@ -562,12 +597,16 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
     raw = base64.b64decode(b64)
     stages = {k: data[k] for k in _STAGE_NAMES if k in data}
     used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
+    account_id = _coerce_id(data.get("account_id"))
+    user_id = _coerce_id(data.get("user_id"))
 
     is_docx = filename.lower().endswith(".docx")
     text = read_text_from_bytes(filename, raw)
 
     t0 = time.time()
-    with usage_log.request_context(filename=filename, chars=len(text), stages=used) as usage_totals:
+    with usage_log.request_context(
+        filename=filename, chars=len(text), stages=used, account_id=account_id, user_id=user_id,
+    ) as usage_totals:
         # см. комментарий в _run_anonymize_text — request_id снимается внутри
         req_id = usage_log.current_request_id()
         with _model_lock():  # only held for local (in-process) models; see _LOCK

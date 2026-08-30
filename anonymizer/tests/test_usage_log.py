@@ -672,6 +672,155 @@ def test_real_30_page_document_shape_lands_near_expected_total():
     assert summary["gliner_tokens_est"] == totals.gliner_tokens_est
 
 
+def test_request_context_with_ids_writes_them_into_request_total():
+    """account_id/user_id passed to request_context must land verbatim in
+    the request_total line (see usage_log.request_context's docstring:
+    billing attribution)."""
+    with _temp_log_path() as log_path:
+        with usage_log.request_context(chars=100, account_id=42, user_id="7") as totals:
+            usage_log.record_call("llm_detect", seconds=0.1, ok=True)
+        lines = _read_lines(log_path)
+
+    summary = next(l for l in lines if l["kind"] == "request_total")
+    assert summary["account_id"] == 42
+    assert summary["user_id"] == "7"
+    assert summary["request_id"] == totals.request_id
+
+
+def test_request_context_without_ids_writes_null_and_still_parses():
+    """No account_id/user_id given (default None) -> both keys present but
+    null, and read_request_totals/usage_summary keep working unchanged —
+    this is the "pre-auth client" case (see request_context's docstring)."""
+    with _temp_log_path() as log_path:
+        with usage_log.request_context(chars=100) as totals:
+            usage_log.record_call("llm_detect", seconds=0.1, ok=True)
+        lines = _read_lines(log_path)
+
+        summary = next(l for l in lines if l["kind"] == "request_total")
+        assert summary["account_id"] is None
+        assert summary["user_id"] is None
+
+        totals_read = usage_log.read_request_totals()
+        assert len(totals_read) == 1
+        summarized = usage_log.usage_summary(days=30)
+        assert summarized["all_time"]["requests"] == 1
+
+
+def test_usage_summary_tolerates_mix_of_old_and_new_style_lines():
+    """A log containing lines written BEFORE account_id/user_id existed
+    (no such keys at all) alongside new-style lines (with the keys, possibly
+    null) must summarise without error — the backward-compatibility guard
+    the task spec calls out explicitly."""
+    old_style = {
+        "ts": "2026-08-12T10:00:00.000+00:00", "kind": "request_total",
+        "request_id": "old", "pages": 1.0, "prompt_tokens_total": 10,
+        "completion_tokens_total": 5, "cost_rub": 0.1, "seconds": 2.0,
+    }
+    with _temp_log_path() as log_path:
+        log_path.write_text(json.dumps(old_style) + "\n", encoding="utf-8")
+        with usage_log.request_context(chars=100, account_id=1, user_id=2) as totals:
+            usage_log.record_call("llm_detect", seconds=0.1, ok=True)
+        summary = usage_log.usage_summary(days=30)
+
+        assert summary["all_time"]["requests"] == 2
+        records = usage_log.read_request_totals()
+        assert {r["request_id"] for r in records} == {"old", totals.request_id}
+        new_rec = next(r for r in records if r["request_id"] == totals.request_id)
+        assert new_rec["account_id"] == 1
+        assert new_rec["user_id"] == 2
+        old_rec = next(r for r in records if r["request_id"] == "old")
+        assert "account_id" not in old_rec  # old-style line predates the feature
+
+
+def test_server_run_anonymize_text_threads_ids_into_request_total():
+    """End-to-end through server._run_anonymize_text: a body carrying
+    account_id/user_id must result in those ids landing in the written
+    request_total line."""
+    from anonymizer import server
+
+    orig_detectors = server._DETECTORS
+    orig_defaults = server._DEFAULTS
+    orig_review_cfg = server._REVIEW_CFG
+    orig_ner_backend = server._NER_BACKEND
+    orig_needs_lock = server._NEEDS_MODEL_LOCK
+    server._DETECTORS = {}
+    server._DEFAULTS = {name: False for name in server._STAGE_NAMES}
+    server._REVIEW_CFG = None
+    server._NER_BACKEND = "none"
+    server._NEEDS_MODEL_LOCK = False
+    try:
+        with _temp_log_path() as log_path:
+            result = server._run_anonymize_text(
+                {"text": "просто текст без ПДн", "account_id": 99, "user_id": "13"}
+            )
+            lines = _read_lines(log_path)
+    finally:
+        server._DETECTORS = orig_detectors
+        server._DEFAULTS = orig_defaults
+        server._REVIEW_CFG = orig_review_cfg
+        server._NER_BACKEND = orig_ner_backend
+        server._NEEDS_MODEL_LOCK = orig_needs_lock
+
+    assert "anonymized_text" in result
+    summary = next(l for l in lines if l["kind"] == "request_total")
+    assert summary["account_id"] == 99
+    assert summary["user_id"] == 13
+
+
+def test_server_run_anonymize_text_ignores_malformed_ids_without_failing():
+    """A malformed id (non-digit string, dict) must be silently dropped —
+    never cost the caller their document."""
+    from anonymizer import server
+
+    orig_detectors = server._DETECTORS
+    orig_defaults = server._DEFAULTS
+    orig_review_cfg = server._REVIEW_CFG
+    orig_ner_backend = server._NER_BACKEND
+    orig_needs_lock = server._NEEDS_MODEL_LOCK
+    server._DETECTORS = {}
+    server._DEFAULTS = {name: False for name in server._STAGE_NAMES}
+    server._REVIEW_CFG = None
+    server._NER_BACKEND = "none"
+    server._NEEDS_MODEL_LOCK = False
+    try:
+        with _temp_log_path() as log_path:
+            result = server._run_anonymize_text(
+                {"text": "просто текст без ПДн", "account_id": "abc", "user_id": {"x": 1}}
+            )
+            lines = _read_lines(log_path)
+    finally:
+        server._DETECTORS = orig_detectors
+        server._DEFAULTS = orig_defaults
+        server._REVIEW_CFG = orig_review_cfg
+        server._NER_BACKEND = orig_ner_backend
+        server._NEEDS_MODEL_LOCK = orig_needs_lock
+
+    # The document was still processed successfully...
+    assert "anonymized_text" in result
+    # ... and the malformed ids never made it into the log — they collapse
+    # to None, same as if they had never been sent.
+    summary = next(l for l in lines if l["kind"] == "request_total")
+    assert summary["account_id"] is None
+    assert summary["user_id"] is None
+
+
+def test_coerce_id_accepts_ints_and_digit_strings_rejects_the_rest():
+    from anonymizer.server import _coerce_id
+
+    assert _coerce_id(42) == 42
+    assert _coerce_id("42") == 42
+    assert _coerce_id(" 42 ") == 42
+    assert _coerce_id(None) is None
+    assert _coerce_id("") is None
+    assert _coerce_id("abc") is None
+    assert _coerce_id("12abc") is None
+    assert _coerce_id({"x": 1}) is None
+    assert _coerce_id([1, 2]) is None
+    assert _coerce_id(3.14) is None
+    assert _coerce_id(True) is None
+    assert _coerce_id(False) is None
+
+
 def test_usage_summary_missing_log_file_returns_zeros():
     with _temp_log_path() as log_path:
         assert not log_path.exists()  # _temp_log_path only reserves a path, doesn't create it

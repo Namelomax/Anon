@@ -177,7 +177,10 @@ button.primary:disabled {
   cursor: not-allowed;
 }
 
-button.ghost {
+/* Селектор ".ghost" (а не "button.ghost") — стиль используется и на <button>
+   (скачивание/действия), и на <a> (навигация "Войти"/"Регистрация" в шапке,
+   см. app/page.tsx): свойства text-decoration/display как раз под ссылку. */
+.ghost {
   background: var(--panel-2);
   color: var(--text);
   border: 1px solid var(--border);
@@ -189,7 +192,7 @@ button.ghost {
   display: inline-block;
 }
 
-button.ghost:hover {
+.ghost:hover {
   border-color: var(--accent);
 }
 
@@ -313,4 +316,64 @@ table.map code {
 .scroll-tbl {
   max-height: 500px;
   overflow: auto;
+}
+
+/* Формы логина/регистрации (app/(auth)/login, app/(auth)/register) — те же
+   переменные темы, что и везде в приложении (тёмная тема, см. :root выше). */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.field label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.field input[type="email"],
+.field input[type="password"],
+.field input[type="text"] {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-size: 15px;
+  font-family: inherit;
+}
+
+.field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 16px;
+  cursor: pointer;
+}
+
+.consent input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+
+.consent a {
+  color: var(--accent-2);
+}
+
+.auth-links {
+  margin-top: 16px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.auth-links a {
+  color: var(--accent);
 }

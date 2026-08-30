@@ -375,7 +375,13 @@ class RequestTotals:
 
 
 @contextmanager
-def request_context(filename: str | None = None, chars: int = 0, stages: dict | None = None):
+def request_context(
+    filename: str | None = None,
+    chars: int = 0,
+    stages: dict | None = None,
+    account_id: int | str | None = None,
+    user_id: int | str | None = None,
+):
     """Контекст обработки ОДНОГО документа.
 
     Назначает свежий ``request_id`` (виден всем вызовам ``record_call``
@@ -384,6 +390,20 @@ def request_context(filename: str | None = None, chars: int = 0, stages: dict | 
     пишет ОДНУ сводную строку ``kind="request_total"`` и возвращает объект
     ``RequestTotals``, который вызывающий код (``server.py``) может прочитать
     ПОСЛЕ выхода из ``with``.
+
+    ``account_id``/``user_id`` — биллинговая привязка записи: КАКОЙ аккаунт
+    списывается за документ и КАКОЙ пользователь его потратил. Это единственное,
+    чего не хватало ``request_total``, чтобы служить источником истины для
+    биллинга — импортёр на стороне Next.js читает JSONL и заносит строки в
+    базу, ключуясь на ``request_id`` (идемпотентность), а платит по ним именно
+    ``account_id``. Оба параметра ОПЦИОНАЛЬНЫ и по умолчанию ``None``:
+    ``None`` означает, что вызов пришёл от клиента, который не знает о системе
+    аутентификации/биллинга (Streamlit-клиент, прямой вызов API без этих
+    полей, либо более старая версия любого из них) — такая запись просто не
+    участвует в списании, а не ломает импорт. Значения не валидируются здесь:
+    их лёгкая проверка (int или строка из цифр) — забота вызывающего кода
+    (``server.py``), сюда должны попадать уже проверенные значения либо
+    ``None``.
     """
     request_id = uuid.uuid4().hex[:12]
     totals = RequestTotals(request_id=request_id)
@@ -453,6 +473,14 @@ def request_context(filename: str | None = None, chars: int = 0, stages: dict | 
                 "cost_rub_llm": cost_rub_llm,
                 "cost_rub_gliner": cost_rub_gliner,
                 "stages": dict(stages or {}),
+                # Биллинговая привязка — см. докстринг request_context выше.
+                # None у обоих полей означает клиента, который предшествует
+                # системе аутентификации/биллинга; читатели (импортёр в
+                # Next.js) обязаны считать такую строку небилящейся, а не
+                # падать на отсутствии ключей (старые строки лога их вовсе не
+                # содержат — см. test_usage_log.py на обратную совместимость).
+                "account_id": account_id,
+                "user_id": user_id,
             })
         except Exception as exc:  # noqa: BLE001
             print(f"[usage_log] сводная запись документа не удалась: {exc}", file=sys.stderr)
