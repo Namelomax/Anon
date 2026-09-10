@@ -61,6 +61,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from anonymizer import depersonalization_log  # noqa: E402
 from anonymizer import usage_log  # noqa: E402
+from anonymizer.detectors import SPECIAL_CATEGORY_DETECTORS, run_detectors  # noqa: E402
 from anonymizer.engine import Anonymizer  # noqa: E402
 from anonymizer.llm import Cancelled  # noqa: E402
 
@@ -139,6 +140,12 @@ _API_KEYS: dict = {}
 # --allow-anonymous — единственный сознательный обход проверки, только для
 # локальной разработки (см. _configure_auth).
 _ALLOW_ANONYMOUS = False
+
+# --- Шлюз специальных категорий ПДн (медицинские данные) ------------------
+# По умолчанию ВКЛЮЧЁН (см. _check_special_categories и SPECIAL_CATEGORY_DETECTORS
+# в detectors.py). --allow-special-categories отключает его — единственный
+# сознательный обход, в том же духе, что и --allow-anonymous (см. main()).
+_ALLOW_SPECIAL_CATEGORIES = False
 
 
 def _load_api_keys() -> dict:
@@ -255,6 +262,36 @@ def _configure_auth(args) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+
+def _configure_special_categories_gate(args) -> None:
+    """Настроить шлюз спецкатегорий ПДн (медицинские данные) по флагу
+    ``--allow-special-categories``.
+
+    Дефолт — шлюз ВКЛЮЧЁН: см. ``_check_special_categories`` ниже. Флаг
+    отключает проверку целиком и предназначен только для локальной отладки
+    самих детекторов — при выключенном шлюзе документ с признаками
+    медицинских данных проходит весь пайплайн как обычно, то есть
+    маскируется и уходит на внешний инференс-шлюз (GLiNER/LLM), а не
+    отклоняется на входе. В духе ``--allow-anonymous`` (см. ``_configure_auth``)
+    предупреждение печатается в stderr при каждом запуске с этим флагом.
+    """
+    global _ALLOW_SPECIAL_CATEGORIES
+    _ALLOW_SPECIAL_CATEGORIES = bool(args.allow_special_categories)
+    if _ALLOW_SPECIAL_CATEGORIES:
+        print(
+            "[server] ВНИМАНИЕ: сервер запущен с --allow-special-categories — "
+            "проверка на специальные категории персональных данных "
+            "(медицинские сведения: диагнозы МКБ-10, номера медицинских карт) "
+            "ПОЛНОСТЬЮ ОТКЛЮЧЕНА. Документы с такими сведениями больше не "
+            "отклоняются на входе — они маскируются как обычные ПДн и "
+            "отправляются на внешний инференс-шлюз (GLiNER/LLM). ст. 10 "
+            "152-ФЗ разрешает обработку специальных категорий только с "
+            "письменного согласия субъекта данных, которого "
+            "самообслуживаемый сервис получить не может. Используйте этот "
+            "флаг только для локальной отладки детекторов, никогда — в проде.",
+            file=sys.stderr,
+        )
 
 
 def _harden_process() -> None:
@@ -481,6 +518,58 @@ class _BadRequest(Exception):
     """Raised by _run_anonymize_file for a 400-worthy input error."""
 
 
+class _SpecialCategoryRefused(Exception):
+    """Документ отклонён на входе из-за признаков спецкатегории ПДн.
+
+    Отдельный от ``_BadRequest`` класс: отказ по содержанию документа — это
+    НЕ «некорректный запрос» (400), а осознанный отказ обрабатывать контент
+    (422), и фронтенду важно уметь отличить одно от другого. Сообщение
+    исключения — то, что уйдёт клиенту как есть (см. ``_handle_text``/
+    ``_handle_file``), поэтому конструируется только в ``_check_special_categories``
+    и никогда не должно содержать найденное значение.
+    """
+
+
+def _check_special_categories(text: str) -> None:
+    """Входной шлюз спецкатегорий ПДн (медицинские данные). Вызывается ДО
+    ``usage_log.request_context(...)`` в обоих ``_run_anonymize_*`` — см. их
+    комментарии на месте вызова, почему порядок именно такой.
+
+    ст. 10 152-ФЗ разрешает обработку специальных категорий персональных
+    данных только с письменного согласия СУБЪЕКТА данных — человека, чьи
+    медицинские сведения оказались в документе. Самообслуживаемый сервис это
+    согласие получить не может: субъект документа сайт никогда не посещает и
+    ничего не подтверждает. Поэтому вместо маскирования такой документ
+    отклоняется целиком, раньше, чем откроется биллинговый контекст и раньше,
+    чем текст попадёт в анонимизацию (а значит и во внешний GLiNER/LLM-шлюз) —
+    иначе мы отправили бы спецкатегорию ПДн третьей стороне ровно в тот
+    момент, когда обнаружили, что делать этого нельзя.
+
+    В лог/исключение НИКОГДА не попадает само совпадение или его контекст —
+    только количество и то, что это метка "MEDICAL": само совпадение и есть
+    та специальная категория ПДн, которую мы отказываемся обрабатывать, и
+    записать его означало бы хранить именно то, от чего мы отказываемся.
+    ``--allow-special-categories`` отключает проверку целиком (см.
+    ``_configure_special_categories_gate``).
+    """
+    if _ALLOW_SPECIAL_CATEGORIES:
+        return
+    spans = run_detectors(text, SPECIAL_CATEGORY_DETECTORS)
+    if not spans:
+        return
+    print(
+        f"[server] отказ: признаки специальных категорий ПДн (MEDICAL), "
+        f"совпадений: {len(spans)} — документ не обрабатывается",
+        file=sys.stderr,
+    )
+    raise _SpecialCategoryRefused(
+        "Документ, по всей видимости, содержит медицинские сведения — "
+        "специальную категорию персональных данных. Сервис не обрабатывает "
+        "специальные категории персональных данных. Пожалуйста, удалите эти "
+        "сведения из документа и повторите попытку."
+    )
+
+
 def _coerce_id(value) -> int | None:
     """Лёгкая валидация ``account_id``/``user_id`` из тела запроса.
 
@@ -522,6 +611,12 @@ def _run_anonymize_text(data: dict, cancel_event: threading.Event | None = None)
     ошибкой запроса.
     """
     text = data.get("text", "")
+    # Шлюз спецкатегорий ПДн — СТРОГО до request_context: тот начинает
+    # биллинг, а дальше по пайплайну текст уходит во внешние GLiNER/LLM.
+    # Отклонённый документ не должен стоить пользователю ничего и не должен
+    # ни при каких обстоятельствах достичь внешнего шлюза. См.
+    # _check_special_categories.
+    _check_special_categories(text)
     stages = {k: data[k] for k in _STAGE_NAMES if k in data}
     used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
     account_id = _coerce_id(data.get("account_id"))
@@ -602,6 +697,12 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
 
     is_docx = filename.lower().endswith(".docx")
     text = read_text_from_bytes(filename, raw)
+    # Шлюз спецкатегорий ПДн — СТРОГО до request_context: тот начинает
+    # биллинг, а дальше по пайплайну текст уходит во внешние GLiNER/LLM.
+    # Отклонённый документ не должен стоить пользователю ничего и не должен
+    # ни при каких обстоятельствах достичь внешнего шлюза. См.
+    # _check_special_categories.
+    _check_special_categories(text)
 
     t0 = time.time()
     with usage_log.request_context(
@@ -801,6 +902,11 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_text(self):
         try:
             self._send(200, _run_anonymize_text(self._read_json()))
+        except _SpecialCategoryRefused as exc:
+            # 422, а не 400: запрос корректен, отказ — по содержанию
+            # документа (см. _SpecialCategoryRefused). Сообщение исключения
+            # уже безопасно для клиента (см. _check_special_categories).
+            self._send(422, {"error": str(exc)})
         except _BadRequest as exc:
             self._send(400, {"error": str(exc)})
         except Exception as exc:  # noqa: BLE001
@@ -887,6 +993,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = self._read_json()
             self._send(200, _run_anonymize_file(data))
+        except _SpecialCategoryRefused as exc:
+            # 422, а не 400: запрос корректен, отказ — по содержанию
+            # документа (см. _SpecialCategoryRefused). Сообщение исключения
+            # уже безопасно для клиента (см. _check_special_categories).
+            self._send(422, {"error": str(exc)})
         except _BadRequest as exc:
             self._send(400, {"error": str(exc)})
         except Exception as exc:  # noqa: BLE001
@@ -1156,12 +1267,22 @@ def main() -> None:
              "без ANONYMIZER_API_KEYS/ANONYMIZER_API_KEY сервер откажется "
              "стартовать, см. _configure_auth.",
     )
+    ap.add_argument(
+        "--allow-special-categories", action="store_true", default=False,
+        help="Отключить входной шлюз спецкатегорий ПДн (медицинские "
+             "сведения: МКБ-10, номера мед. карт). По умолчанию шлюз ВКЛЮЧЁН "
+             "и документ с такими признаками отклоняется на входе (см. "
+             "_check_special_categories). ТОЛЬКО для локальной отладки "
+             "детекторов — печатает предупреждение в stderr при каждом "
+             "запуске и никогда не используется в проде.",
+    )
     args = ap.parse_args()
 
     # Проверка ключей доступа — ДО загрузки моделей: ошибка конфигурации
     # должна остановить процесс сразу, а не после многосекундного прогрева
     # (см. докстринг _configure_auth).
     _configure_auth(args)
+    _configure_special_categories_gate(args)
 
     global _INFO, _GLINER_CFG, _REVIEW_CFG, _NER_BACKEND, _NEEDS_MODEL_LOCK
     print("Загружаю модели…", flush=True)

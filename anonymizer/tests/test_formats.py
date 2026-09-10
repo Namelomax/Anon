@@ -192,9 +192,23 @@ def test_card_solid_16_digits():
     _masked("р/с 40702810900000012345", "40702810900000012345")
 
 
-def test_medical_icd_and_record():
-    _masked("основной диагноз J06.9", "J06.9")
-    _masked("история болезни № 12345", "12345")
+def test_medical_icd_and_record_are_gate_not_mask():
+    """MED_ICD/MED_RECORD НЕ входят в DEFAULT_DETECTORS — это входной шлюз
+    (см. SPECIAL_CATEGORY_DETECTORS и server._check_special_categories), а не
+    маска: документ с такими признаками должен быть целиком отклонён ДО
+    анонимизации (см. test_server_special_categories.py), а не замаскирован
+    и пропущен дальше по пайплайну. Поэтому обычный маскирующий Anonymizer
+    (``_A``, собранный из DEFAULT_DETECTORS) их больше НЕ трогает.
+    """
+    from anonymizer.detectors import SPECIAL_CATEGORY_DETECTORS, run_detectors
+
+    _visible("основной диагноз J06.9", "J06.9")
+    _visible("история болезни № 12345", "12345")
+
+    # Детекторы при этом не удалены, а лишь выведены из реестра маскирования —
+    # решение обратимо, детекторы остаются рабочими и годны для входного шлюза.
+    assert run_detectors("основной диагноз J06.9", SPECIAL_CATEGORY_DETECTORS)
+    assert run_detectors("история болезни № 12345", SPECIAL_CATEGORY_DETECTORS)
 
 
 def test_surname_after_patronymic_and_status_word():

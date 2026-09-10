@@ -879,11 +879,18 @@ DEFAULT_DETECTORS: tuple[Detector, ...] = (
     POSTAL_ADDR,
     HOUSE,
     HOUSE_STANDALONE,
-    MED_ICD,
-    MED_RECORD,
     PHONE,
     PHONE_EXT,
 )
+
+# Детекторы специальных категорий персональных данных (медицина). НЕ для
+# маскирования — это входной шлюз (intake gate). ст. 10 152-ФЗ разрешает
+# обработку специальных категорий только с письменного согласия СУБЪЕКТА
+# данных, а самообслуживаемый сервис не может это согласие получить (субъект
+# документа сайт не посещает и ничего не подтверждает). Поэтому документ, в
+# котором сработал любой из этих детекторов, не маскируется — он целиком
+# отклоняется на входе, до вызова остального пайплайна. См. server.py.
+SPECIAL_CATEGORY_DETECTORS: tuple[Detector, ...] = (MED_ICD, MED_RECORD)
 
 # Higher weight wins when spans overlap. Specific document/contact types beat
 # the broad PHONE/CREDIT_CARD digit runs that can swallow them.
