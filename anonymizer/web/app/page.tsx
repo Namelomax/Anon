@@ -4,6 +4,7 @@ import JSZip from "jszip";
 import {
   Braces,
   ChevronDown,
+  CircleUser,
   CircleCheckBig,
   Download,
   Eye,
@@ -15,12 +16,14 @@ import {
   KeyRound,
   LoaderCircle,
   Lock,
+  Gauge,
   Package,
   PanelLeft,
   PanelLeftClose,
   ShieldCheck,
   TriangleAlert,
   Undo2,
+  Users,
   UserPlus,
 } from "lucide-react";
 import Link from "next/link";
@@ -28,6 +31,65 @@ import { signOut, useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type StageKey = "regex" | "corporate" | "ner" | "llm" | "review" | "subject";
+
+type Tab = "anon" | "deanon" | "account";
+
+// Зеркало lib/account-summary.ts: страницы везде в ДЕСЯТЫХ долях (как в БД,
+// см. шапку prisma/schema.prisma — страницы и деньги только целыми).
+type AccountSummary = {
+  user: { email: string; role: string };
+  account: { id: number; name: string; isActive: boolean };
+  plan: {
+    code: string;
+    title: string;
+    pagesPerMonth: number | null;
+    maxUsers: number | null;
+    priceKopecks: number;
+  };
+  quota: {
+    period: string;
+    unlimited: boolean;
+    usedTenths: number;
+    limitTenths: number | null;
+    grantsTenths: number;
+    allowanceTenths: number | null;
+    remainingTenths: number | null;
+    exhausted: boolean;
+  };
+  canManage: boolean;
+  users: {
+    active: number;
+    limit: number | null;
+    taken: number;
+    free: number | null;
+    list: {
+      id: number;
+      email: string;
+      role: string;
+      isActive: boolean;
+      createdAt: string;
+      isSelf: boolean;
+    }[];
+  };
+  invitations: {
+    id: number;
+    email: string;
+    role: string;
+    createdAt: string;
+    expiresAt: string;
+  }[];
+  periodTotals: { documents: number; chars: number; pagesTenths: number };
+  recent: {
+    id: number;
+    createdAt: string;
+    userEmail: string | null;
+    chars: number;
+    pagesTenths: number;
+    billablePagesTenths: number;
+    seconds: number;
+    ok: boolean;
+  }[];
+};
 
 type AnonResult = {
   filename: string;
@@ -263,6 +325,50 @@ function WarningList({ items }: { items: (FailedWarning & { count: number })[] }
   );
 }
 
+// Полный список форматов живёт в меню, а не в зоне загрузки: там он занимал
+// три строки и забивал собой главное действие. Сгруппирован по тому, что
+// пользователь получит на выходе (политика — documents.prepare_document).
+const FORMAT_GROUPS: { title: string; items: string }[] = [
+  {
+    title: "Возвращаются в своём формате",
+    items: ".docx · .xlsx · .xlsm · .odt · .xml · .txt · .csv · .md · .json",
+  },
+  {
+    title: "Меняют формат",
+    items: ".doc → .docx · .xls → .xlsx",
+  },
+  {
+    title: "Только текстом",
+    items: ".pdf → .txt",
+  },
+];
+
+const ROLE_LABELS: Record<string, string> = {
+  root: "Владелец сервиса",
+  admin: "Администратор аккаунта",
+  member: "Пользователь",
+};
+
+/** Десятые доли страницы -> «12,4». */
+function pages(tenths: number): string {
+  return (tenths / 10).toLocaleString("ru", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  });
+}
+
+/** Копейки -> «990» (рублей). */
+function rubles(kopecks: number): string {
+  return (kopecks / 100).toLocaleString("ru", { maximumFractionDigits: 2 });
+}
+
+/** 'YYYY-MM' -> «сентябрь 2026». Период биллинга считается в UTC (lib/period.ts). */
+function periodLabel(period: string): string {
+  const d = new Date(`${period}-01T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return period;
+  return d.toLocaleDateString("ru", { month: "long", year: "numeric", timeZone: "UTC" });
+}
+
 function extOf(name: string): string {
   const m = /\.[^.]+$/.exec(name);
   return m ? m[0].toLowerCase() : "";
@@ -303,7 +409,23 @@ export default function Home() {
   // сознательно не делается (см. спеку: "не строить проверки квоты в этой
   // задаче"), поэтому статус сессии здесь ни на что не влияет, кроме шапки.
   const { data: session, status: sessionStatus } = useSession();
-  const [tab, setTab] = useState<"anon" | "deanon">("anon");
+  const [tab, setTab] = useState<Tab>("anon");
+  // Сводка кабинета: тариф, остаток квоты, история. Нужна не только самому
+  // кабинету — по ней в меню показывается остаток, а исчерпанная квота
+  // гасит кнопку «Обезличить» ДО загрузки файла (бэкенд всё равно откажет,
+  // см. lib/quota.ts, но узнать об этом лучше заранее).
+  const [summary, setSummary] = useState<AccountSummary | null>(null);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  // Управление составом аккаунта. inviteUrl — ссылка последнего выписанного
+  // приглашения: она существует в открытом виде ровно один раз (в БД только
+  // хеш, см. lib/invitations.ts), поэтому держим её на экране, пока админ её
+  // не скопировал.
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<"member" | "admin">("member");
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [inviteUrl, setInviteUrl] = useState<string | null>(null);
+  const [inviteCopied, setInviteCopied] = useState(false);
 
   // --- Anonymize state ---
   const [file, setFile] = useState<File | null>(null);
@@ -332,6 +454,7 @@ export default function Home() {
   // Экспериментальные настройки скрыты, пока их не раскроют: в обычной работе
   // слои не трогают, а список галочек забивает меню.
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [formatsOpen, setFormatsOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   // Id of the job currently being polled, kept in a ref (not just state) so
   // the `pagehide` handler can read the latest value without a stale
@@ -374,6 +497,29 @@ export default function Home() {
     return () => query.removeEventListener("change", onChange);
   }, []);
 
+  const loadSummary = useCallback(async () => {
+    try {
+      const resp = await fetch("/api/account", { cache: "no-store" });
+      if (resp.status === 401 || resp.status === 404) {
+        // Не вошёл или работает в режиме без авторизации — кабинета просто
+        // нет, и это не ошибка, о которой нужно кричать.
+        setSummary(null);
+        setSummaryError(null);
+        return;
+      }
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+      setSummary(data as AccountSummary);
+      setSummaryError(null);
+    } catch (e: unknown) {
+      setSummaryError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (sessionStatus === "authenticated") void loadSummary();
+  }, [sessionStatus, loadSummary]);
+
   // Cancel the in-flight job when the tab is closed, reloaded, or navigated
   // away from. `pagehide` (not `beforeunload`) is used because it also fires
   // on mobile/bfcache navigations. `keepalive: true` on the fetch is what
@@ -391,7 +537,7 @@ export default function Home() {
   const onPick = (f: File | null | undefined) => {
     if (!f) return;
     if (!/\.(docx?|pdf|xlsx?|xlsm|xml|rtf|odt|txt|csv|md|json)$/i.test(f.name)) {
-      setError("Поддерживаются .docx, .doc, .pdf, .xlsx, .xls, .xml, .rtf, .odt, .txt, .csv, .md, .json (кроме презентаций)");
+      setError("Этот формат не поддерживается — полный список в меню слева (презентации не принимаются)");
       return;
     }
     setError(null);
@@ -461,13 +607,16 @@ export default function Home() {
         setKept(new Set());
         setDeUseLast(true);
         setDeResult(null);
+        // Документ списан — остаток в меню и кабинете должен это показать
+        // сразу, а не после следующей загрузки.
+        void loadSummary();
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [file, stages]);
+  }, [file, stages, loadSummary]);
 
   const toggleKept = (ph: string) =>
     setKept((prev) => {
@@ -614,10 +763,65 @@ export default function Home() {
   };
 
   const entityCount = result ? Object.keys(result.mapping).length : 0;
+  // Только явно исчерпанная квота: пока сводки нет (не вошёл, режим без
+  // авторизации, сеть) — не мешаем работать, решение всё равно за бэкендом.
+  const quotaExhausted = summary?.quota.exhausted === true;
+
+  const createInvite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setInviteBusy(true);
+    setInviteError(null);
+    setInviteUrl(null);
+    setInviteCopied(false);
+    try {
+      const resp = await fetch("/api/account/invitations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+      setInviteUrl(typeof data?.url === "string" ? data.url : null);
+      setInviteEmail("");
+      await loadSummary();
+    } catch (e: unknown) {
+      setInviteError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setInviteBusy(false);
+    }
+  };
+
+  const revokeInvite = async (id: number) => {
+    setInviteError(null);
+    try {
+      const resp = await fetch(`/api/account/invitations?id=${id}`, { method: "DELETE" });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+      await loadSummary();
+    } catch (e: unknown) {
+      setInviteError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const setUserActive = async (id: number, isActive: boolean) => {
+    setInviteError(null);
+    try {
+      const resp = await fetch(`/api/account/users?id=${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isActive }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+      await loadSummary();
+    } catch (e: unknown) {
+      setInviteError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   // Выбор пункта меню на узком экране закрывает его: меню там лежит поверх
   // содержимого, и оставлять его открытым значит прятать результат.
-  const pickTab = (next: "anon" | "deanon") => {
+  const pickTab = (next: Tab) => {
     setTab(next);
     if (narrow) setMenuOpen(false);
   };
@@ -666,6 +870,13 @@ export default function Home() {
                 подстановка перестаёт быть спрятанной за незнакомым словом. */}
             {result && <span className="nav-dot" title="Есть документ для восстановления" />}
           </button>
+          <button
+            className={`nav-item${tab === "account" ? " active" : ""}`}
+            onClick={() => pickTab("account")}
+          >
+            <CircleUser size={16} />
+            Личный кабинет
+          </button>
         </nav>
 
         <div className="sidebar-section">
@@ -706,7 +917,47 @@ export default function Home() {
           )}
         </div>
 
+        <div className="sidebar-section">
+          <button
+            className="sidebar-toggle"
+            onClick={() => setFormatsOpen((v) => !v)}
+            aria-expanded={formatsOpen}
+          >
+            Поддерживаемые форматы
+            <ChevronDown size={15} className={`chevron${formatsOpen ? " open" : ""}`} />
+          </button>
+          {formatsOpen && (
+            <>
+              {FORMAT_GROUPS.map((group) => (
+                <div className="format-group" key={group.title}>
+                  <b>{group.title}</b>
+                  <span className="note">{group.items}</span>
+                </div>
+              ))}
+              <p className="note" style={{ margin: "2px 8px 0" }}>
+                .rtf возвращается как .rtf, если на сервере есть LibreOffice; без неё — как
+                .docx. Презентации (.ppt, .pptx) не принимаются.
+              </p>
+            </>
+          )}
+        </div>
+
         <div className="sidebar-foot">
+          {summary && (
+            // Остаток на виду всегда: узнавать об исчерпанной квоте в момент
+            // загрузки документа — поздно.
+            <button className="nav-item quota-mini" onClick={() => pickTab("account")}>
+              <Gauge size={16} />
+              {summary.quota.unlimited ? (
+                <span>Квота: безлимит</span>
+              ) : (
+                <span>
+                  Осталось {pages(summary.quota.remainingTenths ?? 0)} из{" "}
+                  {pages(summary.quota.allowanceTenths ?? 0)} стр.
+                </span>
+              )}
+            </button>
+          )}
           {sessionStatus === "authenticated" && session?.user?.email ? (
             <>
               <div className="note sidebar-user">{session.user.email}</div>
@@ -775,8 +1026,8 @@ export default function Home() {
                 >
                   <strong>Перетащите файл сюда</strong> или нажмите, чтобы выбрать
                   <div className="note">
-                    .docx, .doc, .xlsx, .xls, .odt, .rtf, .xml, .pdf, .txt, .csv, .md, .json — кроме
-                    презентаций. Результат возвращается в том же формате (PDF — текстом).
+                    Word, Excel, OpenDocument, PDF, текст — результат в том же формате.
+                    Полный список — в меню слева.
                   </div>
                   {file && (
                     <div className="file-name">
@@ -797,7 +1048,9 @@ export default function Home() {
               <div className="run">
                 <button
                   className="primary big"
-                  disabled={!file || loading || !Object.values(stages).some(Boolean)}
+                  disabled={
+                    !file || loading || !Object.values(stages).some(Boolean) || quotaExhausted
+                  }
                   onClick={run}
                 >
                   {loading ? (
@@ -817,6 +1070,14 @@ export default function Home() {
                     Запрос идёт на бэкенд (GLiNER + LLM){elapsed > 0 ? `, ${elapsed} с` : ""}. Это
                     может занять несколько минут — вкладку можно свернуть.
                   </span>
+                )}
+                {quotaExhausted && (
+                  <div className="error">
+                    Лимит страниц на {periodLabel(summary!.quota.period)} исчерпан:
+                    использовано {pages(summary!.quota.usedTenths)} из{" "}
+                    {pages(summary!.quota.allowanceTenths ?? 0)}. Новые документы не
+                    обрабатываются до следующего периода или увеличения лимита.
+                  </div>
                 )}
                 {error && <div className="error">Ошибка: {error}</div>}
                 {cancelled && !error && <div className="note">Задача отменена.</div>}
@@ -1082,6 +1343,343 @@ export default function Home() {
                         </table>
                       </div>
                     )}
+                  </div>
+                </>
+              )}
+            </>
+          )}
+
+          {tab === "account" && (
+            <>
+              {summaryError && <div className="error">Ошибка: {summaryError}</div>}
+              {!summary && !summaryError && (
+                <div className="card">
+                  <p className="note" style={{ margin: 0 }}>
+                    Кабинет доступен после входа в систему.
+                  </p>
+                </div>
+              )}
+              {summary && (
+                <>
+                  <div className="card">
+                    <h2>
+                      <CircleUser size={18} />
+                      Аккаунт
+                    </h2>
+                    <table className="map">
+                      <tbody>
+                        <tr>
+                          <th style={{ width: 220 }}>Пользователь</th>
+                          <td>{summary.user.email}</td>
+                        </tr>
+                        <tr>
+                          <th>Роль</th>
+                          <td>{ROLE_LABELS[summary.user.role] ?? summary.user.role}</td>
+                        </tr>
+                        <tr>
+                          <th>Аккаунт</th>
+                          <td>{summary.account.name}</td>
+                        </tr>
+                        <tr>
+                          <th>Состояние</th>
+                          <td>{summary.account.isActive ? "Активен" : "Отключён"}</td>
+                        </tr>
+                        <tr>
+                          <th>Пользователей</th>
+                          <td>
+                            {summary.users.active} активн.
+                            {summary.users.limit != null
+                              ? `, занято мест ${summary.users.taken} из ${summary.users.limit}`
+                              : " (тариф без ограничения)"}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="card">
+                    <h2>
+                      <Package size={18} />
+                      Тарифный план
+                    </h2>
+                    <div className="metrics">
+                      <div className="metric">
+                        <div className="v">{summary.plan.title}</div>
+                        <div className="k">План</div>
+                      </div>
+                      <div className="metric">
+                        <div className="v">
+                          {summary.plan.pagesPerMonth != null
+                            ? summary.plan.pagesPerMonth.toLocaleString("ru")
+                            : "∞"}
+                        </div>
+                        <div className="k">Страниц в месяц</div>
+                      </div>
+                      <div className="metric">
+                        <div className="v">
+                          {summary.plan.priceKopecks > 0
+                            ? `${rubles(summary.plan.priceKopecks)} ₽`
+                            : "Бесплатно"}
+                        </div>
+                        <div className="k">Стоимость</div>
+                      </div>
+                    </div>
+                    {summary.quota.limitTenths != null &&
+                      summary.plan.pagesPerMonth != null &&
+                      summary.quota.limitTenths !== summary.plan.pagesPerMonth * 10 && (
+                        <p className="note" style={{ marginBottom: 0 }}>
+                          Для аккаунта задан индивидуальный лимит{" "}
+                          {pages(summary.quota.limitTenths)} стр. — он замещает лимит
+                          тарифа, а не складывается с ним.
+                        </p>
+                      )}
+                  </div>
+
+                  <div className={`card${summary.quota.exhausted ? " warn-card" : ""}`}>
+                    <h2>
+                      <Gauge size={18} />
+                      Квота — {periodLabel(summary.quota.period)}
+                    </h2>
+                    {summary.quota.unlimited ? (
+                      <p className="note" style={{ marginTop: 0 }}>
+                        Лимит не установлен. Израсходовано за период:{" "}
+                        {pages(summary.quota.usedTenths)} стр.
+                      </p>
+                    ) : (
+                      <>
+                        <div className="meter">
+                          <div
+                            className={`meter-fill${summary.quota.exhausted ? " over" : ""}`}
+                            style={{
+                              width: `${Math.min(
+                                100,
+                                summary.quota.allowanceTenths
+                                  ? (summary.quota.usedTenths / summary.quota.allowanceTenths) * 100
+                                  : 0,
+                              )}%`,
+                            }}
+                          />
+                        </div>
+                        <div className="metrics" style={{ marginTop: 14 }}>
+                          <div className="metric">
+                            <div className="v">{pages(summary.quota.usedTenths)}</div>
+                            <div className="k">Израсходовано, стр.</div>
+                          </div>
+                          <div className="metric">
+                            <div className="v">{pages(summary.quota.remainingTenths ?? 0)}</div>
+                            <div className="k">Осталось, стр.</div>
+                          </div>
+                          <div className="metric">
+                            <div className="v">{pages(summary.quota.allowanceTenths ?? 0)}</div>
+                            <div className="k">Лимит, стр.</div>
+                          </div>
+                        </div>
+                        {summary.quota.grantsTenths > 0 && (
+                          <p className="note" style={{ marginBottom: 0, marginTop: 12 }}>
+                            В лимит входит добавка {pages(summary.quota.grantsTenths)} стр.,
+                            выданная сверх тарифа.
+                          </p>
+                        )}
+                        {summary.quota.exhausted && (
+                          <p className="note" style={{ marginBottom: 0, marginTop: 12 }}>
+                            Новые документы не принимаются до следующего периода или
+                            увеличения лимита. Уже начатая обработка не прерывается —
+                            отказ получает только следующий запрос.
+                          </p>
+                        )}
+                      </>
+                    )}
+                    <p className="note" style={{ marginBottom: 0, marginTop: 12 }}>
+                      Единица учёта — страница, 1800 символов. Период считается по UTC и
+                      обнуляется первого числа. За {periodLabel(summary.quota.period)}{" "}
+                      обработано документов: {summary.periodTotals.documents}, символов:{" "}
+                      {summary.periodTotals.chars.toLocaleString("ru")}.
+                    </p>
+                  </div>
+
+                  <div className="card">
+                    <h2>
+                      <Users size={18} />
+                      Пользователи аккаунта
+                    </h2>
+                    <p className="note" style={{ marginTop: 0 }}>
+                      Занято мест: {summary.users.taken}
+                      {summary.users.limit != null
+                        ? ` из ${summary.users.limit} по тарифу`
+                        : " (тариф без ограничения)"}
+                      . Место занимает и активный пользователь, и ещё не активированное
+                      приглашение; отключённый пользователь место освобождает.
+                    </p>
+
+                    <div className="scroll-tbl">
+                      <table className="map">
+                        <thead>
+                          <tr>
+                            <th>Пользователь</th>
+                            <th>Роль</th>
+                            <th>Состояние</th>
+                            {summary.canManage && <th>Действие</th>}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {summary.users.list.map((u) => (
+                            <tr key={u.id} style={u.isActive ? undefined : { opacity: 0.55 }}>
+                              <td>
+                                {u.email}
+                                {u.isSelf && <span className="tag" style={{ marginLeft: 8 }}>это вы</span>}
+                              </td>
+                              <td>{ROLE_LABELS[u.role] ?? u.role}</td>
+                              <td>{u.isActive ? "Активен" : "Отключён"}</td>
+                              {summary.canManage && (
+                                <td>
+                                  {u.isSelf || u.role === "root" ? (
+                                    <span className="note">—</span>
+                                  ) : (
+                                    <button
+                                      className="ghost"
+                                      style={{ padding: "4px 10px", fontSize: 13 }}
+                                      onClick={() => setUserActive(u.id, !u.isActive)}
+                                    >
+                                      {u.isActive ? "Отключить" : "Включить"}
+                                    </button>
+                                  )}
+                                </td>
+                              )}
+                            </tr>
+                          ))}
+                          {summary.invitations.map((inv) => (
+                            <tr key={`inv-${inv.id}`}>
+                              <td>
+                                {inv.email}
+                                <span className="tag" style={{ marginLeft: 8 }}>приглашение</span>
+                              </td>
+                              <td>{ROLE_LABELS[inv.role] ?? inv.role}</td>
+                              <td>
+                                Ждёт активации до{" "}
+                                {new Date(inv.expiresAt).toLocaleDateString("ru")}
+                              </td>
+                              {summary.canManage && (
+                                <td>
+                                  <button
+                                    className="ghost"
+                                    style={{ padding: "4px 10px", fontSize: 13 }}
+                                    onClick={() => revokeInvite(inv.id)}
+                                  >
+                                    Отозвать
+                                  </button>
+                                </td>
+                              )}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {summary.canManage && (
+                      <>
+                        <form className="row" style={{ marginTop: 16 }} onSubmit={createInvite}>
+                          <input
+                            type="email"
+                            required
+                            placeholder="адрес приглашаемого"
+                            value={inviteEmail}
+                            onChange={(e) => setInviteEmail(e.target.value)}
+                            style={{ flex: 1, minWidth: 220 }}
+                          />
+                          <select
+                            value={inviteRole}
+                            onChange={(e) => setInviteRole(e.target.value as "member" | "admin")}
+                          >
+                            <option value="member">Пользователь</option>
+                            <option value="admin">Администратор аккаунта</option>
+                          </select>
+                          <button
+                            className="ghost"
+                            type="submit"
+                            disabled={inviteBusy || summary.users.free === 0}
+                          >
+                            <UserPlus size={16} />
+                            {inviteBusy ? "Выписываю…" : "Пригласить"}
+                          </button>
+                        </form>
+                        {summary.users.free === 0 && (
+                          <p className="note" style={{ marginBottom: 0 }}>
+                            Свободных мест нет. Отключите пользователя, отзовите приглашение или
+                            перейдите на тариф с большим числом мест.
+                          </p>
+                        )}
+                        {inviteError && (
+                          <div className="error" style={{ marginTop: 12 }}>
+                            {inviteError}
+                          </div>
+                        )}
+                        {inviteUrl && (
+                          <div className="card warn-card" style={{ marginTop: 14, marginBottom: 0 }}>
+                            <p className="note" style={{ marginTop: 0 }}>
+                              <TriangleAlert size={16} className="inline-icon" />
+                              Ссылка активации показывается ОДИН раз — в базе хранится только её
+                              хеш. Передайте её приглашённому; если потеряете, приглашение
+                              придётся отозвать и выписать заново. Пароль и согласие на обработку
+                              данных задаёт сам приглашённый.
+                            </p>
+                            <div className="row">
+                              <code style={{ wordBreak: "break-all", flex: 1 }}>{inviteUrl}</code>
+                              <button
+                                className="ghost"
+                                onClick={() => {
+                                  void navigator.clipboard?.writeText(inviteUrl);
+                                  setInviteCopied(true);
+                                }}
+                              >
+                                {inviteCopied ? "Скопировано" : "Скопировать"}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+
+                  <div className="card">
+                    <h2>История обработки</h2>
+                    {summary.recent.length === 0 ? (
+                      <p className="note" style={{ margin: 0 }}>
+                        Документов ещё не было.
+                      </p>
+                    ) : (
+                      <div className="scroll-tbl">
+                        <table className="map">
+                          <thead>
+                            <tr>
+                              <th>Дата</th>
+                              <th>Пользователь</th>
+                              <th>Символов</th>
+                              <th>Страниц</th>
+                              <th>Время</th>
+                              <th>Итог</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {summary.recent.map((r) => (
+                              <tr key={r.id}>
+                                <td>{new Date(r.createdAt).toLocaleString("ru")}</td>
+                                <td>{r.userEmail ?? "—"}</td>
+                                <td>{r.chars.toLocaleString("ru")}</td>
+                                <td>{pages(r.billablePagesTenths)}</td>
+                                <td>{r.seconds.toFixed(1)} с</td>
+                                <td>
+                                  <span className="tag">{r.ok ? "успешно" : "ошибка"}</span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    <p className="note" style={{ marginBottom: 0, marginTop: 12 }}>
+                      Показаны последние 20 документов аккаунта. Имена файлов не
+                      сохраняются — в журнале только объём и время обработки.
+                    </p>
                   </div>
                 </>
               )}

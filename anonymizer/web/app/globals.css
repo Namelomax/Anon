@@ -155,6 +155,44 @@ body {
   transform: rotate(180deg);
 }
 
+/* Группа списка форматов в меню: подпись и перечисление расширений. */
+.format-group {
+  padding: 4px 8px 8px;
+}
+
+.format-group b {
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+/* Остаток квоты в подвале меню — пункт, но не навигация: приглушён. */
+.quota-mini {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* Шкала израсходованной квоты в личном кабинете. */
+.meter {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.meter-fill.over {
+  background: var(--danger);
+}
+
 /* Метка «есть что восстанавливать» на пункте «Деанонимизация». */
 .nav-dot {
   width: 7px;
@@ -591,6 +629,25 @@ table.map code {
 }
 
 .field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Поля формы приглашения в кабинете — тот же вид, что у .field input. */
+.card input[type="email"],
+.card input[type="text"],
+.card select {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.card input:focus,
+.card select:focus {
   outline: none;
   border-color: var(--accent);
 }

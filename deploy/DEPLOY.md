@@ -82,6 +82,17 @@ LibreOffice они поднимаются до `.docx`/`.xlsx`, правятся
 пишет, что разметка не перенесена. Политика форматов —
 `anonymizer/documents.prepare_document`.
 
+База учётных записей и биллинга (SQLite) разворачивается миграциями:
+
+```bash
+cd anonymizer/web
+npx prisma migrate deploy
+npx prisma db seed     # только на пустой базе: тарифы + root-пользователь
+```
+
+`deploy/update.sh` прогоняет `migrate deploy` при каждом обновлении сам —
+руками это нужно только при первой установке.
+
 ### 3. Ключ
 
 ```bash

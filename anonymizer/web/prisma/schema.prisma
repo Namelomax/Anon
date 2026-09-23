@@ -67,6 +67,7 @@ model Account {
   usageRecords  UsageRecord[]
   quotaCounters QuotaCounter[]
   quotaGrants   QuotaGrant[]
+  invitations   Invitation[]
 
   @@map("accounts")
 }
@@ -96,12 +97,53 @@ model User {
   createdUsers User[]   @relation("UserCreatedBy")
   createdAt    DateTime @default(now()) @map("created_at")
 
-  apiKeys      ApiKey[]
-  usageRecords UsageRecord[]
-  quotaGrants  QuotaGrant[] @relation("QuotaGrantGrantedBy")
-  consents     Consent[]
+  apiKeys          ApiKey[]
+  usageRecords     UsageRecord[]
+  quotaGrants      QuotaGrant[]  @relation("QuotaGrantGrantedBy")
+  consents         Consent[]
+  invitationsSent  Invitation[]  @relation("InvitationCreatedBy")
+  invitationUsed   Invitation?   @relation("InvitationAcceptedBy")
 
   @@map("users")
+}
+
+/// Приглашение в аккаунт. Единственный способ завести пользователя, кроме
+/// самостоятельной регистрации (которая всегда создаёт НОВЫЙ аккаунт) и сида.
+///
+/// Почему приглашение, а не «админ создал пользователя с паролем»: согласие
+/// на обработку ПДн даёт САМ субъект, а не кто-то за него — см.
+/// ЮРИДИЧЕСКИЕ_ДОКУМЕНТЫ/10_Авторизация_биллинг_и_учётные_данные.md, раздел
+/// 2: «Согласие на обработку при создании учётной записи — форма принятия
+/// при активации приглашения». Поэтому User и Consent создаются в один
+/// момент — когда приглашённый открыл ссылку, задал пароль и отметил
+/// согласие (см. app/api/invite/accept/route.ts).
+///
+/// Хранится только ХЕШ токена (sha-256), как и у ApiKey: сама ссылка
+/// показывается пригласившему один раз. sha-256, а не argon2: токен — 32
+/// случайных байта, перебирать его нечем, а замедляющий хеш здесь только
+/// нагрузил бы проверку.
+model Invitation {
+  id               Int       @id @default(autoincrement())
+  accountId        Int       @map("account_id")
+  account          Account   @relation(fields: [accountId], references: [id])
+  email            String
+  /// 'admin' | 'member' — роль, которую получит пользователь при активации.
+  /// Роль 'root' через приглашения не выдаётся никогда (см. route).
+  role             String
+  tokenHash        String    @unique @map("token_hash")
+  createdByUserId  Int?      @map("created_by_user_id")
+  createdByUser    User?     @relation("InvitationCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  expiresAt        DateTime  @map("expires_at")
+  /// Заполняется при активации; вместе с acceptedByUserId делает приглашение
+  /// одноразовым.
+  acceptedAt       DateTime? @map("accepted_at")
+  acceptedByUserId Int?      @unique @map("accepted_by_user_id")
+  acceptedByUser   User?     @relation("InvitationAcceptedBy", fields: [acceptedByUserId], references: [id], onDelete: SetNull)
+  revokedAt        DateTime? @map("revoked_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@index([accountId])
+  @@map("invitations")
 }
 
 /// API-ключ для программного доступа (минуя логин/пароль). Хранится только
