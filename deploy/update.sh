@@ -73,6 +73,22 @@ if [ "$web_changed" -gt 0 ]; then
     # на боевой биллинговой базе — не то, что должно происходить само собой
     # посреди скрипта обновления.
     echo "== миграции базы =="
+    # CLI prisma НЕ читает .env.local — это формат Next.js, а CLI смотрит
+    # только .env. Без этого миграция падает с P1012 "Environment variable
+    # not found: DATABASE_URL", хотя приложение те же переменные видит
+    # прекрасно. Подгружаем их сами (set -a экспортирует всё, что объявлено
+    # в файле).
+    if [ -f .env.local ]; then
+        set -a
+        # shellcheck disable=SC1091
+        . ./.env.local
+        set +a
+    fi
+    if [ -z "${DATABASE_URL:-}" ]; then
+        echo "[update.sh] DATABASE_URL не задан — миграцию применять некуда." >&2
+        echo "[update.sh] Проверьте $WEB/.env.local" >&2
+        exit 1
+    fi
     if [ ! -x node_modules/.bin/prisma ]; then
         echo "[update.sh] node_modules/.bin/prisma не найден: devDependencies не установлены." >&2
         echo "[update.sh] Выполните: cd $WEB && npm install --include=dev" >&2
