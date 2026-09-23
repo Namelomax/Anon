@@ -65,17 +65,22 @@ python3.12 -m venv .venv
 .venv/bin/pip install -r deploy/requirements-api.txt
 ```
 
-Опционально — LibreOffice для старого `.doc` (Word 97-2003):
+Опционально — LibreOffice для старых и «неписучих» форматов (`.doc`, `.xls`,
+`.rtf`):
 
 ```bash
-sudo apt install -y libreoffice-writer
+sudo apt install -y libreoffice-writer libreoffice-calc
 ```
 
-Обезличенная копия `.doc` в любом случае отдаётся как `.docx` (записать
-бинарный Word 97 нечем), но без LibreOffice разметку переносить нечем и
-документ собирается заново из текста — абзацы есть, таблицы и колонтитулы
-нет. С ней `.doc` конвертируется в `.docx` и дальше идёт обычным путём, с
-сохранением структуры. См. `_WORD_EXTENSIONS` в `anonymizer/server.py`.
+Сервис возвращает документ в том формате, в котором его загрузили. `.docx`,
+`.xlsx`/`.xlsm`, `.odt`, `.xml` и простой текст переписываются напрямую, без
+LibreOffice. А вот `.doc`, `.xls` и `.rtf` Python записать не умеет: с
+LibreOffice они поднимаются до `.docx`/`.xlsx`, правятся и (для `.rtf`)
+конвертируются обратно — разметка сохраняется. Без неё документ собирается
+заново из текста: абзацы есть, таблиц и колонтитулов нет, а `.doc`/`.rtf`
+отдаются как `.docx`, `.xls` — как `.xlsx`. Интерфейс в этом случае прямо
+пишет, что разметка не перенесена. Политика форматов —
+`anonymizer/documents.prepare_document`.
 
 ### 3. Ключ
 

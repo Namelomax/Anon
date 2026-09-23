@@ -21,6 +21,7 @@ Outputs:
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from .engine import Anonymizer
@@ -98,12 +99,18 @@ def _replacer(mapping: Mapping):
 
 
 def _rewrite_docx(document, mapping: Mapping) -> None:
-    """In-place: replace original values with placeholders in every paragraph.
+    """In-place: replace original values with placeholders in every paragraph."""
+    _rewrite_docx_paragraphs(document, _replacer(mapping))
+
+
+def _rewrite_docx_paragraphs(document, replace) -> None:
+    """In-place: прогнать каждый абзац через ``replace``.
 
     Structure is preserved; each paragraph is rewritten into a single run
     (intra-paragraph formatting is not retained — fine for a redacted artifact).
+    Подстановка идёт по ЦЕЛОМУ абзацу: значение часто разорвано на несколько
+    run'ов, и по отдельным run'ам его было бы не найти.
     """
-    replace = _replacer(mapping)
     for para in _iter_docx_paragraphs(document):
         if not para.text:
             continue
@@ -351,16 +358,15 @@ def _find_soffice() -> str | None:
     return shutil.which("soffice") or shutil.which("libreoffice")
 
 
-def doc_to_docx_bytes(data: bytes, suffix: str = ".doc") -> bytes | None:
-    """Старый .doc → .docx через LibreOffice. ``None``, если её нет на хосте.
+def _libreoffice_convert(
+    data: bytes, src_suffix: str, convert_to: str, out_ext: str
+) -> bytes | None:
+    """Пересобрать документ в другой формат через LibreOffice.
 
-    Обратно в бинарный .doc не пишет ни python-docx, ни какая-либо другая
-    чистая Python-библиотека, поэтому обезличенная копия старого Word'а может
-    быть только .docx. Конвертация — ЕДИНСТВЕННЫЙ способ сохранить при этом
-    исходную разметку (таблицы, колонтитулы, стили): дальше файл идёт обычным
-    .docx-путём (``anonymized_docx_bytes``). Без LibreOffice вызывающий код
-    собирает простой .docx из текста (``text_to_docx_bytes``) — разметки в нём
-    нет, но это всё равно документ Word, а не .txt.
+    ``None``, если LibreOffice на хосте нет или конвертация не дала файла.
+    Это единственный способ сохранить разметку форматов, которые Python
+    записать не умеет (.doc, .xls, .rtf): их поднимают до формата, который мы
+    правим (.docx/.xlsx), а при необходимости конвертируют обратно.
 
     Каждому запуску даётся свой профиль (``-env:UserInstallation``): общий
     профиль в $HOME блокируется первым же процессом, и два одновременных
@@ -374,7 +380,7 @@ def doc_to_docx_bytes(data: bytes, suffix: str = ".doc") -> bytes | None:
     if not soffice:
         return None
     with tempfile.TemporaryDirectory() as workdir:
-        src = os.path.join(workdir, f"src{suffix}")
+        src = os.path.join(workdir, f"src{src_suffix}")
         with open(src, "wb") as fh:
             fh.write(data)
         outdir = os.path.join(workdir, "out")
@@ -387,7 +393,7 @@ def doc_to_docx_bytes(data: bytes, suffix: str = ".doc") -> bytes | None:
                     f"-env:UserInstallation={profile}",
                     "--headless",
                     "--convert-to",
-                    "docx:MS Word 2007 XML",
+                    convert_to,
                     "--outdir",
                     outdir,
                     src,
@@ -397,12 +403,42 @@ def doc_to_docx_bytes(data: bytes, suffix: str = ".doc") -> bytes | None:
                 check=False,
             )
         except (OSError, subprocess.SubprocessError):
-            return None  # конвертера нет смысла чинить на лету — см. докстринг
+            return None  # конвертера нет смысла чинить на лету
         for fname in os.listdir(outdir):
-            if fname.lower().endswith(".docx"):
+            if fname.lower().endswith(out_ext):
                 with open(os.path.join(outdir, fname), "rb") as fh:
                     return fh.read()
     return None
+
+
+def doc_to_docx_bytes(data: bytes, suffix: str = ".doc") -> bytes | None:
+    """Старый .doc → .docx. ``None``, если LibreOffice на хосте нет.
+
+    Обратно в бинарный .doc не пишет ни python-docx, ни какая-либо другая
+    чистая Python-библиотека, поэтому обезличенная копия старого Word'а может
+    быть только .docx — с разметкой (через эту конвертацию) или без неё
+    (``text_to_docx_bytes``).
+    """
+    return _libreoffice_convert(data, suffix, "docx:MS Word 2007 XML", ".docx")
+
+
+def xls_to_xlsx_bytes(data: bytes) -> bytes | None:
+    """Старый .xls → .xlsx. ``None``, если LibreOffice на хосте нет.
+
+    То же, что с .doc: xlrd только читает, записи .xls в экосистеме Python
+    нет, поэтому таблица отдаётся как .xlsx.
+    """
+    return _libreoffice_convert(data, ".xls", "xlsx:Calc MS Excel 2007 XML", ".xlsx")
+
+
+def docx_to_rtf_bytes(data: bytes) -> bytes | None:
+    """.docx → .rtf, обратный шаг для RTF-документов.
+
+    RTF правится не напрямую (значения в нём разбиты управляющими словами и
+    экранированы посимвольно — надёжной подстановки не получается), а кругом
+    rtf → docx → правка → rtf. ``None``, если LibreOffice на хосте нет.
+    """
+    return _libreoffice_convert(data, ".docx", "rtf:Rich Text Format", ".rtf")
 
 
 def text_to_docx_bytes(text: str) -> bytes:
@@ -470,28 +506,341 @@ def anonymized_docx_bytes(src_data: bytes, mapping: Mapping) -> bytes:
 
 def deanonymized_docx_bytes(src_data: bytes, mapping: Mapping) -> bytes:
     """Restore originals in a .docx (replace placeholders -> values), return bytes."""
+    from .deanonymize import deanonymize
+
+    return _rewritten_docx(src_data, lambda s: deanonymize(s, mapping))
+
+
+def _rewritten_docx(src_data: bytes, replace) -> bytes:
+    """Прогнать абзацы .docx через ``replace`` и вернуть байты копии."""
     import io
 
     import docx
 
-    from .deanonymize import deanonymize
-
     document = docx.Document(io.BytesIO(src_data))
-    for para in _iter_docx_paragraphs(document):
-        if not para.text:
-            continue
-        new_text = deanonymize(para.text, mapping)
-        if new_text == para.text:
-            continue
-        for run in list(para.runs):
-            run.text = ""
-        if para.runs:
-            para.runs[0].text = new_text
-        else:
-            para.add_run(new_text)
+    _rewrite_docx_paragraphs(document, replace)
     buf = io.BytesIO()
     document.save(buf)
     return buf.getvalue()
+
+
+# --- Пересборка документа в исходном формате -------------------------------
+# Общее правило: пользователь должен получить обратно ТОТ ЖЕ формат, который
+# загрузил. Обезличивание — это подстановка строк, поэтому для каждого формата
+# нужен способ пройти по его текстовым узлам и переписать их, сохранив всё
+# остальное. Способы делятся на три уровня:
+#
+#   "original"  — формат правится напрямую (.docx, .xlsx/.xlsm, .odt, .xml, а
+#                 также простой текст, который сам по себе и есть документ);
+#   "converted" — формат Python'ом не пишется, поэтому LibreOffice поднимает
+#                 его до правимого (.doc→.docx, .xls→.xlsx, .rtf→.docx→.rtf);
+#   "text"      — ни того, ни другого нет: документ собирается заново из
+#                 обезличенного текста, разметка теряется.
+#
+# .pdf сознательно остаётся текстом: переписать текст в PDF, не развалив
+# вёрстку, умеет только PyMuPDF под AGPL-3, а круг pdf→docx→pdf через
+# LibreOffice превращает страницу в мешанину текстовых блоков — это хуже
+# честного .txt.
+
+_MIME_BY_EXT = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
+    ".odt": "application/vnd.oasis.opendocument.text",
+    ".rtf": "application/rtf",
+    ".xml": "application/xml",
+    ".json": "application/json",
+    ".csv": "text/csv",
+    ".md": "text/markdown",
+}
+
+
+def mime_for(ext: str) -> str:
+    """MIME-тип по расширению; всё незнакомое — обычный текст."""
+    return _MIME_BY_EXT.get(ext, "text/plain")
+
+
+def is_plain_text_ext(ext: str) -> bool:
+    """Формат, у которого документ и есть его текст (.txt/.csv/.md/.json…).
+
+    Для таких клиент может подставлять значения прямо у себя; для всех
+    остальных документ собирает сервер (см. ``rebuild_document``).
+    """
+    return ext in _TEXT_EXT
+
+
+def masking_replacer(mapping: Mapping):
+    """Подстановка «оригинал → плейсхолдер» (обезличивание)."""
+    return _replacer(mapping)
+
+
+def restoring_replacer(mapping: Mapping):
+    """Подстановка «плейсхолдер → оригинал» (восстановление)."""
+    from .deanonymize import deanonymize
+
+    return lambda text: deanonymize(text, mapping)
+
+
+def _rewrite_xml_nodes(data: bytes, replace) -> bytes:
+    """Переписать текстовые узлы XML-документа, сохранив разметку.
+
+    Для произвольного .xml подстановка идёт поузлово: структуры «абзаца», в
+    которой значение могло бы разъехаться по соседним тегам, здесь нет.
+    Атрибуты не трогаются — их не читает и извлекатель текста
+    (``_read_xml_bytes``), так что в mapping они и не попадают.
+    """
+    from lxml import etree
+
+    root = etree.fromstring(data)
+    for el in root.iter():
+        if el.text:
+            new = replace(el.text)
+            if new != el.text:
+                el.text = new
+        if el.tail:
+            new = replace(el.tail)
+            if new != el.tail:
+                el.tail = new
+    return etree.tostring(root, encoding="UTF-8", xml_declaration=True)
+
+
+# Теги внутри абзаца ODF, которые несут только текст и его оформление: такой
+# абзац можно безопасно схлопнуть в один текстовый узел. Всё остальное
+# (draw:frame с картинкой, сноска, вложенная таблица) схлопывать нельзя.
+_ODT_INLINE_TAGS = frozenset(
+    {
+        "span", "a", "s", "tab", "line-break", "bookmark", "bookmark-start",
+        "bookmark-end", "soft-page-break", "sequence", "reference-mark",
+        "reference-mark-start", "reference-mark-end", "date", "time",
+        "page-number", "page-count", "title", "subject", "author-name",
+        "author-initials", "file-name", "chapter", "sender-firstname",
+        "sender-lastname", "sender-company", "variable-set", "variable-get",
+    }
+)
+
+
+def _rewrite_odt_paragraphs(data: bytes, replace) -> bytes:
+    """Переписать абзацы content.xml/styles.xml внутри .odt, сохранив всё
+    остальное содержимое архива.
+
+    Подстановка идёт по ЦЕЛОМУ абзацу, а не по отдельным текстовым узлам: в
+    ODF значение часто разорвано на несколько ``text:span`` (правка, смена
+    шрифта), и поузловая замена такое значение просто не нашла бы — в
+    выдаваемом документе оно осталось бы открытым. Абзац при этом схлопывается
+    в один текстовый узел: внутреннее оформление теряется, как и в .docx-пути
+    (``_rewrite_docx``), сам документ — нет.
+    """
+    import io
+    import zipfile
+
+    from lxml import etree
+
+    def local(el) -> str:
+        return etree.QName(el).localname if isinstance(el.tag, str) else ""
+
+    def rewrite_part(xml_bytes: bytes) -> bytes:
+        root = etree.fromstring(xml_bytes)
+        # Список собирается ЗАРАНЕЕ: ниже абзацы перестраиваются, а менять
+        # дерево во время root.iter() нельзя — итератор теряет место и молча
+        # пропускает следующие элементы (проверено: второй абзац оставался
+        # необезличенным).
+        paragraphs = [el for el in root.iter() if local(el) in ("p", "h")]
+        for el in paragraphs:
+            full = "".join(el.itertext())
+            if not full:
+                continue
+            new = replace(full)
+            if new == full:
+                continue
+            if all(local(child) in _ODT_INLINE_TAGS for child in el.iter() if child is not el):
+                # Внутри только текстовая разметка — схлопываем абзац в один
+                # узел, как в .docx-пути.
+                for child in list(el):
+                    el.remove(child)
+                el.text = new
+            else:
+                # В абзаце есть рамка, картинка, сноска или вложенная
+                # таблица: схлопывание уничтожило бы их вместе с содержимым.
+                # Правим поузлово — значение, разорванное по span'ам, здесь
+                # может не найтись, но документ остаётся целым.
+                for node in el.iter():
+                    if node.text:
+                        node.text = replace(node.text)
+                    if node.tail and node is not el:
+                        node.tail = replace(node.tail)
+        return etree.tostring(root, encoding="UTF-8", xml_declaration=True)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as src:
+        names = src.namelist()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as out:
+            # "mimetype" обязан лежать первым и без сжатия — иначе ODF-файл не
+            # опознаётся (требование стандарта, а не прихоть LibreOffice).
+            if "mimetype" in names:
+                out.writestr(
+                    zipfile.ZipInfo("mimetype"), src.read("mimetype"), zipfile.ZIP_STORED
+                )
+            for name in names:
+                if name == "mimetype":
+                    continue
+                payload = src.read(name)
+                if name in ("content.xml", "styles.xml"):
+                    payload = rewrite_part(payload)
+                out.writestr(name, payload)
+    return buf.getvalue()
+
+
+def _rewrite_xlsx_cells(data: bytes, replace, keep_vba: bool = False) -> bytes:
+    """Переписать значения ячеек книги Excel, сохранив саму книгу.
+
+    Нестроковые значения тоже проходят через подстановку — через ``str()``,
+    ровно как их видит извлекатель текста (``_read_xlsx_bytes``). Иначе
+    телефон или счёт, записанные в ячейку ЧИСЛОМ, оказались бы замаскированы в
+    предпросмотре и остались открытыми в самом файле — то есть утечка, которую
+    пользователь не увидел бы.
+
+    Формулы пропускаются: подстановка внутри ``=СЦЕПИТЬ(...)`` сломала бы
+    расчёт, а текст формулы в mapping и не попадает.
+    """
+    import io
+
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(data), keep_vba=keep_vba)
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                value = cell.value
+                if value is None:
+                    continue
+                if isinstance(value, str) and value.startswith("="):
+                    continue
+                original = value if isinstance(value, str) else str(value)
+                new = replace(original)
+                if new != original:
+                    cell.value = new
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def text_to_xlsx_bytes(text: str) -> bytes:
+    """Собрать простую книгу Excel из текста: строка — ряд, табуляция — ячейка.
+
+    Запасной путь для .xls на хосте без LibreOffice; разбор совпадает с тем,
+    как таблицу читает ``_read_xls_bytes``.
+    """
+    import io
+
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for line in text.split("\n"):
+        ws.append(line.split("\t"))
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@dataclass(frozen=True)
+class PreparedDocument:
+    """Во что превращён загруженный файл, чтобы его можно было переписать.
+
+    ``working_data`` — документ, по которому идут и извлечение текста, и
+    подстановка: сам файл, если формат правится напрямую, результат
+    конвертации, если нет, и ``None``, если переписывать нечего (останется
+    текст). ``output_extension`` — то, что в итоге получит пользователь.
+    """
+
+    extension: str
+    working_extension: str
+    working_data: bytes | None
+    output_extension: str
+    source: str  # "original" | "converted" | "text"
+
+    def degraded(self) -> "PreparedDocument":
+        """То же, но без правимого оригинала.
+
+        Нужен, когда конвертация формально удалась, а результат не читается:
+        падать из-за этого незачем — документ просто собирается из текста.
+        Обратный шаг конвертации (.docx → .rtf) при этом тоже отпадает.
+        """
+        out = ".docx" if self.output_extension == ".rtf" else self.output_extension
+        return PreparedDocument(self.extension, "", None, out, "text")
+
+
+# Форматы, которые правятся напрямую, без конвертации.
+_DIRECT_REWRITE = (".docx", ".xlsx", ".xlsm", ".odt", ".xml")
+
+
+def prepare_document(name: str, data: bytes) -> PreparedDocument:
+    """Решить, как этот файл будет переписан и в каком формате отдан.
+
+    Единственное место, где живёт политика форматов: и обезличивание, и
+    восстановление ходят сюда, чтобы не разъезжаться.
+    """
+    ext = Path(name).suffix.lower()
+    if ext in _DIRECT_REWRITE:
+        return PreparedDocument(ext, ext, data, ext, "original")
+    if ext in _TEXT_EXT:
+        # Простой текст сам по себе и есть документ: переписывать отдельно
+        # нечего, обезличенный текст — уже готовый файл того же типа.
+        return PreparedDocument(ext, "", None, ext, "original")
+    if ext == ".doc":
+        converted = doc_to_docx_bytes(data)
+        if converted is not None:
+            return PreparedDocument(ext, ".docx", converted, ".docx", "converted")
+        return PreparedDocument(ext, "", None, ".docx", "text")
+    if ext == ".xls":
+        converted = xls_to_xlsx_bytes(data)
+        if converted is not None:
+            return PreparedDocument(ext, ".xlsx", converted, ".xlsx", "converted")
+        return PreparedDocument(ext, "", None, ".xlsx", "text")
+    if ext == ".rtf":
+        converted = _libreoffice_convert(data, ".rtf", "docx:MS Word 2007 XML", ".docx")
+        if converted is not None:
+            return PreparedDocument(ext, ".docx", converted, ".rtf", "converted")
+        return PreparedDocument(ext, "", None, ".docx", "text")
+    # .pdf и всё незнакомое — только текст (см. комментарий к блоку выше).
+    return PreparedDocument(ext, "", None, ".txt", "text")
+
+
+def rebuild_document(prepared: PreparedDocument, replace, text: str) -> tuple[bytes, str, str]:
+    """``(байты, расширение, source)`` итогового документа.
+
+    ``replace`` — подстановка над строкой (в одну сторону при обезличивании, в
+    другую при восстановлении), ``text`` — уже преобразованный плоский текст,
+    из которого собирается документ, когда переписывать нечего.
+    """
+    if prepared.working_data is None:
+        if prepared.output_extension == ".docx":
+            return text_to_docx_bytes(text), ".docx", prepared.source
+        if prepared.output_extension == ".xlsx":
+            return text_to_xlsx_bytes(text), ".xlsx", prepared.source
+        return text.encode("utf-8"), prepared.output_extension, prepared.source
+
+    work_ext = prepared.working_extension
+    if work_ext == ".docx":
+        rewritten = _rewritten_docx(prepared.working_data, replace)
+    elif work_ext in (".xlsx", ".xlsm"):
+        rewritten = _rewrite_xlsx_cells(
+            prepared.working_data, replace, keep_vba=(work_ext == ".xlsm")
+        )
+    elif work_ext == ".odt":
+        rewritten = _rewrite_odt_paragraphs(prepared.working_data, replace)
+    else:  # .xml
+        rewritten = _rewrite_xml_nodes(prepared.working_data, replace)
+
+    if prepared.output_extension == work_ext:
+        return rewritten, work_ext, prepared.source
+    # Остался обратный шаг конвертации (сейчас только .docx → .rtf). Если он
+    # не удался, отдаём то, что уже переписано: формат не тот, зато документ
+    # на руках и обезличен.
+    back = docx_to_rtf_bytes(rewritten)
+    if back is None:
+        return rewritten, work_ext, prepared.source
+    return back, prepared.output_extension, prepared.source
 
 
 def anonymize_to_files(

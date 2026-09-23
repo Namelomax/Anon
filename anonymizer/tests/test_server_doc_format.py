@@ -2,7 +2,7 @@
 
 Записать обезличенную копию обратно в бинарный Word 97-2003 нечем, но и
 отдавать её текстом нельзя: .txt рвёт документ окончательно, и восстанавливать
-по маппингу становится нечего (см. _WORD_EXTENSIONS в server.py). Поэтому .doc
+по маппингу становится нечего (см. documents.prepare_document). Поэтому .doc
 поднимается до .docx — через LibreOffice, когда она есть на хосте (разметка
 сохраняется), и простым документом из текста, когда её нет.
 
@@ -150,7 +150,7 @@ def _anonymize(filename: str, raw: bytes) -> dict:
 def test_doc_without_libreoffice_still_comes_back_as_word(no_libreoffice):
     res = _anonymize("договор.doc", _FAKE_DOC)
     assert res["document_name"] == "договор.anon.docx"
-    assert res["document_mime"] == server._DOCX_MIME
+    assert res["document_mime"] == documents.mime_for(".docx")
     assert res["is_docx"] is True
     # Разметки в нём нет, и клиенту об этом сказано честно.
     assert res["document_source"] == "text"
@@ -203,7 +203,7 @@ def test_restoring_a_doc_gives_back_a_word_document(monkeypatch):
         )
     assert code == 200, res
     assert res["document_name"] == "договор.restored.docx"
-    assert res["document_mime"] == server._DOCX_MIME
+    assert res["document_mime"] == documents.mime_for(".docx")
     assert res["is_docx"] is True
     restored = _docx_text(base64.b64decode(res["document_base64"]))
     assert "Иванова" in restored and "[PERSON_1]" not in restored

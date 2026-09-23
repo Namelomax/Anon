@@ -89,36 +89,36 @@ _NEEDS_MODEL_LOCK = False
 
 _STAGE_NAMES = ("regex", "corporate", "glossary", "ner", "llm", "review", "second_pass", "subject")
 
-_DOCX_MIME = (
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-)
-# Форматы, которые уезжают клиенту документом Word. ``.docx`` переписывается
-# на месте; ``.doc`` (Word 97-2003) записать обратно в его бинарный формат
-# нечем, поэтому он поднимается до ``.docx``: через LibreOffice — с
-# сохранением разметки, без неё — простым документом из текста (см.
-# documents.doc_to_docx_bytes / text_to_docx_bytes и _word_source ниже).
-# Остальные форматы (.pdf, .xls*, .rtf, .odt, .xml) по-прежнему отдаются .txt.
-_WORD_EXTENSIONS = (".docx", ".doc")
+# Политика форматов (что во что переписывается и в чём отдаётся) целиком
+# живёт в documents.prepare_document/rebuild_document — здесь только вызовы,
+# одинаковые для обезличивания и восстановления.
 
 
-def _word_source(filename: str, raw: bytes) -> tuple[str, bytes | None]:
-    """``(расширение, байты .docx-оригинала)`` для входного файла.
+def _prepared_source(filename: str, raw: bytes):
+    """``(prepared, текст документа)`` для загруженного файла.
 
-    Второй элемент — то, во что будут вписаны плейсхолдеры с сохранением
-    структуры: сам файл для ``.docx``, результат конвертации для ``.doc``.
-    ``None`` значит «структуру взять неоткуда» — либо формат не Word, либо
-    LibreOffice на хосте нет.
+    Текст берётся из ТОГО ЖЕ документа, который потом будет переписан: иначе
+    источник текста и цель подстановки расходятся, и часть найденных значений
+    (колонтитулы, ячейки таблиц) в файле просто не находится.
     """
-    from pathlib import PurePosixPath
+    from anonymizer.documents import prepare_document, read_text_from_bytes
 
-    from anonymizer.documents import doc_to_docx_bytes
-
-    ext = PurePosixPath(filename).suffix.lower()
-    if ext == ".docx":
-        return ext, raw
-    if ext == ".doc":
-        return ext, doc_to_docx_bytes(raw)
-    return ext, None
+    prepared = prepare_document(filename, raw)
+    if prepared.working_data is not None and prepared.source == "converted":
+        try:
+            return prepared, read_text_from_bytes(
+                f"converted{prepared.working_extension}", prepared.working_data
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Конвертер отдал файл, который мы не читаем. Ронять из-за этого
+            # весь запрос незачем: откатываемся на текст из оригинала, а
+            # документ собираем заново (prepared.degraded()).
+            print(
+                f"[server] {prepared.extension}: конвертация непригодна ({exc})",
+                file=sys.stderr,
+            )
+            prepared = prepared.degraded()
+    return prepared, read_text_from_bytes(filename, raw)
 
 
 # --- Async job store (for /jobs/anonymize-file) --------------------------
@@ -717,9 +717,10 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
     from pathlib import PurePosixPath
 
     from anonymizer.documents import (
-        anonymized_docx_bytes,
-        read_text_from_bytes,
-        text_to_docx_bytes,
+        is_plain_text_ext,
+        masking_replacer,
+        mime_for,
+        rebuild_document,
     )
 
     filename = (data.get("filename") or "document.txt").strip()
@@ -732,24 +733,7 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
     account_id = _coerce_id(data.get("account_id"))
     user_id = _coerce_id(data.get("user_id"))
 
-    ext, docx_source = _word_source(filename, raw)
-    is_docx = ext in _WORD_EXTENSIONS
-    if ext == ".doc" and docx_source is not None:
-        # Текст берём из КОНВЕРТИРОВАННОГО файла, а не через antiword: текст и
-        # цель для переписывания должны быть одним документом, иначе часть
-        # найденных значений (колонтитулы, ячейки таблиц) в .docx не находится
-        # — их там просто нет в том же виде.
-        try:
-            text = read_text_from_bytes("converted.docx", docx_source)
-        except Exception as exc:  # noqa: BLE001
-            # LibreOffice отдала файл, который python-docx не читает. Ронять
-            # из-за этого весь запрос незачем: откатываемся на прежний путь —
-            # текст из самого .doc, документ собирается заново из текста.
-            print(f"[server] .doc: конвертация непригодна ({exc})", file=sys.stderr)
-            docx_source = None
-            text = read_text_from_bytes(filename, raw)
-    else:
-        text = read_text_from_bytes(filename, raw)
+    prepared, text = _prepared_source(filename, raw)
     # Шлюз спецкатегорий ПДн — СТРОГО до request_context: тот начинает
     # биллинг, а дальше по пайплайну текст уходит во внешние GLiNER/LLM.
     # Отклонённый документ не должен стоить пользователю ничего и не должен
@@ -769,26 +753,18 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
     elapsed = time.time() - t0
 
     stem = PurePosixPath(filename).stem or "document"
-    # document_source — откуда взялся отдаваемый документ. Клиенту это нужно,
-    # чтобы честно сказать про .doc: "original" и "converted" сохраняют
-    # разметку оригинала, "text" — нет (документ собран заново из текста).
-    if docx_source is not None:
-        doc_bytes = anonymized_docx_bytes(docx_source, res.mapping)
-        doc_name = f"{stem}.anon.docx"
-        doc_mime = _DOCX_MIME
-        doc_source = "original" if ext == ".docx" else "converted"
-    elif is_docx:
-        # .doc на хосте без LibreOffice: разметку восстановить нечем, но
-        # документ Word пользователь получить должен (см. _WORD_EXTENSIONS).
-        doc_bytes = text_to_docx_bytes(res.anonymized_text)
-        doc_name = f"{stem}.anon.docx"
-        doc_mime = _DOCX_MIME
-        doc_source = "text"
-    else:
-        doc_bytes = res.anonymized_text.encode("utf-8")
-        doc_name = f"{stem}.anon.txt"
-        doc_mime = "text/plain"
-        doc_source = "text"
+    # document_source — откуда взялся отдаваемый документ: "original" и
+    # "converted" сохраняют разметку оригинала, "text" — нет (документ собран
+    # заново из обезличенного текста). Клиенту это нужно, чтобы сказать об
+    # этом честно, а не молча подменить формат.
+    doc_bytes, out_ext, doc_source = rebuild_document(
+        prepared, masking_replacer(res.mapping), res.anonymized_text
+    )
+    doc_name = f"{stem}.anon{out_ext}"
+    doc_mime = mime_for(out_ext)
+    # is_docx = «документ собирает сервер»: у простого текста документ и есть
+    # его текст, и клиент подставляет значения сам (см. buildEffectiveDoc).
+    is_docx = not is_plain_text_ext(out_ext)
 
     include_span_text, irreversible = _response_flags(data)
     # Учёт по п. 1.7 приказа РКН № 140. Имя файла в журнал не пишется —
@@ -1152,9 +1128,10 @@ class Handler(BaseHTTPRequestHandler):
 
         from anonymizer.deanonymize import deanonymize, find_unknown_placeholders
         from anonymizer.documents import (
-            deanonymized_docx_bytes,
-            read_text_from_bytes,
-            text_to_docx_bytes,
+            is_plain_text_ext,
+            mime_for,
+            rebuild_document,
+            restoring_replacer,
         )
 
         try:
@@ -1170,35 +1147,19 @@ class Handler(BaseHTTPRequestHandler):
                 return
             raw = base64.b64decode(b64)
 
-            ext, docx_source = _word_source(filename, raw)
-            is_docx = ext in _WORD_EXTENSIONS
-            if ext == ".doc" and docx_source is not None:
-                try:  # см. тот же откат в _run_anonymize_file
-                    anon_text = read_text_from_bytes("converted.docx", docx_source)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[server] .doc: конвертация непригодна ({exc})", file=sys.stderr)
-                    docx_source = None
-                    anon_text = read_text_from_bytes(filename, raw)
-            else:
-                anon_text = read_text_from_bytes(filename, raw)
+            prepared, anon_text = _prepared_source(filename, raw)
             restored_text = deanonymize(anon_text, mapping)
             leftover = sorted(set(find_unknown_placeholders(anon_text, mapping)))
 
             stem = PurePosixPath(filename).stem or "document"
             if stem.endswith(".anon"):
                 stem = stem[: -len(".anon")]
-            if docx_source is not None:
-                doc_bytes = deanonymized_docx_bytes(docx_source, mapping)
-                doc_name = f"{stem}.restored.docx"
-                doc_mime = _DOCX_MIME
-            elif is_docx:  # .doc без LibreOffice — см. _WORD_EXTENSIONS
-                doc_bytes = text_to_docx_bytes(restored_text)
-                doc_name = f"{stem}.restored.docx"
-                doc_mime = _DOCX_MIME
-            else:
-                doc_bytes = restored_text.encode("utf-8")
-                doc_name = f"{stem}.restored.txt"
-                doc_mime = "text/plain"
+            doc_bytes, out_ext, _source = rebuild_document(
+                prepared, restoring_replacer(mapping), restored_text
+            )
+            doc_name = f"{stem}.restored{out_ext}"
+            doc_mime = mime_for(out_ext)
+            is_docx = not is_plain_text_ext(out_ext)
 
             self._send(200, {
                 "filename": filename,

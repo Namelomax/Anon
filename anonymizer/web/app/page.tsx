@@ -3,20 +3,24 @@
 import JSZip from "jszip";
 import {
   Braces,
-  ChevronDown,
   CircleCheckBig,
   Download,
   Eye,
   FileText,
   FileType,
   Info,
+  LogIn,
+  LogOut,
   KeyRound,
   LoaderCircle,
   Lock,
   Package,
+  PanelLeft,
+  PanelLeftClose,
   ShieldCheck,
   TriangleAlert,
   Undo2,
+  UserPlus,
 } from "lucide-react";
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
@@ -258,6 +262,32 @@ function WarningList({ items }: { items: (FailedWarning & { count: number })[] }
   );
 }
 
+function extOf(name: string): string {
+  const m = /\.[^.]+$/.exec(name);
+  return m ? m[0].toLowerCase() : "";
+}
+
+// Форматы, у которых документ и есть его текст (см. documents._TEXT_EXT).
+const PLAIN_EXT = new Set([".txt", ".csv", ".md", ".log", ".json"]);
+
+// Что сказать про формат результата. Молчим, когда говорить нечего: формат
+// тот же и разметка на месте. Смена расширения без пояснения выглядит как
+// ошибка, а потерянная разметка — тем более, поэтому оба случая называются
+// вслух (document_source приходит с сервера, см. server._run_anonymize_file).
+function formatNote(result: AnonResult): string | null {
+  const from = extOf(result.filename);
+  const to = extOf(result.document_name);
+  const layoutLost = result.document_source === "text" && !PLAIN_EXT.has(from);
+  if (from === to && !layoutLost) return null;
+  if (to === ".txt") {
+    return `Из ${from} можно отдать только текст: переписать такой файл, не развалив вёрстку, нечем. Результат сохранён как .txt.`;
+  }
+  const head = from === to ? "" : `Исходный ${from} сохранён как ${to} — записать ${from} обратно нечем. `;
+  return layoutLost
+    ? `${head}Разметку перенести не удалось: на сервере нет конвертера LibreOffice, поэтому в документе только текст по абзацам.`
+    : `${head}Разметка документа перенесена.`;
+}
+
 // Replace each placeholder token with its original value. Placeholders are
 // distinct "[LABEL_N]" tokens, so plain split/join is safe (no partial-match
 // clashes: "[PERSON_1]" is not a substring of "[PERSON_10]").
@@ -294,7 +324,12 @@ export default function Home() {
   // rendered as a neutral note, never in the red error style.
   const [cancelled, setCancelled] = useState(false);
   const [drag, setDrag] = useState(false);
-  const [stagesOpen, setStagesOpen] = useState(false);
+  // Боковое меню: на широком экране открыто, на узком — выезжает поверх
+  // содержимого и закрывается по выбору пункта. Начальное значение ставится
+  // в useEffect, а не при инициализации: на сервере ширины окна нет, и
+  // разметка первого рендера должна совпасть с серверной.
+  const [menuOpen, setMenuOpen] = useState(true);
+  const [narrow, setNarrow] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   // Id of the job currently being polled, kept in a ref (not just state) so
   // the `pagehide` handler can read the latest value without a stale
@@ -323,6 +358,21 @@ export default function Home() {
     [result],
   );
 
+  useEffect(() => {
+    // Именно matchMedia, а не обработчик resize: событие приходит только при
+    // ПЕРЕСЕЧЕНИИ границы, и свёрнутое вручную меню не распахивается обратно
+    // от любого изменения размера окна. Порог тот же, что в globals.css.
+    const query = window.matchMedia("(max-width: 900px)");
+    const apply = (isNarrow: boolean) => {
+      setNarrow(isNarrow);
+      setMenuOpen(!isNarrow);
+    };
+    apply(query.matches);
+    const onChange = (e: MediaQueryListEvent) => apply(e.matches);
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+
   // Cancel the in-flight job when the tab is closed, reloaded, or navigated
   // away from. `pagehide` (not `beforeunload`) is used because it also fires
   // on mobile/bfcache navigations. `keepalive: true` on the fetch is what
@@ -339,8 +389,8 @@ export default function Home() {
 
   const onPick = (f: File | null | undefined) => {
     if (!f) return;
-    if (!/\.(docx?|pdf|xlsx?|xlsm|xml|rtf|odt|txt|csv|md)$/i.test(f.name)) {
-      setError("Поддерживаются .docx, .doc, .pdf, .xlsx, .xls, .xml, .rtf, .odt, .txt (кроме презентаций)");
+    if (!/\.(docx?|pdf|xlsx?|xlsm|xml|rtf|odt|txt|csv|md|json)$/i.test(f.name)) {
+      setError("Поддерживаются .docx, .doc, .pdf, .xlsx, .xls, .xml, .rtf, .odt, .txt, .csv, .md, .json (кроме презентаций)");
       return;
     }
     setError(null);
@@ -456,8 +506,10 @@ export default function Home() {
   const buildEffectiveDoc = useCallback(async (): Promise<Blob> => {
     if (!result) throw new Error("нет результата");
     if (!result.is_docx) {
+      // Простой текст (.txt/.csv/.md/.json) — документ и есть его текст,
+      // собираем прямо здесь; тип берём тот, что назвал сервер.
       const txt = deanonClient(result.anonymized_text, keptMapping);
-      return new Blob([txt], { type: "text/plain;charset=utf-8" });
+      return new Blob([txt], { type: `${result.document_mime};charset=utf-8` });
     }
     if (kept.size === 0) {
       return new Blob([base64ToBuffer(result.document_base64)], { type: result.document_mime });
@@ -525,7 +577,7 @@ export default function Home() {
           }),
         });
       } else {
-        if (!deFile) throw new Error("Загрузите обезличенный документ (.docx / .txt).");
+        if (!deFile) throw new Error("Загрузите обезличенный документ.");
         if (!deMapFile) throw new Error("Загрузите файл маппинга (.json).");
         const mappingText = await deMapFile.text();
         try {
@@ -558,553 +610,561 @@ export default function Home() {
 
   const entityCount = result ? Object.keys(result.mapping).length : 0;
 
+  // Выбор пункта меню на узком экране закрывает его: меню там лежит поверх
+  // содержимого, и оставлять его открытым значит прятать результат.
+  const pickTab = (next: "anon" | "deanon") => {
+    setTab(next);
+    if (narrow) setMenuOpen(false);
+  };
+
   return (
-    <div className="wrap">
-      <header>
-        <div className="row" style={{ justifyContent: "flex-end", marginBottom: 12 }}>
+    <div className={`shell${menuOpen ? "" : " menu-closed"}`}>
+      <aside className="sidebar">
+        <div className="sidebar-head">
+          <ShieldCheck size={20} />
+          <span className="sidebar-title">Анонимизатор</span>
+          <button
+            className="icon-btn"
+            onClick={() => setMenuOpen(false)}
+            aria-label="Скрыть меню"
+            title="Скрыть меню"
+          >
+            <PanelLeftClose size={18} />
+          </button>
+        </div>
+
+        <nav className="sidebar-section">
+          <div className="sidebar-label">Режим работы</div>
+          <button
+            className={`nav-item${tab === "anon" ? " active" : ""}`}
+            onClick={() => pickTab("anon")}
+          >
+            <Lock size={16} />
+            Анонимизация
+          </button>
+          <button
+            className={`nav-item${tab === "deanon" ? " active" : ""}`}
+            onClick={() => pickTab("deanon")}
+          >
+            <KeyRound size={16} />
+            Деанонимизация
+          </button>
+        </nav>
+
+        <div className="sidebar-section">
+          <div className="sidebar-label">Слои обработки</div>
+          {(Object.keys(STAGE_LABELS) as StageKey[]).map((k) => (
+            <label className="nav-item nav-check" key={k}>
+              <input
+                type="checkbox"
+                checked={stages[k]}
+                disabled={k === "subject" && !stages.llm}
+                onChange={() => toggle(k)}
+              />
+              {STAGE_LABELS[k]}
+            </label>
+          ))}
+          <p className="note" style={{ margin: "10px 2px 0" }}>
+            Можно отключить любой слой — например, оставить только GLiNER.
+            LLM-проверка идёт последней: пересматривает найденное и снимает
+            маскирование с очевидных ошибок (обычные слова, названия
+            продуктов); работает, только если бэкенд запущен с --review.
+          </p>
+          <p className="note" style={{ margin: "8px 2px 0" }}>
+            Предмет договора — наименования товаров, работ и услуг (модели,
+            марки, номенклатура), чтобы по ним нельзя было восстановить
+            отрасль. Идёт в тот же LLM-вызов, времени не добавляет; требует
+            включённого слоя LLM.
+          </p>
+        </div>
+
+        <div className="sidebar-foot">
           {sessionStatus === "authenticated" && session?.user?.email ? (
-            <div className="row" style={{ gap: 10 }}>
-              <span className="note">{session.user.email}</span>
-              <button className="ghost" onClick={() => signOut({ callbackUrl: "/" })}>
+            <>
+              <div className="note sidebar-user">{session.user.email}</div>
+              <button className="nav-item" onClick={() => signOut({ callbackUrl: "/" })}>
+                <LogOut size={16} />
                 Выйти
               </button>
-            </div>
+            </>
           ) : sessionStatus !== "loading" ? (
-            <div className="row" style={{ gap: 10 }}>
-              <Link className="ghost" href="/login">
+            <>
+              <Link className="nav-item" href="/login">
+                <LogIn size={16} />
                 Войти
               </Link>
-              <Link className="ghost" href="/register">
+              <Link className="nav-item" href="/register">
+                <UserPlus size={16} />
                 Регистрация
               </Link>
-            </div>
+            </>
           ) : null}
         </div>
-        <h1>
-          <ShieldCheck size={24} />
-          Анонимизатор персональных данных
-        </h1>
-        <p>Загрузите документ — получите обезличенную версию и ключ восстановления (mapping).</p>
-      </header>
+      </aside>
 
-      <div className="tabs">
-        <button className={`tab${tab === "anon" ? " active" : ""}`} onClick={() => setTab("anon")}>
-          <Lock size={16} />
-          Анонимизация
-        </button>
-        <button className={`tab${tab === "deanon" ? " active" : ""}`} onClick={() => setTab("deanon")}>
-          <KeyRound size={16} />
-          Деанонимизация
-        </button>
-      </div>
+      {/* Затемнение под меню — только на узком экране, где меню лежит поверх
+          содержимого (см. globals.css). */}
+      <div className="backdrop" onClick={() => setMenuOpen(false)} />
 
-      {tab === "anon" && (
-        <>
-          <div className="card">
-            <h2>1. Документ</h2>
-            <div
-              className={`drop${drag ? " drag" : ""}`}
-              onClick={() => inputRef.current?.click()}
-              onDragOver={(e) => {
-                e.preventDefault();
-                setDrag(true);
-              }}
-              onDragLeave={() => setDrag(false)}
-              onDrop={(e) => {
-                e.preventDefault();
-                setDrag(false);
-                onPick(e.dataTransfer.files?.[0]);
-              }}
-            >
-              <strong>Перетащите файл сюда</strong> или нажмите, чтобы выбрать
-              <div className="note">.docx, .doc, .pdf, .xlsx, .xls, .xml, .rtf, .odt, .txt (кроме презентаций)</div>
-              {file && (
-                <div className="file-name">
-                  <FileText size={16} />
-                  {file.name}
-                </div>
-              )}
-            </div>
-            <input
-              ref={inputRef}
-              type="file"
-              accept=".docx,.doc,.pdf,.xlsx,.xls,.xlsm,.xml,.rtf,.odt,.txt,.csv,.md"
-              style={{ display: "none" }}
-              onChange={(e) => onPick(e.target.files?.[0])}
-            />
-          </div>
-
-          <div className="card">
-            <div
-              className="card-toggle"
-              role="button"
-              tabIndex={0}
-              aria-expanded={stagesOpen}
-              onClick={() => setStagesOpen((v) => !v)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  setStagesOpen((v) => !v);
-                }
-              }}
-            >
-              <h2 style={{ margin: 0 }}>2. Экспериментальные настройки</h2>
-              <ChevronDown size={18} className={`chevron${stagesOpen ? " open" : ""}`} />
-            </div>
-            {stagesOpen && (
-              <>
-                <div className="stages" style={{ marginTop: 14 }}>
-                  {(Object.keys(STAGE_LABELS) as StageKey[]).map((k) => (
-                    <label className="stage" key={k}>
-                      <input
-                        type="checkbox"
-                        checked={stages[k]}
-                        disabled={k === "subject" && !stages.llm}
-                        onChange={() => toggle(k)}
-                      />
-                      {STAGE_LABELS[k]}
-                    </label>
-                  ))}
-                </div>
-                <p className="note" style={{ marginBottom: 0, marginTop: 12 }}>
-                  Можно отключить любой слой — например, оставить только GLiNER.
-                  LLM-проверка — финальный слой: пересматривает уже найденные
-                  сущности и снимает маскирование с очевидных ошибок (обычные
-                  слова, названия продуктов и т.п.); работает, только если
-                  бэкенд запущен с флагом --review.
-                </p>
-                <p className="note" style={{ marginBottom: 0, marginTop: 8 }}>
-                  Предмет договора — маскирует наименования товаров, работ и
-                  услуг (модели, марки, номенклатуру), чтобы по ним нельзя было
-                  восстановить отрасль; добавляется в тот же LLM-вызов без
-                  доп. времени обработки. Включён по умолчанию, снимите галочку,
-                  если предмет скрывать не нужно. Требует включённого слоя LLM —
-                  недоступен, если LLM выключен.
-                </p>
-              </>
-            )}
-          </div>
-
-          <div className="card">
-            <div className="row">
+      <main className="main">
+        <div className="wrap">
+          <header>
+            <div className="topbar">
               <button
-                className="primary"
-                disabled={!file || loading || !Object.values(stages).some(Boolean)}
-                onClick={run}
+                className="icon-btn"
+                onClick={() => setMenuOpen(true)}
+                aria-label="Показать меню"
+                title="Показать меню"
               >
-                {loading ? (
-                  <>
-                    <LoaderCircle className="spin" size={18} />
-                    Обрабатываю…
-                  </>
-                ) : (
-                  <>
-                    <Lock size={18} />
-                    Обезличить
-                  </>
-                )}
+                <PanelLeft size={18} />
               </button>
-              {loading && (
-                <span className="note">
-                  Запрос идёт на бэкенд (GLiNER + LLM){elapsed > 0 ? `, ${elapsed} с` : ""}. Это
-                  может занять несколько минут — вкладку можно свернуть.
-                </span>
-              )}
+              <h1>
+                <ShieldCheck size={24} />
+                Анонимизатор персональных данных
+              </h1>
             </div>
-            {error && (
-              <div className="error" style={{ marginTop: 14 }}>
-                Ошибка: {error}
-              </div>
-            )}
-            {cancelled && !error && (
-              <div className="note" style={{ marginTop: 14 }}>
-                Задача отменена.
-              </div>
-            )}
-          </div>
+            <p>Загрузите документ — получите обезличенную версию и ключ восстановления (mapping).</p>
+          </header>
 
-          {result && (
+          {tab === "anon" && (
             <>
               <div className="card">
-                <h2>Результат</h2>
-                {!!result.preexisting_placeholders && (
-                  <div className="error" style={{ marginBottom: 14 }}>
-                    <TriangleAlert size={16} className="inline-icon" />В файле уже было{" "}
-                    {result.preexisting_placeholders} плейсхолдеров вида
-                    [PERSON_1] — похоже, это уже обезличенный документ. Они защищены и не
-                    трогались повторно, но проверьте, не загрузили ли вы .anon-файл по ошибке.
-                  </div>
-                )}
-                <div className="metrics">
-                  <div className="metric">
-                    <div className="v">{entityCount}</div>
-                    <div className="k">Сущностей найдено</div>
-                  </div>
-                  <div className="metric">
-                    <div className="v">{result.anonymized_text.length.toLocaleString("ru")}</div>
-                    <div className="k">Символов</div>
-                  </div>
-                  <div className="metric">
-                    <div className="v">{result.is_docx ? "DOCX" : "TXT"}</div>
-                    <div className="k">Формат</div>
-                  </div>
-                </div>
-                {(Object.keys(result.summary).length > 0 || result.elapsed_seconds != null) && (
-                  <p className="note" style={{ marginTop: 14, marginBottom: 0 }}>
-                    {Object.keys(result.summary).length > 0 && (
-                      <>
-                        По типам:{" "}
-                        {Object.entries(result.summary)
-                          .map(([k, v]) => `${k}: ${v}`)
-                          .join(" · ")}
-                      </>
-                    )}
-                    {result.elapsed_seconds != null && (
-                      <>
-                        {Object.keys(result.summary).length > 0 ? " · " : ""}
-                        Время обработки: {result.elapsed_seconds.toFixed(1)} с
-                      </>
-                    )}
-                  </p>
-                )}
-              </div>
-
-              {result.warnings && result.warnings.length > 0 && (() => {
-                // result.warnings — объединение двух разных форм (см.
-                // engine.py): найденные-но-не-скрытые значения (verify.py,
-                // есть value) и сбои отдельных слоёв проверки (есть message).
-                // Делим по наличию поля, а не по конкретным kind — так
-                // незнакомый в будущем kind всё равно попадёт в нужную карточку.
-                const residual = result.warnings!.filter((w) => w.value !== undefined);
-                const failed = mergeChunkWarnings(
-                  result.warnings!.filter((w) => w.value === undefined),
-                );
-                // Жёсткие — слой не отработал по тексту, который больше никто
-                // так не смотрел; мягкие — не завершилась лишь перепроверка
-                // (см. SOFT_WARNING_KINDS).
-                const failedHard = failed.filter((w) => !SOFT_WARNING_KINDS.has(w.kind));
-                const failedSoft = failed.filter((w) => SOFT_WARNING_KINDS.has(w.kind));
-                return (
-                  <>
-                    {residual.length > 0 && (
-                      <div className="card warn-card">
-                        <h2 style={{ marginTop: 0 }}>
-                          <TriangleAlert size={18} />
-                          Проверьте вручную — возможно, не скрыто
-                        </h2>
-                        <p className="note" style={{ marginTop: 0 }}>
-                          Автопроверка нашла в результате фрагменты, похожие на неанонимизированные
-                          данные (длинные числа — счета/ОГРН/ИНН/телефоны, адреса эл. почты). Если это
-                          действительно ПДн — фрагмент пропустили детекторы; сообщите, какой это тип, или
-                          отредактируйте документ вручную.
-                        </p>
-                        <div className="scroll-tbl">
-                          <table className="map">
-                            <thead>
-                              <tr>
-                                <th>Тип</th>
-                                <th>Значение</th>
-                                <th>Контекст</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {residual.map((w, i) => (
-                                <tr key={i}>
-                                  <td>
-                                    <span className="tag">{warningLabel(w.kind)}</span>
-                                  </td>
-                                  <td>
-                                    <code>{w.value}</code>
-                                  </td>
-                                  <td style={{ fontSize: 13, opacity: 0.8 }}>{w.context}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    )}
-
-                    {failedHard.length > 0 && (
-                      <div className="card warn-card">
-                        <h2 style={{ marginTop: 0 }}>
-                          <TriangleAlert size={18} />
-                          Часть документа проверена не полностью
-                        </h2>
-                        <p className="note" style={{ marginTop: 0 }}>
-                          Один из проверочных слоёв не смог завершить работу на этих местах.
-                          Остальные слои их разобрали, и маскирование чаще всего выполнено
-                          полностью — но шанс пропуска здесь выше обычного, поэтому места стоит
-                          просмотреть вручную.
-                        </p>
-                        <WarningList items={failedHard} />
-                      </div>
-                    )}
-
-                    {failedSoft.length > 0 && (
-                      <div className="card">
-                        <h2 style={{ marginTop: 0 }}>
-                          <Info size={18} />
-                          Дополнительная перепроверка выполнена не полностью
-                        </h2>
-                        <p className="note" style={{ marginTop: 0 }}>
-                          Это не пропуск: основные слои эти места проверили и данные в них
-                          замаскированы. Не завершился лишь повторный проход, который ищет то, что
-                          могли не заметить основные слои.
-                        </p>
-                        <WarningList items={failedSoft} />
-                      </div>
-                    )}
-                  </>
-                );
-              })()}
-
-              <div className="card">
-                <h2>
-                  <Package size={18} />
-                  Скачать
-                </h2>
-                <div className="row">
-                  <button className="ghost" onClick={downloadZip} disabled={docBusy}>
-                    <Download size={16} />
-                    ZIP (документ + mapping)
-                  </button>
-                  <button className="ghost" onClick={downloadDoc} disabled={docBusy}>
-                    <Download size={16} />
-                    {result.document_name}
-                  </button>
-                  <button className="ghost" onClick={downloadMapping}>
-                    <Braces size={16} />
-                    {stem}.map.json
-                  </button>
-                  {docBusy && <span className="note">Собираю документ…</span>}
-                </div>
-                {/* Старый .doc записать обратно в его формат нечем, поэтому
-                    обезличенная копия — .docx. Смена расширения без пояснения
-                    выглядит как ошибка, а потеря разметки (когда на сервере
-                    нет конвертера) — тем более. */}
-                {/\.doc$/i.test(result.filename) && (
-                  <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
-                    <FileType size={16} className="inline-icon" />
-                    {result.document_source === "converted"
-                      ? "Исходный .doc сохранён как .docx — старый формат Word записать обратно нельзя. Разметка документа перенесена."
-                      : "Исходный .doc сохранён как .docx — старый формат Word записать обратно нельзя. Разметку перенести не удалось: на сервере нет конвертера LibreOffice, поэтому в документе только текст по абзацам."}
-                  </p>
-                )}
-                <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
-                  <TriangleAlert size={16} className="inline-icon" />
-                  Mapping — ключ восстановления. Храните его отдельно от обезличенного документа.
-                </p>
-              </div>
-
-              <div className="card">
-                <h2>Обезличенный текст</h2>
-                <pre className="preview">{previewText}</pre>
-              </div>
-
-              <div className="card">
-                <h2>Mapping ({entityCount})</h2>
-                {kept.size > 0 && (
-                  <p className="note" style={{ marginTop: 0 }}>
-                    Возвращено в текст вручную: {kept.size}. Эти значения НЕ обезличены — они
-                    исключены из ключа и подставлены в документ. Нажмите «Вернуть», чтобы снова
-                    скрыть.
-                  </p>
-                )}
-                {entityCount === 0 ? (
-                  <p className="note">Сущностей не найдено.</p>
-                ) : (
-                  <div className="scroll-tbl">
-                    <table className="map">
-                      <thead>
-                        <tr>
-                          <th>Плейсхолдер</th>
-                          <th>Тип</th>
-                          <th>Оригинал</th>
-                          <th>Действие</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {Object.entries(result.mapping).map(([ph, orig]) => {
-                          const isKept = kept.has(ph);
-                          return (
-                            <tr key={ph} style={isKept ? { opacity: 0.55 } : undefined}>
-                              <td>
-                                <code>{ph}</code>
-                              </td>
-                              <td>
-                                <span className="tag">{labelOf(ph)}</span>
-                              </td>
-                              <td style={isKept ? { textDecoration: "line-through" } : undefined}>
-                                {orig}
-                              </td>
-                              <td>
-                                <button
-                                  className="ghost"
-                                  style={{ padding: "4px 10px", fontSize: 13 }}
-                                  onClick={() => toggleKept(ph)}
-                                  title={
-                                    isKept
-                                      ? "Снова скрыть это значение в документе"
-                                      : "Оставить это значение в тексте (не анонимизировать)"
-                                  }
-                                >
-                                  {isKept ? (
-                                    <>
-                                      <Undo2 size={14} />
-                                      Вернуть маску
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Eye size={14} />
-                                      Оставить в тексте
-                                    </>
-                                  )}
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-        </>
-      )}
-
-      {tab === "deanon" && (
-        <>
-          <div className="card">
-            <h2>Восстановление по маппингу (без ИИ)</h2>
-            {result ? (
-              <label className="stage" style={{ borderRadius: 10 }}>
-                <input
-                  type="checkbox"
-                  checked={deUseLast}
-                  onChange={() => setDeUseLast((v) => !v)}
-                />
-                Использовать последний документ («{result.document_name}», {entityCount} сущностей)
-              </label>
-            ) : (
-              <p className="note">
-                Последнего документа нет — загрузите обезличенный файл и маппинг вручную.
-              </p>
-            )}
-          </div>
-
-          {!deUseLast && (
-            <div className="card">
-              <h2>Файлы</h2>
-              <div className="row" style={{ alignItems: "stretch" }}>
+                <h2>Документ</h2>
                 <div
-                  className="drop"
-                  style={{ flex: 1, minWidth: 220 }}
-                  onClick={() => deFileRef.current?.click()}
+                  className={`drop${drag ? " drag" : ""}`}
+                  onClick={() => inputRef.current?.click()}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setDrag(true);
+                  }}
+                  onDragLeave={() => setDrag(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDrag(false);
+                    onPick(e.dataTransfer.files?.[0]);
+                  }}
                 >
-                  <strong>Обезличенный документ</strong>
-                  <div className="note">.docx / .txt</div>
-                  {deFile && (
+                  <strong>Перетащите файл сюда</strong> или нажмите, чтобы выбрать
+                  <div className="note">
+                    .docx, .doc, .xlsx, .xls, .odt, .rtf, .xml, .pdf, .txt, .csv, .md, .json — кроме
+                    презентаций. Результат возвращается в том же формате (PDF — текстом).
+                  </div>
+                  {file && (
                     <div className="file-name">
                       <FileText size={16} />
-                      {deFile.name}
+                      {file.name}
                     </div>
                   )}
                 </div>
-                <div
-                  className="drop"
-                  style={{ flex: 1, minWidth: 220 }}
-                  onClick={() => deMapRef.current?.click()}
-                >
-                  <strong>Маппинг</strong>
-                  <div className="note">.json</div>
-                  {deMapFile && (
-                    <div className="file-name">
-                      <KeyRound size={16} />
-                      {deMapFile.name}
-                    </div>
-                  )}
-                </div>
+                <input
+                  ref={inputRef}
+                  type="file"
+                  accept=".docx,.doc,.pdf,.xlsx,.xls,.xlsm,.xml,.rtf,.odt,.txt,.csv,.md,.json"
+                  style={{ display: "none" }}
+                  onChange={(e) => onPick(e.target.files?.[0])}
+                />
               </div>
-              <input
-                ref={deFileRef}
-                type="file"
-                accept=".docx,.txt"
-                style={{ display: "none" }}
-                onChange={(e) => setDeFile(e.target.files?.[0] || null)}
-              />
-              <input
-                ref={deMapRef}
-                type="file"
-                accept=".json"
-                style={{ display: "none" }}
-                onChange={(e) => setDeMapFile(e.target.files?.[0] || null)}
-              />
-            </div>
+
+              <div className="run">
+                <button
+                  className="primary big"
+                  disabled={!file || loading || !Object.values(stages).some(Boolean)}
+                  onClick={run}
+                >
+                  {loading ? (
+                    <>
+                      <LoaderCircle className="spin" size={18} />
+                      Обрабатываю…
+                    </>
+                  ) : (
+                    <>
+                      <Lock size={18} />
+                      Обезличить
+                    </>
+                  )}
+                </button>
+                {loading && (
+                  <span className="note" style={{ textAlign: "center" }}>
+                    Запрос идёт на бэкенд (GLiNER + LLM){elapsed > 0 ? `, ${elapsed} с` : ""}. Это
+                    может занять несколько минут — вкладку можно свернуть.
+                  </span>
+                )}
+                {error && <div className="error">Ошибка: {error}</div>}
+                {cancelled && !error && <div className="note">Задача отменена.</div>}
+              </div>
+
+              {result && (
+                <>
+                  <div className="card">
+                    <h2>Результат</h2>
+                    {!!result.preexisting_placeholders && (
+                      <div className="error" style={{ marginBottom: 14 }}>
+                        <TriangleAlert size={16} className="inline-icon" />В файле уже было{" "}
+                        {result.preexisting_placeholders} плейсхолдеров вида
+                        [PERSON_1] — похоже, это уже обезличенный документ. Они защищены и не
+                        трогались повторно, но проверьте, не загрузили ли вы .anon-файл по ошибке.
+                      </div>
+                    )}
+                    <div className="metrics">
+                      <div className="metric">
+                        <div className="v">{entityCount}</div>
+                        <div className="k">Сущностей найдено</div>
+                      </div>
+                      <div className="metric">
+                        <div className="v">{result.anonymized_text.length.toLocaleString("ru")}</div>
+                        <div className="k">Символов</div>
+                      </div>
+                      <div className="metric">
+                        <div className="v">{result.is_docx ? "DOCX" : "TXT"}</div>
+                        <div className="k">Формат</div>
+                      </div>
+                    </div>
+                    {(Object.keys(result.summary).length > 0 || result.elapsed_seconds != null) && (
+                      <p className="note" style={{ marginTop: 14, marginBottom: 0 }}>
+                        {Object.keys(result.summary).length > 0 && (
+                          <>
+                            По типам:{" "}
+                            {Object.entries(result.summary)
+                              .map(([k, v]) => `${k}: ${v}`)
+                              .join(" · ")}
+                          </>
+                        )}
+                        {result.elapsed_seconds != null && (
+                          <>
+                            {Object.keys(result.summary).length > 0 ? " · " : ""}
+                            Время обработки: {result.elapsed_seconds.toFixed(1)} с
+                          </>
+                        )}
+                      </p>
+                    )}
+                  </div>
+
+                  {result.warnings && result.warnings.length > 0 && (() => {
+                    // result.warnings — объединение двух разных форм (см.
+                    // engine.py): найденные-но-не-скрытые значения (verify.py,
+                    // есть value) и сбои отдельных слоёв проверки (есть message).
+                    // Делим по наличию поля, а не по конкретным kind — так
+                    // незнакомый в будущем kind всё равно попадёт в нужную карточку.
+                    const residual = result.warnings!.filter((w) => w.value !== undefined);
+                    const failed = mergeChunkWarnings(
+                      result.warnings!.filter((w) => w.value === undefined),
+                    );
+                    // Жёсткие — слой не отработал по тексту, который больше никто
+                    // так не смотрел; мягкие — не завершилась лишь перепроверка
+                    // (см. SOFT_WARNING_KINDS).
+                    const failedHard = failed.filter((w) => !SOFT_WARNING_KINDS.has(w.kind));
+                    const failedSoft = failed.filter((w) => SOFT_WARNING_KINDS.has(w.kind));
+                    return (
+                      <>
+                        {residual.length > 0 && (
+                          <div className="card warn-card">
+                            <h2 style={{ marginTop: 0 }}>
+                              <TriangleAlert size={18} />
+                              Проверьте вручную — возможно, не скрыто
+                            </h2>
+                            <p className="note" style={{ marginTop: 0 }}>
+                              Автопроверка нашла в результате фрагменты, похожие на неанонимизированные
+                              данные (длинные числа — счета/ОГРН/ИНН/телефоны, адреса эл. почты). Если это
+                              действительно ПДн — фрагмент пропустили детекторы; сообщите, какой это тип, или
+                              отредактируйте документ вручную.
+                            </p>
+                            <div className="scroll-tbl">
+                              <table className="map">
+                                <thead>
+                                  <tr>
+                                    <th>Тип</th>
+                                    <th>Значение</th>
+                                    <th>Контекст</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {residual.map((w, i) => (
+                                    <tr key={i}>
+                                      <td>
+                                        <span className="tag">{warningLabel(w.kind)}</span>
+                                      </td>
+                                      <td>
+                                        <code>{w.value}</code>
+                                      </td>
+                                      <td style={{ fontSize: 13, opacity: 0.8 }}>{w.context}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {failedHard.length > 0 && (
+                          <div className="card warn-card">
+                            <h2 style={{ marginTop: 0 }}>
+                              <TriangleAlert size={18} />
+                              Часть документа проверена не полностью
+                            </h2>
+                            <p className="note" style={{ marginTop: 0 }}>
+                              Один из проверочных слоёв не смог завершить работу на этих местах.
+                              Остальные слои их разобрали, и маскирование чаще всего выполнено
+                              полностью — но шанс пропуска здесь выше обычного, поэтому места стоит
+                              просмотреть вручную.
+                            </p>
+                            <WarningList items={failedHard} />
+                          </div>
+                        )}
+
+                        {failedSoft.length > 0 && (
+                          <div className="card">
+                            <h2 style={{ marginTop: 0 }}>
+                              <Info size={18} />
+                              Дополнительная перепроверка выполнена не полностью
+                            </h2>
+                            <p className="note" style={{ marginTop: 0 }}>
+                              Это не пропуск: основные слои эти места проверили и данные в них
+                              замаскированы. Не завершился лишь повторный проход, который ищет то, что
+                              могли не заметить основные слои.
+                            </p>
+                            <WarningList items={failedSoft} />
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+
+                  <div className="card">
+                    <h2>
+                      <Package size={18} />
+                      Скачать
+                    </h2>
+                    <div className="row">
+                      <button className="ghost" onClick={downloadZip} disabled={docBusy}>
+                        <Download size={16} />
+                        ZIP (документ + mapping)
+                      </button>
+                      <button className="ghost" onClick={downloadDoc} disabled={docBusy}>
+                        <Download size={16} />
+                        {result.document_name}
+                      </button>
+                      <button className="ghost" onClick={downloadMapping}>
+                        <Braces size={16} />
+                        {stem}.map.json
+                      </button>
+                      {docBusy && <span className="note">Собираю документ…</span>}
+                    </div>
+                    {formatNote(result) && (
+                      <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
+                        <FileType size={16} className="inline-icon" />
+                        {formatNote(result)}
+                      </p>
+                    )}
+                    <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
+                      <TriangleAlert size={16} className="inline-icon" />
+                      Mapping — ключ восстановления. Храните его отдельно от обезличенного документа.
+                    </p>
+                  </div>
+
+                  <div className="card">
+                    <h2>Обезличенный текст</h2>
+                    <pre className="preview">{previewText}</pre>
+                  </div>
+
+                  <div className="card">
+                    <h2>Mapping ({entityCount})</h2>
+                    {kept.size > 0 && (
+                      <p className="note" style={{ marginTop: 0 }}>
+                        Возвращено в текст вручную: {kept.size}. Эти значения НЕ обезличены — они
+                        исключены из ключа и подставлены в документ. Нажмите «Вернуть», чтобы снова
+                        скрыть.
+                      </p>
+                    )}
+                    {entityCount === 0 ? (
+                      <p className="note">Сущностей не найдено.</p>
+                    ) : (
+                      <div className="scroll-tbl">
+                        <table className="map">
+                          <thead>
+                            <tr>
+                              <th>Плейсхолдер</th>
+                              <th>Тип</th>
+                              <th>Оригинал</th>
+                              <th>Действие</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {Object.entries(result.mapping).map(([ph, orig]) => {
+                              const isKept = kept.has(ph);
+                              return (
+                                <tr key={ph} style={isKept ? { opacity: 0.55 } : undefined}>
+                                  <td>
+                                    <code>{ph}</code>
+                                  </td>
+                                  <td>
+                                    <span className="tag">{labelOf(ph)}</span>
+                                  </td>
+                                  <td style={isKept ? { textDecoration: "line-through" } : undefined}>
+                                    {orig}
+                                  </td>
+                                  <td>
+                                    <button
+                                      className="ghost"
+                                      style={{ padding: "4px 10px", fontSize: 13 }}
+                                      onClick={() => toggleKept(ph)}
+                                      title={
+                                        isKept
+                                          ? "Снова скрыть это значение в документе"
+                                          : "Оставить это значение в тексте (не анонимизировать)"
+                                      }
+                                    >
+                                      {isKept ? (
+                                        <>
+                                          <Undo2 size={14} />
+                                          Вернуть маску
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Eye size={14} />
+                                          Оставить в тексте
+                                        </>
+                                      )}
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </>
           )}
 
-          <div className="card">
-            <div className="row">
-              <button
-                className="primary"
-                disabled={deLoading || (!deUseLast && (!deFile || !deMapFile)) || (deUseLast && !result)}
-                onClick={runDeanon}
-              >
-                {deLoading ? (
-                  <>
-                    <LoaderCircle className="spin" size={18} />
-                    Восстанавливаю…
-                  </>
-                ) : (
-                  <>
-                    <KeyRound size={18} />
-                    Восстановить
-                  </>
-                )}
-              </button>
-            </div>
-            {deError && (
-              <div className="error" style={{ marginTop: 14 }}>
-                Ошибка: {deError}
-              </div>
-            )}
-          </div>
-
-          {deResult && (
+          {tab === "deanon" && (
             <>
               <div className="card">
-                <h2>
-                  <Package size={18} />
-                  Скачать
-                </h2>
-                <div className="row">
-                  <button className="ghost" onClick={downloadRestored}>
-                    <Download size={16} />
-                    {deResult.document_name}
-                  </button>
-                </div>
-                {deResult.leftover.length > 0 ? (
-                  <div className="error" style={{ marginTop: 12 }}>
-                    Плейсхолдеры без значения в маппинге: {deResult.leftover.join(", ")}
-                  </div>
+                <h2>Восстановление по маппингу (без ИИ)</h2>
+                {result ? (
+                  <label className="stage" style={{ borderRadius: 10 }}>
+                    <input
+                      type="checkbox"
+                      checked={deUseLast}
+                      onChange={() => setDeUseLast((v) => !v)}
+                    />
+                    Использовать последний документ («{result.document_name}», {entityCount} сущностей)
+                  </label>
                 ) : (
-                  <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
-                    <CircleCheckBig size={16} className="inline-icon" />
-                    Все плейсхолдеры восстановлены.
+                  <p className="note">
+                    Последнего документа нет — загрузите обезличенный файл и маппинг вручную.
                   </p>
                 )}
               </div>
 
-              <div className="card">
-                <h2>Восстановленный текст</h2>
-                <pre className="preview">{deResult.restored_text}</pre>
+              {!deUseLast && (
+                <div className="card">
+                  <h2>Файлы</h2>
+                  <div className="row" style={{ alignItems: "stretch" }}>
+                    <div
+                      className="drop"
+                      style={{ flex: 1, minWidth: 220 }}
+                      onClick={() => deFileRef.current?.click()}
+                    >
+                      <strong>Обезличенный документ</strong>
+                      <div className="note">тот формат, в котором его выдал сервис</div>
+                      {deFile && (
+                        <div className="file-name">
+                          <FileText size={16} />
+                          {deFile.name}
+                        </div>
+                      )}
+                    </div>
+                    <div
+                      className="drop"
+                      style={{ flex: 1, minWidth: 220 }}
+                      onClick={() => deMapRef.current?.click()}
+                    >
+                      <strong>Маппинг</strong>
+                      <div className="note">.json</div>
+                      {deMapFile && (
+                        <div className="file-name">
+                          <KeyRound size={16} />
+                          {deMapFile.name}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <input
+                    ref={deFileRef}
+                    type="file"
+                    accept=".docx,.xlsx,.xlsm,.odt,.rtf,.xml,.txt,.csv,.md,.json"
+                    style={{ display: "none" }}
+                    onChange={(e) => setDeFile(e.target.files?.[0] || null)}
+                  />
+                  <input
+                    ref={deMapRef}
+                    type="file"
+                    accept=".json"
+                    style={{ display: "none" }}
+                    onChange={(e) => setDeMapFile(e.target.files?.[0] || null)}
+                  />
+                </div>
+              )}
+
+              <div className="run">
+                <button
+                  className="primary big"
+                  disabled={deLoading || (!deUseLast && (!deFile || !deMapFile)) || (deUseLast && !result)}
+                  onClick={runDeanon}
+                >
+                  {deLoading ? (
+                    <>
+                      <LoaderCircle className="spin" size={18} />
+                      Восстанавливаю…
+                    </>
+                  ) : (
+                    <>
+                      <KeyRound size={18} />
+                      Восстановить
+                    </>
+                  )}
+                </button>
+                {deError && <div className="error">Ошибка: {deError}</div>}
               </div>
+
+              {deResult && (
+                <>
+                  <div className="card">
+                    <h2>
+                      <Package size={18} />
+                      Скачать
+                    </h2>
+                    <div className="row">
+                      <button className="ghost" onClick={downloadRestored}>
+                        <Download size={16} />
+                        {deResult.document_name}
+                      </button>
+                    </div>
+                    {deResult.leftover.length > 0 ? (
+                      <div className="error" style={{ marginTop: 12 }}>
+                        Плейсхолдеры без значения в маппинге: {deResult.leftover.join(", ")}
+                      </div>
+                    ) : (
+                      <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
+                        <CircleCheckBig size={16} className="inline-icon" />
+                        Все плейсхолдеры восстановлены.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="card">
+                    <h2>Восстановленный текст</h2>
+                    <pre className="preview">{deResult.restored_text}</pre>
+                  </div>
+                </>
+              )}
             </>
           )}
-        </>
-      )}
+        </div>
+      </main>
     </div>
   );
 }

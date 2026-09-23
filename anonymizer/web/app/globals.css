@@ -27,10 +27,203 @@ body {
   line-height: 1.5;
 }
 
+/* Каркас страницы: выдвижное меню слева, содержимое справа. Меню держит
+   режимы работы и настройки — туда же добавляются будущие пункты. */
+.shell {
+  display: flex;
+  align-items: flex-start;
+  min-height: 100vh;
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  flex: 0 0 272px;
+  width: 272px;
+  height: 100vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding: 18px 14px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  transition: margin-left 0.2s ease;
+}
+
+/* Закрытое меню уезжает влево собственной шириной — содержимое занимает
+   освободившееся место. */
+.shell.menu-closed .sidebar {
+  margin-left: -272px;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+}
+
+.sidebar-title {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* Кнопка-иконка без рамки: сворачивание/разворачивание меню. */
+.icon-btn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.icon-btn:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.sidebar-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-label {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0 6px 6px;
+}
+
+/* Пункт меню — и ссылка, и кнопка, и строка с галочкой выглядят одинаково. */
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 9px;
+  padding: 9px 10px;
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.nav-item:hover {
+  background: var(--panel-2);
+}
+
+.nav-item.active {
+  background: var(--panel-2);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.nav-check {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.nav-check input {
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+
+.nav-check:has(input:checked) {
+  color: var(--text);
+}
+
+.nav-check:has(input:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sidebar-foot {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-user {
+  padding: 0 10px 6px;
+  word-break: break-all;
+}
+
+/* Затемнение видно только на узком экране (см. медиазапрос ниже). */
+.backdrop {
+  display: none;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+/* Кнопка «показать меню» нужна только когда меню закрыто. */
+.shell:not(.menu-closed) .topbar .icon-btn {
+  display: none;
+}
+
+.topbar .icon-btn {
+  margin-left: 0;
+}
+
 .wrap {
   max-width: 1440px;
   margin: 0 auto;
   padding: 32px 28px 80px;
+}
+
+@media (max-width: 900px) {
+  /* На узком экране меню не раздвигает содержимое, а выезжает поверх него. */
+  .sidebar {
+    position: fixed;
+    z-index: 40;
+    left: 0;
+    top: 0;
+    margin-left: 0;
+    transform: translateX(0);
+    transition: transform 0.2s ease;
+  }
+
+  .shell.menu-closed .sidebar {
+    margin-left: 0;
+    transform: translateX(-100%);
+  }
+
+  .shell:not(.menu-closed) .backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    background: rgba(0, 0, 0, 0.5);
+  }
+
+  .wrap {
+    padding: 24px 16px 64px;
+  }
 }
 
 /* Ширину колонки задаёт .wrap, но сплошной текст в 1440px читать нельзя —
@@ -53,32 +246,6 @@ header h1 {
 header p {
   margin: 0 0 24px;
   color: var(--muted);
-}
-
-.tabs {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 20px;
-}
-
-.tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  background: transparent;
-  color: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 9px 18px;
-  font-size: 15px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.tab.active {
-  background: var(--panel-2);
-  color: var(--text);
-  border-color: var(--accent);
 }
 
 .card {
@@ -106,35 +273,6 @@ header p {
   vertical-align: -3px;
   margin-right: 6px;
   flex-shrink: 0;
-}
-
-.card-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  cursor: pointer;
-  outline: none;
-}
-
-.card-toggle:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
-
-.card-toggle:hover h2 {
-  color: var(--accent);
-}
-
-.chevron {
-  color: var(--muted);
-  transition: transform 0.15s;
-  flex-shrink: 0;
-  margin-left: 12px;
-}
-
-.chevron.open {
-  transform: rotate(180deg);
 }
 
 .drop {
@@ -165,12 +303,6 @@ header p {
   color: var(--accent-2);
   font-weight: 600;
   word-break: break-all;
-}
-
-.stages {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
 }
 
 .stage {
@@ -208,6 +340,27 @@ button.primary {
 button.primary:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+button.primary.big {
+  padding: 14px 32px;
+  font-size: 16px;
+  border-radius: 12px;
+}
+
+/* Главное действие стоит само по себе, по центру колонки: карточка вокруг
+   него ничего не группировала, только добавляла рамку. */
+.run {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin: 26px 0;
+}
+
+.run .error,
+.run .note {
+  max-width: 640px;
 }
 
 /* Селектор ".ghost" (а не "button.ghost") — стиль используется и на <button>
