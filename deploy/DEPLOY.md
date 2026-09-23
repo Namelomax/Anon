@@ -86,12 +86,23 @@ LibreOffice они поднимаются до `.docx`/`.xlsx`, правятся
 
 ```bash
 cd anonymizer/web
-npx prisma migrate deploy
-npx prisma db seed     # только на пустой базе: тарифы + root-пользователь
+npm install --include=dev --no-audit --no-fund
+node_modules/.bin/prisma migrate deploy
+node_modules/.bin/prisma db seed   # только на пустой базе: тарифы + root
 ```
 
-`deploy/update.sh` прогоняет `migrate deploy` при каждом обновлении сам —
-руками это нужно только при первой установке.
+Два момента, на которых это ломается:
+
+- `--include=dev` обязателен. Сервис работает с `NODE_ENV=production`, а в
+  этом режиме npm не ставит devDependencies и вычищает уже установленные — а
+  там лежат и `typescript`, и CLI `prisma`, без которых нет ни миграции, ни
+  сборки.
+- Запускать надо `node_modules/.bin/prisma`, а не `npx prisma`. Не найдя
+  пакет локально, npx молча тянет из реестра последнюю версию — сейчас это
+  release candidate мажорной версии 8 при проекте на 6.x.
+
+`deploy/update.sh` прогоняет `migrate deploy` при каждом обновлении сам и уже
+с этими двумя поправками — руками это нужно только при первой установке.
 
 ### 3. Ключ
 

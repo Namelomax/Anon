@@ -54,13 +54,31 @@ if [ "$web_changed" -gt 0 ]; then
     else
         echo "== проверка зависимостей (npm install) =="
     fi
-    npm install --no-audit --no-fund
+    # --include=dev ОБЯЗАТЕЛЕН. Сервис запускается с NODE_ENV=production, а в
+    # этом режиме npm не только не ставит devDependencies, но и ВЫЧИЩАЕТ уже
+    # установленные. Между тем сборка без них невозможна: и typescript, и
+    # @types/*, и CLI prisma лежат именно там. Без флага первый же `npm
+    # install` выносит их из node_modules, и следом падает либо миграция,
+    # либо `next build`.
+    npm install --include=dev --no-audit --no-fund
+
     # Миграции — ВСЕГДА и ДО сборки. `migrate deploy` идемпотентен: если
     # применять нечего, он молча выходит. Без этого шага новая таблица просто
     # не появляется на боевой базе, а приложение падает на первом же
     # обращении к ней — и падает не при обновлении, а потом, у пользователя.
+    #
+    # Вызывается ЛОКАЛЬНЫЙ бинарник, а не `npx prisma`. npx, не найдя пакет в
+    # node_modules, молча тянет ИЗ РЕЕСТРА свежайшую версию — а это сейчас
+    # 8.0.0-rc.15 при проекте на 6.x. Release candidate чужой мажорной версии
+    # на боевой биллинговой базе — не то, что должно происходить само собой
+    # посреди скрипта обновления.
     echo "== миграции базы =="
-    npx prisma migrate deploy
+    if [ ! -x node_modules/.bin/prisma ]; then
+        echo "[update.sh] node_modules/.bin/prisma не найден: devDependencies не установлены." >&2
+        echo "[update.sh] Выполните: cd $WEB && npm install --include=dev" >&2
+        exit 1
+    fi
+    node_modules/.bin/prisma migrate deploy
     echo "== сборка веб-интерфейса =="
     # При провале сборки set -e обрывает скрипт ДО перезапуска, так что
     # работающий сервис не трогается и сайт продолжает отвечать старой
