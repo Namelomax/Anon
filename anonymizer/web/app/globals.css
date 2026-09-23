@@ -16,6 +16,18 @@
   box-sizing: border-box;
 }
 
+/* Полосы прокрутки скрыты везде: страница, меню, предпросмотр, таблицы.
+   Прокрутка колесом, клавишами и жестом работает как раньше — убрана только
+   сама полоска, иначе она режет тёмную панель светлым швом. */
+*::-webkit-scrollbar {
+  display: none;
+}
+
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
 html,
 body {
   margin: 0;
@@ -108,6 +120,51 @@ body {
   padding: 0 6px 6px;
 }
 
+/* Заголовок сворачиваемой секции меню: тот же вид, что у .sidebar-label,
+   плюс шеврон справа. */
+.sidebar-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  font-family: inherit;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-align: left;
+  padding: 4px 6px;
+  border-radius: 8px;
+}
+
+.sidebar-toggle:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.chevron {
+  transition: transform 0.15s;
+  flex-shrink: 0;
+}
+
+.chevron.open {
+  transform: rotate(180deg);
+}
+
+/* Метка «есть что восстанавливать» на пункте «Деанонимизация». */
+.nav-dot {
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--accent-2);
+  flex-shrink: 0;
+}
+
 /* Пункт меню — и ссылка, и кнопка, и строка с галочкой выглядят одинаково. */
 .nav-item {
   display: flex;
@@ -174,20 +231,20 @@ body {
   display: none;
 }
 
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 4px;
-}
-
-/* Кнопка «показать меню» нужна только когда меню закрыто. */
-.shell:not(.menu-closed) .topbar .icon-btn {
-  display: none;
-}
-
-.topbar .icon-btn {
+/* Кнопка «показать меню» стоит в углу ОКНА и нужна, только когда меню
+   закрыто: рядом с заголовком она уезжала от края вместе с колонкой. */
+.menu-open-btn {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  z-index: 25;
   margin-left: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+
+.shell:not(.menu-closed) .menu-open-btn {
+  display: none;
 }
 
 .wrap {
@@ -342,10 +399,16 @@ button.primary:disabled {
   cursor: not-allowed;
 }
 
-button.primary.big {
+button.primary.big,
+.ghost.big {
   padding: 14px 32px;
   font-size: 16px;
   border-radius: 12px;
+}
+
+.ghost.big:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 /* Главное действие стоит само по себе, по центру колонки: карточка вокруг

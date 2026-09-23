@@ -3,6 +3,7 @@
 import JSZip from "jszip";
 import {
   Braces,
+  ChevronDown,
   CircleCheckBig,
   Download,
   Eye,
@@ -324,12 +325,13 @@ export default function Home() {
   // rendered as a neutral note, never in the red error style.
   const [cancelled, setCancelled] = useState(false);
   const [drag, setDrag] = useState(false);
-  // Боковое меню: на широком экране открыто, на узком — выезжает поверх
-  // содержимого и закрывается по выбору пункта. Начальное значение ставится
-  // в useEffect, а не при инициализации: на сервере ширины окна нет, и
-  // разметка первого рендера должна совпасть с серверной.
+  // Боковое меню открыто по умолчанию на любой ширине; на узком экране оно
+  // выезжает поверх содержимого и закрывается по выбору пункта.
   const [menuOpen, setMenuOpen] = useState(true);
   const [narrow, setNarrow] = useState(false);
+  // Экспериментальные настройки скрыты, пока их не раскроют: в обычной работе
+  // слои не трогают, а список галочек забивает меню.
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   // Id of the job currently being polled, kept in a ref (not just state) so
   // the `pagehide` handler can read the latest value without a stale
@@ -359,16 +361,15 @@ export default function Home() {
   );
 
   useEffect(() => {
-    // Именно matchMedia, а не обработчик resize: событие приходит только при
-    // ПЕРЕСЕЧЕНИИ границы, и свёрнутое вручную меню не распахивается обратно
-    // от любого изменения размера окна. Порог тот же, что в globals.css.
+    // Ширина нужна только чтобы знать, лежит ли меню ПОВЕРХ содержимого: на
+    // узком экране выбор пункта его закрывает, иначе результат остаётся
+    // спрятанным. Само меню ширина не открывает и не закрывает — оно открыто
+    // по умолчанию, дальше решает пользователь. Порог тот же, что в
+    // globals.css. matchMedia, а не resize: событие приходит только при
+    // пересечении границы.
     const query = window.matchMedia("(max-width: 900px)");
-    const apply = (isNarrow: boolean) => {
-      setNarrow(isNarrow);
-      setMenuOpen(!isNarrow);
-    };
-    apply(query.matches);
-    const onChange = (e: MediaQueryListEvent) => apply(e.matches);
+    setNarrow(query.matches);
+    const onChange = (e: MediaQueryListEvent) => setNarrow(e.matches);
     query.addEventListener("change", onChange);
     return () => query.removeEventListener("change", onChange);
   }, []);
@@ -559,13 +560,17 @@ export default function Home() {
   };
 
   // --- Deanonymize action ---
-  const runDeanon = useCallback(async () => {
+  // forceLast — «восстановить последний обезличенный документ», не глядя на
+  // галочку: так работает кнопка обратной подстановки сразу после
+  // обезличивания (см. restoreLast).
+  const runDeanon = useCallback(async (forceLast = false) => {
+    const useLast = forceLast || deUseLast;
     setDeLoading(true);
     setDeError(null);
     setDeResult(null);
     try {
       let resp: Response;
-      if (deUseLast) {
+      if (useLast) {
         if (!result) throw new Error("Нет последнего документа. Снимите галочку и загрузите файлы.");
         resp = await fetch("/api/deanonymize", {
           method: "POST",
@@ -617,6 +622,15 @@ export default function Home() {
     if (narrow) setMenuOpen(false);
   };
 
+  // Обратная подстановка сразу после обезличивания: переключает режим и тут
+  // же восстанавливает последний документ, чтобы не заставлять искать эту
+  // возможность в меню и жать «Восстановить» вторым шагом.
+  const restoreLast = () => {
+    pickTab("deanon");
+    setDeUseLast(true);
+    void runDeanon(true);
+  };
+
   return (
     <div className={`shell${menuOpen ? "" : " menu-closed"}`}>
       <aside className="sidebar">
@@ -648,34 +662,48 @@ export default function Home() {
           >
             <KeyRound size={16} />
             Деанонимизация
+            {/* Точка появляется, когда есть обезличенный документ: обратная
+                подстановка перестаёт быть спрятанной за незнакомым словом. */}
+            {result && <span className="nav-dot" title="Есть документ для восстановления" />}
           </button>
         </nav>
 
         <div className="sidebar-section">
-          <div className="sidebar-label">Слои обработки</div>
-          {(Object.keys(STAGE_LABELS) as StageKey[]).map((k) => (
-            <label className="nav-item nav-check" key={k}>
-              <input
-                type="checkbox"
-                checked={stages[k]}
-                disabled={k === "subject" && !stages.llm}
-                onChange={() => toggle(k)}
-              />
-              {STAGE_LABELS[k]}
-            </label>
-          ))}
-          <p className="note" style={{ margin: "10px 2px 0" }}>
-            Можно отключить любой слой — например, оставить только GLiNER.
-            LLM-проверка идёт последней: пересматривает найденное и снимает
-            маскирование с очевидных ошибок (обычные слова, названия
-            продуктов); работает, только если бэкенд запущен с --review.
-          </p>
-          <p className="note" style={{ margin: "8px 2px 0" }}>
-            Предмет договора — наименования товаров, работ и услуг (модели,
-            марки, номенклатура), чтобы по ним нельзя было восстановить
-            отрасль. Идёт в тот же LLM-вызов, времени не добавляет; требует
-            включённого слоя LLM.
-          </p>
+          <button
+            className="sidebar-toggle"
+            onClick={() => setSettingsOpen((v) => !v)}
+            aria-expanded={settingsOpen}
+          >
+            Экспериментальные настройки
+            <ChevronDown size={15} className={`chevron${settingsOpen ? " open" : ""}`} />
+          </button>
+          {settingsOpen && (
+            <>
+              {(Object.keys(STAGE_LABELS) as StageKey[]).map((k) => (
+                <label className="nav-item nav-check" key={k}>
+                  <input
+                    type="checkbox"
+                    checked={stages[k]}
+                    disabled={k === "subject" && !stages.llm}
+                    onChange={() => toggle(k)}
+                  />
+                  {STAGE_LABELS[k]}
+                </label>
+              ))}
+              <p className="note" style={{ margin: "10px 2px 0" }}>
+                Можно отключить любой слой — например, оставить только GLiNER.
+                LLM-проверка идёт последней: пересматривает найденное и снимает
+                маскирование с очевидных ошибок (обычные слова, названия
+                продуктов); работает, только если бэкенд запущен с --review.
+              </p>
+              <p className="note" style={{ margin: "8px 2px 0" }}>
+                Предмет договора — наименования товаров, работ и услуг (модели,
+                марки, номенклатура), чтобы по ним нельзя было восстановить
+                отрасль. Идёт в тот же LLM-вызов, времени не добавляет; требует
+                включённого слоя LLM.
+              </p>
+            </>
+          )}
         </div>
 
         <div className="sidebar-foot">
@@ -706,23 +734,24 @@ export default function Home() {
           содержимого (см. globals.css). */}
       <div className="backdrop" onClick={() => setMenuOpen(false)} />
 
+      {/* Кнопка живёт в углу окна, а не рядом с заголовком: заголовок
+          центрируется вместе с колонкой и уезжает от края. */}
+      <button
+        className="icon-btn menu-open-btn"
+        onClick={() => setMenuOpen(true)}
+        aria-label="Показать меню"
+        title="Показать меню"
+      >
+        <PanelLeft size={18} />
+      </button>
+
       <main className="main">
         <div className="wrap">
           <header>
-            <div className="topbar">
-              <button
-                className="icon-btn"
-                onClick={() => setMenuOpen(true)}
-                aria-label="Показать меню"
-                title="Показать меню"
-              >
-                <PanelLeft size={18} />
-              </button>
-              <h1>
-                <ShieldCheck size={24} />
-                Анонимизатор персональных данных
-              </h1>
-            </div>
+            <h1>
+              <ShieldCheck size={24} />
+              Анонимизатор персональных данных
+            </h1>
             <p>Загрузите документ — получите обезличенную версию и ключ восстановления (mapping).</p>
           </header>
 
@@ -961,6 +990,26 @@ export default function Home() {
                     </p>
                   </div>
 
+                  <div className="run">
+                    <button className="ghost big" onClick={restoreLast} disabled={deLoading}>
+                      {deLoading ? (
+                        <>
+                          <LoaderCircle className="spin" size={18} />
+                          Восстанавливаю…
+                        </>
+                      ) : (
+                        <>
+                          <Undo2 size={18} />
+                          Обратная подстановка
+                        </>
+                      )}
+                    </button>
+                    <span className="note" style={{ textAlign: "center" }}>
+                      Вернёт исходные значения в этот документ и покажет результат в режиме
+                      «Деанонимизация». Ключ уже здесь — загружать mapping не нужно.
+                    </span>
+                  </div>
+
                   <div className="card">
                     <h2>Обезличенный текст</h2>
                     <pre className="preview">{previewText}</pre>
@@ -1113,7 +1162,7 @@ export default function Home() {
                 <button
                   className="primary big"
                   disabled={deLoading || (!deUseLast && (!deFile || !deMapFile)) || (deUseLast && !result)}
-                  onClick={runDeanon}
+                  onClick={() => runDeanon()}
                 >
                   {deLoading ? (
                     <>
