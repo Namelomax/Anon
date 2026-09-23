@@ -5,7 +5,11 @@ Reads ``.docx`` (paragraphs + tables + headers/footers), ``.pdf``, ``.xlsx``,
 whole document is anonymized in one pass so the same entity gets the same
 placeholder everywhere (e.g. one person -> ``[PERSON_1]`` across all paragraphs).
 Only ``.docx`` is rebuilt structure-preserving; other formats yield anonymized
-plain text.
+plain text. Старый ``.doc`` — особый случай: писать бинарный Word 97 нечем, но
+и отдавать его текстом нельзя (документ после этого не собрать), поэтому
+обезличенная копия отдаётся как ``.docx`` — через LibreOffice с сохранением
+разметки (``doc_to_docx_bytes``) или, если её на хосте нет, простым
+документом из текста (``text_to_docx_bytes``).
 
 Outputs:
 * ``<name>.anon.txt``  — anonymized plain text
@@ -338,6 +342,88 @@ def _read_doc_bytes(data: bytes) -> str:
             pass
     # Системных утилит нет — резервный чистый-Python разбор .doc.
     return _read_doc_olefile(data)
+
+
+def _find_soffice() -> str | None:
+    """Путь к LibreOffice (soffice/libreoffice) или None, если её нет."""
+    import shutil
+
+    return shutil.which("soffice") or shutil.which("libreoffice")
+
+
+def doc_to_docx_bytes(data: bytes, suffix: str = ".doc") -> bytes | None:
+    """Старый .doc → .docx через LibreOffice. ``None``, если её нет на хосте.
+
+    Обратно в бинарный .doc не пишет ни python-docx, ни какая-либо другая
+    чистая Python-библиотека, поэтому обезличенная копия старого Word'а может
+    быть только .docx. Конвертация — ЕДИНСТВЕННЫЙ способ сохранить при этом
+    исходную разметку (таблицы, колонтитулы, стили): дальше файл идёт обычным
+    .docx-путём (``anonymized_docx_bytes``). Без LibreOffice вызывающий код
+    собирает простой .docx из текста (``text_to_docx_bytes``) — разметки в нём
+    нет, но это всё равно документ Word, а не .txt.
+
+    Каждому запуску даётся свой профиль (``-env:UserInstallation``): общий
+    профиль в $HOME блокируется первым же процессом, и два одновременных
+    запроса дерутся за него — второй падает или висит до таймаута.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    soffice = _find_soffice()
+    if not soffice:
+        return None
+    with tempfile.TemporaryDirectory() as workdir:
+        src = os.path.join(workdir, f"src{suffix}")
+        with open(src, "wb") as fh:
+            fh.write(data)
+        outdir = os.path.join(workdir, "out")
+        os.makedirs(outdir, exist_ok=True)
+        profile = Path(workdir, "profile").as_uri()
+        try:
+            subprocess.run(
+                [
+                    soffice,
+                    f"-env:UserInstallation={profile}",
+                    "--headless",
+                    "--convert-to",
+                    "docx:MS Word 2007 XML",
+                    "--outdir",
+                    outdir,
+                    src,
+                ],
+                capture_output=True,
+                timeout=180,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None  # конвертера нет смысла чинить на лету — см. докстринг
+        for fname in os.listdir(outdir):
+            if fname.lower().endswith(".docx"):
+                with open(os.path.join(outdir, fname), "rb") as fh:
+                    return fh.read()
+    return None
+
+
+def text_to_docx_bytes(text: str) -> bytes:
+    """Собрать простой .docx из готового текста — по абзацу на строку.
+
+    Запасной путь для форматов, чью разметку взять неоткуда (старый .doc на
+    хосте без LibreOffice, см. ``doc_to_docx_bytes``). Оформление оригинала не
+    восстанавливается, но пользователь получает документ Word, который можно
+    открыть, править и отправить на восстановление обратно .docx-путём, а не
+    .txt, из которого документ уже не собрать.
+    """
+    import io
+
+    import docx
+
+    document = docx.Document()
+    for line in text.split("\n"):
+        document.add_paragraph(line)
+    buf = io.BytesIO()
+    document.save(buf)
+    return buf.getvalue()
 
 
 def read_text_from_bytes(name: str, data: bytes) -> str:

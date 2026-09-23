@@ -31,7 +31,9 @@ echo "== изменено файлов: $(echo "$changed" | wc -l) =="
 
 web_changed=$(echo "$changed" | grep -c '^anonymizer/web/' || true)
 py_changed=$(echo "$changed"  | grep -c '^anonymizer/.*\.py$' || true)
-pkg_changed=$(echo "$changed" | grep -c '^anonymizer/web/package.json$' || true)
+# И package.json, и package-lock.json: версия зависимости может измениться
+# только в lock-файле, и тогда сборка молча пойдёт со старыми пакетами.
+pkg_changed=$(echo "$changed" | grep -cE '^anonymizer/web/package(-lock)?\.json$' || true)
 
 if [ "$py_changed" -gt 0 ]; then
     echo "== бэкенд: $py_changed файлов, перезапуск =="
@@ -42,10 +44,17 @@ fi
 
 if [ "$web_changed" -gt 0 ]; then
     cd "$WEB"
+    # Зависимости доставляются ВСЕГДА, а не только когда изменился манифест.
+    # npm install идемпотентен: если всё уже на месте, он отрабатывает за
+    # секунду и ничего не меняет. Зато не остаётся случая, когда сборка падает
+    # с "Module not found" из-за пакета, который приехал в package.json, но не
+    # в node_modules (ровно так ломался ручной скрипт без npm install).
     if [ "$pkg_changed" -gt 0 ]; then
-        echo "== package.json изменился, npm install =="
-        npm install --no-audit --no-fund
+        echo "== зависимости изменились, npm install =="
+    else
+        echo "== проверка зависимостей (npm install) =="
     fi
+    npm install --no-audit --no-fund
     echo "== сборка веб-интерфейса =="
     # При провале сборки set -e обрывает скрипт ДО перезапуска, так что
     # работающий сервис не трогается и сайт продолжает отвечать старой

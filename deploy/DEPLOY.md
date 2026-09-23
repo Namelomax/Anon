@@ -65,6 +65,18 @@ python3.12 -m venv .venv
 .venv/bin/pip install -r deploy/requirements-api.txt
 ```
 
+Опционально — LibreOffice для старого `.doc` (Word 97-2003):
+
+```bash
+sudo apt install -y libreoffice-writer
+```
+
+Обезличенная копия `.doc` в любом случае отдаётся как `.docx` (записать
+бинарный Word 97 нечем), но без LibreOffice разметку переносить нечем и
+документ собирается заново из текста — абзацы есть, таблицы и колонтитулы
+нет. С ней `.doc` конвертируется в `.docx` и дальше идёт обычным путём, с
+сохранением структуры. См. `_WORD_EXTENSIONS` в `anonymizer/server.py`.
+
 ### 3. Ключ
 
 ```bash

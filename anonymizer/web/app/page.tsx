@@ -8,6 +8,7 @@ import {
   Download,
   Eye,
   FileText,
+  FileType,
   Info,
   KeyRound,
   LoaderCircle,
@@ -42,6 +43,10 @@ type AnonResult = {
   document_base64: string;
   document_name: string;
   document_mime: string;
+  // Откуда взялся отдаваемый документ (см. server.py): "original" — из самого
+  // загруженного .docx, "converted" — .doc поднят до .docx через LibreOffice
+  // (разметка перенесена), "text" — документ собран заново из текста.
+  document_source?: "original" | "converted" | "text";
 };
 
 type DeanonResult = {
@@ -874,6 +879,18 @@ export default function Home() {
                   </button>
                   {docBusy && <span className="note">Собираю документ…</span>}
                 </div>
+                {/* Старый .doc записать обратно в его формат нечем, поэтому
+                    обезличенная копия — .docx. Смена расширения без пояснения
+                    выглядит как ошибка, а потеря разметки (когда на сервере
+                    нет конвертера) — тем более. */}
+                {/\.doc$/i.test(result.filename) && (
+                  <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
+                    <FileType size={16} className="inline-icon" />
+                    {result.document_source === "converted"
+                      ? "Исходный .doc сохранён как .docx — старый формат Word записать обратно нельзя. Разметка документа перенесена."
+                      : "Исходный .doc сохранён как .docx — старый формат Word записать обратно нельзя. Разметку перенести не удалось: на сервере нет конвертера LibreOffice, поэтому в документе только текст по абзацам."}
+                  </p>
+                )}
                 <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
                   <TriangleAlert size={16} className="inline-icon" />
                   Mapping — ключ восстановления. Храните его отдельно от обезличенного документа.
