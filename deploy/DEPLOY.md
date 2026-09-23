@@ -92,7 +92,13 @@ node_modules/.bin/prisma migrate deploy
 node_modules/.bin/prisma db seed        # только на пустой базе: тарифы + root
 ```
 
-Три момента, на которых это ломается:
+Четыре момента, на которых это ломается:
+
+- Миграцию нельзя применять при работающем UI: SQLite отдаёт базу schema
+  engine только монопольно, иначе `Error: SQLite database error / database is
+  locked`. Перед `migrate deploy` — `systemctl --user stop anonymizer-web`,
+  после — `start` (в `update.sh` это уже сделано, с обратным подъёмом сервиса
+  при неудачной миграции).
 
 - CLI `prisma` читает `.env`, а НЕ `.env.local` (это формат Next.js). Без
   подгрузки переменных вручную миграция падает с `P1012 Environment variable
