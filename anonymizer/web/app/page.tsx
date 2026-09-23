@@ -1,6 +1,22 @@
 "use client";
 
 import JSZip from "jszip";
+import {
+  Braces,
+  ChevronDown,
+  CircleCheckBig,
+  Download,
+  Eye,
+  FileText,
+  Info,
+  KeyRound,
+  LoaderCircle,
+  Lock,
+  Package,
+  ShieldCheck,
+  TriangleAlert,
+  Undo2,
+} from "lucide-react";
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -137,8 +153,12 @@ function labelOf(placeholder: string): string {
 const WARNING_KIND_LABELS: Record<string, string> = {
   DIGITS: "Длинный номер",
   EMAIL: "Адрес эл. почты",
-  gliner_chunk_failed: "Фрагмент не проверен",
-  llm_chunk_failed: "Фрагмент не проверен",
+  // Вид называет СЛОЙ, который не отработал, а не «фрагмент не проверен»:
+  // остальные слои этот же текст разобрали, и маскирование в нём чаще всего
+  // выполнено полностью — общая формулировка пугала там, где всё скрыто.
+  gliner_chunk_failed: "Фрагмент не проверен слоем GLiNER",
+  llm_chunk_failed: "Фрагмент не проверен слоем LLM",
+  recheck_chunk_failed: "Перепроверка фрагмента не завершена",
   recall_failed: "Не выполнен поиск пропущенных данных",
   recall_partial: "Поиск пропущенных данных выполнен частично",
   review_failed: "Не выполнена проверка лишних масок",
@@ -151,13 +171,86 @@ function warningLabel(kind: string): string {
   return WARNING_KIND_LABELS[kind] ?? kind;
 }
 
+// Сбой ДОПОЛНИТЕЛЬНОЙ перепроверки (engine.py, recheck_chunk_failed): второй
+// проход по уже замаскированному тексту. Основные слои этот фрагмент
+// разобрали, маскирование выполнено — ниже обычного была только вероятность
+// поймать пропущенное. Поэтому такие сообщения идут отдельной спокойной
+// карточкой, а не в жёлтой «проверена не полностью».
+const SOFT_WARNING_KINDS = new Set(["recheck_chunk_failed"]);
+
+type FailedWarning = {
+  kind: string;
+  message?: string;
+  offset?: number;
+  chars?: number;
+};
+
+// Текст режется на куски по несколько тысяч символов, и при обрыве связи
+// подряд не отвечают сразу несколько — пять строк «символы X–Y» об одном и
+// том же сбое читать невозможно. Соприкасающиеся диапазоны одного вида
+// сливаем в один пункт, считая, сколько кусков в него вошло. Записи без
+// диапазона (сбой целого слоя, а не куска) не сливаются никогда.
+function mergeChunkWarnings(items: FailedWarning[]): (FailedWarning & { count: number })[] {
+  const sorted = [...items].sort((a, b) =>
+    a.kind === b.kind ? (a.offset ?? 0) - (b.offset ?? 0) : a.kind < b.kind ? -1 : 1,
+  );
+  const out: (FailedWarning & { count: number })[] = [];
+  for (const w of sorted) {
+    const prev = out[out.length - 1];
+    const mergeable =
+      prev &&
+      prev.kind === w.kind &&
+      prev.offset != null &&
+      prev.chars != null &&
+      w.offset != null &&
+      w.chars != null &&
+      w.offset <= prev.offset + prev.chars;
+    if (mergeable) {
+      prev.chars = Math.max(prev.offset! + prev.chars!, w.offset! + w.chars!) - prev.offset!;
+      prev.count += 1;
+      continue;
+    }
+    out.push({ ...w, count: 1 });
+  }
+  return out;
+}
+
 // «символы 12 400–13 200» — офсет/длина есть только у чанковых сбоев
-// (gliner_chunk_failed/llm_chunk_failed), чтобы показать, ГДЕ смотреть.
+// (gliner_chunk_failed/llm_chunk_failed/recheck_chunk_failed), чтобы
+// показать, ГДЕ смотреть. Смещения всегда в координатах ИСХОДНОГО текста:
+// для второго прохода их переводит engine._interim_offset_translator.
 function warningRange(offset?: number, chars?: number): string | null {
   if (offset == null || chars == null) return null;
   const start = offset.toLocaleString("ru");
   const end = (offset + chars).toLocaleString("ru");
   return `символы ${start}–${end}`;
+}
+
+// Список сбоев слоёв — одинаковый в обеих карточках (жёсткой и мягкой),
+// различаются только заголовок и пояснение вокруг него.
+function WarningList({ items }: { items: (FailedWarning & { count: number })[] }) {
+  return (
+    <ul style={{ margin: 0, paddingLeft: 20 }}>
+      {items.map((w, i) => {
+        const range = warningRange(w.offset, w.chars);
+        return (
+          <li key={i} style={{ marginBottom: 10 }}>
+            <strong>{warningLabel(w.kind)}</strong>
+            {range && (
+              <span className="note">
+                {" "}
+                ({range}
+                {w.count > 1 ? `, фрагментов: ${w.count}` : ""})
+              </span>
+            )}
+            <div className="note" style={{ marginTop: 2 }}>
+              {w.message}
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
 }
 
 // Replace each placeholder token with its original value. Placeholders are
@@ -482,16 +575,21 @@ export default function Home() {
             </div>
           ) : null}
         </div>
-        <h1>🛡️ Анонимизатор персональных данных</h1>
+        <h1>
+          <ShieldCheck size={24} />
+          Анонимизатор персональных данных
+        </h1>
         <p>Загрузите документ — получите обезличенную версию и ключ восстановления (mapping).</p>
       </header>
 
       <div className="tabs">
         <button className={`tab${tab === "anon" ? " active" : ""}`} onClick={() => setTab("anon")}>
-          🔒 Анонимизация
+          <Lock size={16} />
+          Анонимизация
         </button>
         <button className={`tab${tab === "deanon" ? " active" : ""}`} onClick={() => setTab("deanon")}>
-          🔑 Деанонимизация
+          <KeyRound size={16} />
+          Деанонимизация
         </button>
       </div>
 
@@ -515,7 +613,12 @@ export default function Home() {
             >
               <strong>Перетащите файл сюда</strong> или нажмите, чтобы выбрать
               <div className="note">.docx, .doc, .pdf, .xlsx, .xls, .xml, .rtf, .odt, .txt (кроме презентаций)</div>
-              {file && <div className="file-name">📄 {file.name}</div>}
+              {file && (
+                <div className="file-name">
+                  <FileText size={16} />
+                  {file.name}
+                </div>
+              )}
             </div>
             <input
               ref={inputRef}
@@ -541,7 +644,7 @@ export default function Home() {
               }}
             >
               <h2 style={{ margin: 0 }}>2. Экспериментальные настройки</h2>
-              <span className={`chevron${stagesOpen ? " open" : ""}`}>▾</span>
+              <ChevronDown size={18} className={`chevron${stagesOpen ? " open" : ""}`} />
             </div>
             {stagesOpen && (
               <>
@@ -586,11 +689,14 @@ export default function Home() {
               >
                 {loading ? (
                   <>
-                    <span className="spin" />
+                    <LoaderCircle className="spin" size={18} />
                     Обрабатываю…
                   </>
                 ) : (
-                  "🔒 Обезличить"
+                  <>
+                    <Lock size={18} />
+                    Обезличить
+                  </>
                 )}
               </button>
               {loading && (
@@ -618,7 +724,8 @@ export default function Home() {
                 <h2>Результат</h2>
                 {!!result.preexisting_placeholders && (
                   <div className="error" style={{ marginBottom: 14 }}>
-                    ⚠️ В файле уже было {result.preexisting_placeholders} плейсхолдеров вида
+                    <TriangleAlert size={16} className="inline-icon" />В файле уже было{" "}
+                    {result.preexisting_placeholders} плейсхолдеров вида
                     [PERSON_1] — похоже, это уже обезличенный документ. Они защищены и не
                     трогались повторно, но проверьте, не загрузили ли вы .anon-файл по ошибке.
                   </div>
@@ -664,12 +771,22 @@ export default function Home() {
                 // Делим по наличию поля, а не по конкретным kind — так
                 // незнакомый в будущем kind всё равно попадёт в нужную карточку.
                 const residual = result.warnings!.filter((w) => w.value !== undefined);
-                const failed = result.warnings!.filter((w) => w.value === undefined);
+                const failed = mergeChunkWarnings(
+                  result.warnings!.filter((w) => w.value === undefined),
+                );
+                // Жёсткие — слой не отработал по тексту, который больше никто
+                // так не смотрел; мягкие — не завершилась лишь перепроверка
+                // (см. SOFT_WARNING_KINDS).
+                const failedHard = failed.filter((w) => !SOFT_WARNING_KINDS.has(w.kind));
+                const failedSoft = failed.filter((w) => SOFT_WARNING_KINDS.has(w.kind));
                 return (
                   <>
                     {residual.length > 0 && (
                       <div className="card warn-card">
-                        <h2 style={{ marginTop: 0 }}>⚠️ Проверьте вручную — возможно, не скрыто</h2>
+                        <h2 style={{ marginTop: 0 }}>
+                          <TriangleAlert size={18} />
+                          Проверьте вручную — возможно, не скрыто
+                        </h2>
                         <p className="note" style={{ marginTop: 0 }}>
                           Автопроверка нашла в результате фрагменты, похожие на неанонимизированные
                           данные (длинные числа — счета/ОГРН/ИНН/телефоны, адреса эл. почты). Если это
@@ -703,26 +820,34 @@ export default function Home() {
                       </div>
                     )}
 
-                    {failed.length > 0 && (
+                    {failedHard.length > 0 && (
                       <div className="card warn-card">
-                        <h2 style={{ marginTop: 0 }}>⚠️ Часть документа проверена не полностью</h2>
+                        <h2 style={{ marginTop: 0 }}>
+                          <TriangleAlert size={18} />
+                          Часть документа проверена не полностью
+                        </h2>
                         <p className="note" style={{ marginTop: 0 }}>
-                          Некоторые проверочные слои не смогли завершить работу — в этих местах
-                          персональные данные могли остаться незамаскированными. Просмотрите их
-                          вручную.
+                          Один из проверочных слоёв не смог завершить работу на этих местах.
+                          Остальные слои их разобрали, и маскирование чаще всего выполнено
+                          полностью — но шанс пропуска здесь выше обычного, поэтому места стоит
+                          просмотреть вручную.
                         </p>
-                        <ul style={{ margin: 0, paddingLeft: 20 }}>
-                          {failed.map((w, i) => {
-                            const range = warningRange(w.offset, w.chars);
-                            return (
-                              <li key={i} style={{ marginBottom: 10 }}>
-                                <strong>{warningLabel(w.kind)}</strong>
-                                {range && <span className="note"> ({range})</span>}
-                                <div className="note" style={{ marginTop: 2 }}>{w.message}</div>
-                              </li>
-                            );
-                          })}
-                        </ul>
+                        <WarningList items={failedHard} />
+                      </div>
+                    )}
+
+                    {failedSoft.length > 0 && (
+                      <div className="card">
+                        <h2 style={{ marginTop: 0 }}>
+                          <Info size={18} />
+                          Дополнительная перепроверка выполнена не полностью
+                        </h2>
+                        <p className="note" style={{ marginTop: 0 }}>
+                          Это не пропуск: основные слои эти места проверили и данные в них
+                          замаскированы. Не завершился лишь повторный проход, который ищет то, что
+                          могли не заметить основные слои.
+                        </p>
+                        <WarningList items={failedSoft} />
                       </div>
                     )}
                   </>
@@ -730,21 +855,28 @@ export default function Home() {
               })()}
 
               <div className="card">
-                <h2>📦 Скачать</h2>
+                <h2>
+                  <Package size={18} />
+                  Скачать
+                </h2>
                 <div className="row">
                   <button className="ghost" onClick={downloadZip} disabled={docBusy}>
-                    ⬇️ ZIP (документ + mapping)
+                    <Download size={16} />
+                    ZIP (документ + mapping)
                   </button>
                   <button className="ghost" onClick={downloadDoc} disabled={docBusy}>
-                    ⬇️ {result.document_name}
+                    <Download size={16} />
+                    {result.document_name}
                   </button>
                   <button className="ghost" onClick={downloadMapping}>
-                    ⬇️ {stem}.map.json
+                    <Braces size={16} />
+                    {stem}.map.json
                   </button>
                   {docBusy && <span className="note">Собираю документ…</span>}
                 </div>
                 <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
-                  ⚠️ Mapping — ключ восстановления. Храните его отдельно от обезличенного документа.
+                  <TriangleAlert size={16} className="inline-icon" />
+                  Mapping — ключ восстановления. Храните его отдельно от обезличенного документа.
                 </p>
               </div>
 
@@ -800,7 +932,17 @@ export default function Home() {
                                       : "Оставить это значение в тексте (не анонимизировать)"
                                   }
                                 >
-                                  {isKept ? "↩︎ Вернуть маску" : "Оставить в тексте"}
+                                  {isKept ? (
+                                    <>
+                                      <Undo2 size={14} />
+                                      Вернуть маску
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Eye size={14} />
+                                      Оставить в тексте
+                                    </>
+                                  )}
                                 </button>
                               </td>
                             </tr>
@@ -847,7 +989,12 @@ export default function Home() {
                 >
                   <strong>Обезличенный документ</strong>
                   <div className="note">.docx / .txt</div>
-                  {deFile && <div className="file-name">📄 {deFile.name}</div>}
+                  {deFile && (
+                    <div className="file-name">
+                      <FileText size={16} />
+                      {deFile.name}
+                    </div>
+                  )}
                 </div>
                 <div
                   className="drop"
@@ -856,7 +1003,12 @@ export default function Home() {
                 >
                   <strong>Маппинг</strong>
                   <div className="note">.json</div>
-                  {deMapFile && <div className="file-name">🔑 {deMapFile.name}</div>}
+                  {deMapFile && (
+                    <div className="file-name">
+                      <KeyRound size={16} />
+                      {deMapFile.name}
+                    </div>
+                  )}
                 </div>
               </div>
               <input
@@ -885,11 +1037,14 @@ export default function Home() {
               >
                 {deLoading ? (
                   <>
-                    <span className="spin" />
+                    <LoaderCircle className="spin" size={18} />
                     Восстанавливаю…
                   </>
                 ) : (
-                  "🔑 Восстановить"
+                  <>
+                    <KeyRound size={18} />
+                    Восстановить
+                  </>
                 )}
               </button>
             </div>
@@ -903,10 +1058,14 @@ export default function Home() {
           {deResult && (
             <>
               <div className="card">
-                <h2>📦 Скачать</h2>
+                <h2>
+                  <Package size={18} />
+                  Скачать
+                </h2>
                 <div className="row">
                   <button className="ghost" onClick={downloadRestored}>
-                    ⬇️ {deResult.document_name}
+                    <Download size={16} />
+                    {deResult.document_name}
                   </button>
                 </div>
                 {deResult.leftover.length > 0 ? (
@@ -915,7 +1074,8 @@ export default function Home() {
                   </div>
                 ) : (
                   <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
-                    ✅ Все плейсхолдеры восстановлены.
+                    <CircleCheckBig size={16} className="inline-icon" />
+                    Все плейсхолдеры восстановлены.
                   </p>
                 )}
               </div>

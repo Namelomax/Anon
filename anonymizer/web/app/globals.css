@@ -28,12 +28,23 @@ body {
 }
 
 .wrap {
-  max-width: 980px;
+  max-width: 1440px;
   margin: 0 auto;
-  padding: 32px 20px 80px;
+  padding: 32px 28px 80px;
+}
+
+/* Ширину колонки задаёт .wrap, но сплошной текст в 1440px читать нельзя —
+   строка уезжает от глаза. Поэтому абзацы (пояснения, примечания) держим в
+   комфортной мере, а таблицы, превью и раскладки кнопок занимают всю
+   доступную ширину: именно им пустые поля по бокам и мешали. */
+.card p {
+  max-width: 96ch;
 }
 
 header h1 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin: 0 0 4px;
   font-size: 26px;
   letter-spacing: -0.01em;
@@ -51,6 +62,9 @@ header p {
 }
 
 .tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   background: transparent;
   color: var(--muted);
   border: 1px solid var(--border);
@@ -76,9 +90,22 @@ header p {
 }
 
 .card h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0 0 14px;
   font-size: 16px;
   font-weight: 600;
+}
+
+/* Иконки (lucide-react) рядом с текстом выравниваются флексом контейнера, а
+   не вертикальным сдвигом: так они держат базовую линию при любом размере
+   шрифта. .inline-icon — для иконки ВНУТРИ абзаца, где флекс сломал бы
+   перенос строк. */
+.inline-icon {
+  vertical-align: -3px;
+  margin-right: 6px;
+  flex-shrink: 0;
 }
 
 .card-toggle {
@@ -101,7 +128,6 @@ header p {
 
 .chevron {
   color: var(--muted);
-  font-size: 14px;
   transition: transform 0.15s;
   flex-shrink: 0;
   margin-left: 12px;
@@ -132,6 +158,9 @@ header p {
 }
 
 .file-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   margin-top: 12px;
   color: var(--accent-2);
   font-weight: 600;
@@ -162,6 +191,10 @@ header p {
 }
 
 button.primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   background: var(--accent);
   color: #fff;
   border: none;
@@ -189,7 +222,9 @@ button.primary:disabled {
   font-size: 14px;
   cursor: pointer;
   text-decoration: none;
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .ghost:hover {
@@ -295,16 +330,11 @@ table.map code {
   font-size: 13px;
 }
 
+/* Вращаем саму иконку LoaderCircle (lucide-react), а не рисуем круг
+   бордерами, как было до перехода на иконки. */
 .spin {
-  display: inline-block;
-  width: 16px;
-  height: 16px;
-  border: 2px solid rgba(255, 255, 255, 0.4);
-  border-top-color: #fff;
-  border-radius: 50%;
-  animation: spin 0.7s linear infinite;
-  vertical-align: -3px;
-  margin-right: 8px;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
 }
 
 @keyframes spin {

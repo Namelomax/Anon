@@ -6,6 +6,7 @@ optional LLM review -> placeholder assignment -> masking.
 
 from __future__ import annotations
 
+import bisect
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -184,6 +185,15 @@ class Anonymizer:
             )
 
         raw = run_detectors(text, self._detectors)
+        # Предупреждения ПЕРВОГО прохода снимаются здесь, а не в конце
+        # anonymize(). Detector.find() очищает self.warnings на каждом вызове
+        # (см. llm.LLMDetector.find), а leak-скан ниже переиспользует ТОТ ЖЕ
+        # экземпляр LLM-детектора (build_anonymizer, server._build_pipeline).
+        # Читать det.warnings в самом конце означало бы показать только
+        # предупреждения второго прохода, молча потеряв предупреждения
+        # первого — а это ровно тот случай, который опасен: кусок, который
+        # основной проход не разобрал, реально мог остаться немаскированным.
+        pass_warnings: list[dict] = _drain_warnings(self._detectors)
         # Выравниваем непарные «ёлочки» ДО фильтров: обрезанная тримом кавычка
         # («12» сентября…, Технопарка «Сколково) оставляла в тексте сироту-«/».
         raw = [rebalance_quotes(text, s) for s in raw]
@@ -210,7 +220,7 @@ class Anonymizer:
         # Runs BEFORE review so the new candidates are judged (and can be
         # merged with existing ones) in the same review call.
         if self._second_pass_detectors:
-            leaked = self._find_leaked_spans(text, spans, protected)
+            leaked = self._find_leaked_spans(text, spans, protected, pass_warnings)
             leaked = [rebalance_quotes(text, s) for s in leaked]
             leaked = [s for s in leaked if passes_filters(s)]
             if leaked:
@@ -336,16 +346,11 @@ class Anonymizer:
         # Detectors that could not fully analyze their input (e.g. the LLM
         # detector giving up on a chunk after a degenerate reply, see llm.py)
         # surface it here — a chunk skipped by the LLM is PII that may still
-        # be unmasked, and that must not be silent. Not all detectors track
-        # this, hence getattr with a default instead of a base-class method.
-        # Deduplicated by identity: build_anonymizer reuses the SAME LLM
-        # detector instance for both the main pass and the second pass, so
-        # iterating both lists as-is would double-count its warnings.
-        seen_detectors: dict[int, object] = {}
-        for det in (*self._detectors, *self._second_pass_detectors):
-            seen_detectors[id(det)] = det
-        for det in seen_detectors.values():
-            warnings.extend(getattr(det, "warnings", None) or [])
+        # be unmasked, and that must not be silent. Собраны они ВЫШЕ, сразу
+        # после своего прохода (см. _drain_warnings у run_detectors и в
+        # _find_leaked_spans): det.warnings живёт только до следующего
+        # find() того же экземпляра.
+        warnings.extend(pass_warnings)
         # Review/recall stage failures (see above) — same visibility contract
         # as the detector warnings just above.
         warnings.extend(stage_warnings)
@@ -360,7 +365,11 @@ class Anonymizer:
         )
 
     def _find_leaked_spans(
-        self, text: str, spans: list[Span], protected: list[tuple[int, int]]
+        self,
+        text: str,
+        spans: list[Span],
+        protected: list[tuple[int, int]],
+        warnings: list[dict],
     ) -> list[Span]:
         """Mask the text with the current spans, re-scan the result, and map
         every value the second-pass detectors still see back onto the ORIGINAL
@@ -371,14 +380,30 @@ class Anonymizer:
         a placeholder token are skipped (the model occasionally tags the
         ``[PERSON_1]`` tokens themselves); the rest are located verbatim in the
         original text — a value we cannot find verbatim is never masked.
+
+        ``warnings`` — сюда дописываются предупреждения детекторов ЭТОГО
+        прохода, переведённые в свой отдельный вид (см. _recheck_warnings):
+        сбой перепроверки — это не «фрагмент не проверен», основной проход
+        его уже разобрал.
         """
+        span_placeholders: dict[int, str] = {}
+        replaced: tuple[Span, ...] = ()
         if spans:
             _, span_placeholders = assign_placeholders(spans)
-            interim, _ = _apply_all_occurrences(text, spans, span_placeholders)
+            interim, replaced = _apply_all_occurrences(text, spans, span_placeholders)
         else:
             interim = text
 
         hits = run_detectors(interim, self._second_pass_detectors)
+        # Сразу после прохода, пока следующий find() того же экземпляра не
+        # затёр список (см. комментарий у первого _drain_warnings).
+        warnings.extend(
+            _recheck_warnings(
+                _drain_warnings(self._second_pass_detectors),
+                _interim_offset_translator(spans, span_placeholders, replaced),
+                len(text),
+            )
+        )
         placeholder_ranges = find_placeholder_spans(interim)
 
         surfaces: set[tuple[str, str]] = set()
@@ -398,6 +423,109 @@ class Anonymizer:
                 leaked.append(Span(a, b, label, text[a:b], source="llm2"))
                 taken.append((a, b))
         return leaked
+
+
+# Сбой перепроверки (второй проход по УЖЕ замаскированному тексту) — это не
+# то же самое, что сбой основного прохода, и пользователю нельзя показывать
+# их одинаково: основной проход этот фрагмент разобрал, маскирование в нём
+# выполнено, не доработал лишь дополнительный поиск пропущенного. Отдельный
+# kind нужен, чтобы интерфейс мог сказать это словами, а не пугать
+# «фрагмент не проверен» там, где всё скрыто (см. web/app/page.tsx,
+# WARNING_KIND_LABELS).
+_RECHECK_CHUNK_FAILED_MESSAGE = (
+    "Дополнительная перепроверка этого фрагмента не завершилась. Основные "
+    "слои его уже проверили и маскирование выполнено — ниже обычного была "
+    "только вероятность поймать значение, пропущенное основным проходом."
+)
+
+
+def _drain_warnings(detectors: Iterable[Detector]) -> list[dict]:
+    """Копия ``detector.warnings`` всех детекторов сразу после их прохода.
+
+    Вызывать СРАЗУ: ``find()`` очищает этот список в начале каждого вызова, а
+    один и тот же экземпляр LLM-детектора используется и в основном проходе,
+    и в leak-скане. Дедупликация по ``id`` — тот же экземпляр может стоять в
+    списке дважды (subject-детектор, см. ``server._build_pipeline``), и его
+    предупреждения иначе удвоились бы. Не все детекторы ведут такой список,
+    поэтому ``getattr`` с умолчанием, а не метод базового класса.
+    """
+    out: list[dict] = []
+    seen: set[int] = set()
+    for det in detectors:
+        if id(det) in seen:
+            continue
+        seen.add(id(det))
+        out.extend(dict(w) for w in (getattr(det, "warnings", None) or []))
+    return out
+
+
+def _interim_offset_translator(
+    spans: list[Span], span_placeholders: dict[int, str], replaced: tuple[Span, ...]
+):
+    """Перевод смещения в промежуточном (замаскированном) тексте в смещение в
+    оригинале.
+
+    Детекторы второго прохода видят ``interim``, где каждое найденное значение
+    заменено на ``[LABEL_N]`` другой длины, поэтому их ``offset``/``chars``
+    без перевода указывают мимо — пользователю показывался бы диапазон
+    символов, которого в его документе нет.
+
+    Возвращает функцию ``interim_offset -> original_offset``. Смещение внутри
+    самого плейсхолдера переводится в позицию после соответствующего значения
+    оригинала — куски режутся по границам строк, так что на практике это
+    крайний случай, а диапазон в предупреждении и без того ориентир, а не
+    точная ссылка.
+    """
+    surface_to_ph: dict[str, str] = {}
+    for span in spans:
+        surface_to_ph.setdefault(span.text, span_placeholders[id(span)])
+
+    # Пары «позиция в interim -> позиция в оригинале», снятые сразу после
+    # каждой подстановки; между парами обе позиции растут одинаково.
+    marks: list[tuple[int, int]] = [(0, 0)]
+    interim_pos = 0
+    orig_pos = 0
+    for occurrence in replaced:
+        placeholder = surface_to_ph.get(occurrence.text)
+        if placeholder is None:
+            continue
+        interim_pos += (occurrence.start - orig_pos) + len(placeholder)
+        orig_pos = occurrence.end
+        marks.append((interim_pos, orig_pos))
+    interim_marks = [m[0] for m in marks]
+
+    def translate(offset: int) -> int:
+        index = bisect.bisect_right(interim_marks, offset) - 1
+        at_interim, at_orig = marks[index]
+        return at_orig + (offset - at_interim)
+
+    return translate
+
+
+def _recheck_warnings(warnings: list[dict], translate, text_length: int) -> list[dict]:
+    """Перемаркировать предупреждения второго прохода и перевести их смещения.
+
+    См. ``_RECHECK_CHUNK_FAILED_MESSAGE`` и ``_interim_offset_translator``.
+    Незнакомый вид предупреждения пропускается как есть: его смысл здесь
+    неизвестен, и молча его терять хуже, чем показать без перевода.
+    """
+    out: list[dict] = []
+    for warning in warnings:
+        if warning.get("kind") not in ("llm_chunk_failed", "gliner_chunk_failed"):
+            out.append(warning)
+            continue
+        warning = dict(warning)
+        warning["kind"] = "recheck_chunk_failed"
+        warning["message"] = _RECHECK_CHUNK_FAILED_MESSAGE
+        offset = warning.get("offset")
+        chars = warning.get("chars")
+        if isinstance(offset, int) and isinstance(chars, int):
+            start = max(0, min(translate(offset), text_length))
+            end = max(start, min(translate(offset + chars), text_length))
+            warning["offset"] = start
+            warning["chars"] = end - start
+        out.append(warning)
+    return out
 
 
 def _overlaps_any(span: Span, ranges: list[tuple[int, int]]) -> bool:
