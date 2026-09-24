@@ -81,6 +81,8 @@ request_id`` и его пару ``test_bare_submit_without_context_loses_request
 from __future__ import annotations
 
 import contextvars
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -90,7 +92,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def _default_log_path() -> Path:
@@ -139,6 +141,15 @@ GLINER_TOKENS_PER_CALL: float = float(os.getenv("ANONYMIZER_GLINER_TOKENS_PER_CA
 # даже для ошибок. НЕ влияет на агрегат request_total — тот заполняется
 # всегда, см. _accumulate.
 USAGE_LOG_CALLS: str = (os.getenv("ANONYMIZER_USAGE_LOG_CALLS") or "errors").strip().lower()
+
+# Ключ HMAC для хеширования имени файла в request_total (см. _filename_hash
+# ниже) — имя файла само по себе персональные данные (например,
+# «Приказ_об_увольнении_Иванова_И.И.docx»), поэтому в журнал попадает только
+# необратимый отпечаток, а не имя. Пусто/не задано — фолбэк на обычный
+# SHA-256 без соли (тоже необратим, но не привязан к секрету), чтобы
+# разработка и тесты работали без конфигурации; в проде задавать секрет
+# ОБЯЗАТЕЛЬНО, иначе отпечаток можно перебрать по словарю типичных имён.
+FILENAME_HASH_SECRET: str = os.getenv("ANONYMIZER_FILENAME_HASH_SECRET") or ""
 
 # Сериализует дозапись строк в файл лога.
 _LOCK = threading.Lock()
@@ -209,6 +220,31 @@ def run_in_context(pool, fn, *args, **kwargs):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _filename_hash(filename: str) -> str:
+    """Необратимый отпечаток имени файла для ``request_total`` (см.
+    ``FILENAME_HASH_SECRET``): HMAC-SHA256 по секрету из
+    ``ANONYMIZER_FILENAME_HASH_SECRET``, усечённый до 16 hex-символов;
+    без секрета — обычный SHA-256 (тот же формат усечения), чтобы разработка
+    и тесты работали без конфигурации. Одинаковое имя всегда даёт одинаковый
+    отпечаток (позволяет сопоставить повторную обработку того же файла),
+    разные имена — разные отпечатки; восстановить имя по отпечатку нельзя.
+    """
+    if FILENAME_HASH_SECRET:
+        digest = hmac.new(
+            FILENAME_HASH_SECRET.encode("utf-8"), filename.encode("utf-8"), hashlib.sha256,
+        ).hexdigest()
+    else:
+        digest = hashlib.sha256(filename.encode("utf-8")).hexdigest()
+    return digest[:16]
+
+
+def _filename_ext(filename: str) -> str:
+    """Расширение имени файла в нижнем регистре, включая точку (``".docx"``),
+    либо ``""``, если расширения нет. Не персональные данные — полезно для
+    отладки, какой формат упал, поэтому хранится в журнале как есть."""
+    return PurePosixPath(filename).suffix.lower()
 
 
 def _append(record: dict) -> None:
@@ -391,6 +427,16 @@ def request_context(
     ``RequestTotals``, который вызывающий код (``server.py``) может прочитать
     ПОСЛЕ выхода из ``with``.
 
+    ``filename`` — имя исходного файла, как его прислал клиент (см.
+    ``server.py``). В журнал САМО ИМЯ НЕ ПОПАДАЕТ (152-ФЗ: имя файла в
+    корпоративном документообороте само является персональными данными,
+    например «Приказ_об_увольнении_Иванова_И.И.docx») — вместо него в
+    ``request_total`` пишутся ``filename_hash`` (необратимый отпечаток, см.
+    ``_filename_hash``/``FILENAME_HASH_SECRET``) и ``filename_ext``
+    (расширение, не персональные данные, полезно для отладки формата).
+    ``filename=None`` (текстовый ``/anonymize`` без файла) даёт оба поля
+    ``None`` — хешировать пустую строку намеренно не делаем.
+
     ``account_id``/``user_id`` — биллинговая привязка записи: КАКОЙ аккаунт
     списывается за документ и КАКОЙ пользователь его потратил. Это единственное,
     чего не хватало ``request_total``, чтобы служить источником истины для
@@ -448,7 +494,14 @@ def request_context(
                 "ts": _now_iso(),
                 "kind": "request_total",
                 "request_id": request_id,
-                "filename": filename,
+                # Имя файла в журнал НЕ пишется (152-ФЗ: имя само по себе
+                # персональные данные) — сохраняется только необратимый
+                # отпечаток и расширение. filename=None (текстовый
+                # /anonymize) даёт filename_hash=None — хешировать пустую
+                # строку намеренно НЕ делаем, это была бы фальшивая
+                # определённость. См. _filename_hash/_filename_ext выше.
+                "filename_hash": _filename_hash(filename) if filename else None,
+                "filename_ext": _filename_ext(filename) if filename else None,
                 "chars": int(chars or 0),
                 "pages": pages,
                 "seconds": elapsed,

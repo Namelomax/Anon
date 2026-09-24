@@ -98,6 +98,18 @@ def _patched_calls_mode(mode: str):
         usage_log.USAGE_LOG_CALLS = orig
 
 
+@contextmanager
+def _patched_filename_hash_secret(secret: str):
+    """Patch FILENAME_HASH_SECRET (same monkeypatch-the-module-constant
+    convention as the other settings above)."""
+    orig = usage_log.FILENAME_HASH_SECRET
+    usage_log.FILENAME_HASH_SECRET = secret
+    try:
+        yield
+    finally:
+        usage_log.FILENAME_HASH_SECRET = orig
+
+
 def _read_lines(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -238,7 +250,11 @@ def test_request_context_writes_single_summary_with_matching_totals():
     assert summary["kind"] == "request_total"
 
     assert summary["request_id"] == totals.request_id
-    assert summary["filename"] == "doc.txt"
+    # Plaintext filename must never be persisted (see task spec: filenames
+    # are personal data) — only an irreversible hash + extension.
+    assert "filename" not in summary
+    assert summary["filename_hash"] == usage_log._filename_hash("doc.txt")
+    assert summary["filename_ext"] == ".txt"
     assert summary["chars"] == 1800
     assert summary["pages"] == 1.0  # 1800 / 1800
     assert summary["calls"] == {"llm_detect": 2, "gliner": 1}
@@ -264,6 +280,80 @@ def test_request_context_writes_single_summary_with_matching_totals():
     # seconds_by_kind map (task spec point 3).
     response_usage = totals.as_response_dict()
     assert response_usage["seconds_by_kind"] == {"llm_detect": 1.2, "gliner": 0.2}
+
+
+# --- filename privacy: request_total must never carry the plaintext name ---
+
+def test_request_total_contains_no_plaintext_filename_anywhere_in_raw_json():
+    """The literal uploaded filename must not appear ANYWHERE in the raw
+    serialized JSONL line — not merely renamed to a different key. Uses a
+    name unlikely to collide with any other field's value."""
+    name = "Приказ_об_увольнении_Иванова_И.И.docx"
+    with _temp_log_path() as log_path, _patched_filename_hash_secret(""):
+        with usage_log.request_context(filename=name, chars=100):
+            usage_log.record_call("llm_detect", seconds=0.1, ok=True)
+        raw = log_path.read_text(encoding="utf-8")
+
+    assert name not in raw
+    assert "Иванова" not in raw
+    assert "Приказ" not in raw
+
+
+def test_filename_hash_deterministic_and_distinguishes_names():
+    with _patched_filename_hash_secret(""):
+        h1 = usage_log._filename_hash("doc.docx")
+        h2 = usage_log._filename_hash("doc.docx")
+        h3 = usage_log._filename_hash("other.docx")
+
+    assert h1 == h2  # same filename -> same hash
+    assert h1 != h3  # different filename -> different hash
+    assert isinstance(h1, str) and len(h1) == 16
+
+
+def test_filename_hash_secret_changes_the_hash():
+    """Setting ANONYMIZER_FILENAME_HASH_SECRET (module attribute
+    FILENAME_HASH_SECRET) must change the hash for the SAME filename,
+    proving the HMAC key is actually wired in rather than ignored."""
+    with _patched_filename_hash_secret(""):
+        unsalted = usage_log._filename_hash("doc.docx")
+    with _patched_filename_hash_secret("some-secret-key"):
+        salted = usage_log._filename_hash("doc.docx")
+    with _patched_filename_hash_secret("another-secret-key"):
+        salted_other = usage_log._filename_hash("doc.docx")
+
+    assert salted != unsalted
+    assert salted != salted_other
+
+
+def test_filename_ext_lowercased_and_handles_edge_cases():
+    assert usage_log._filename_ext("Report.DOCX") == ".docx"
+    assert usage_log._filename_ext("archive.tar.gz") == ".gz"
+    assert usage_log._filename_ext("noextension") == ""
+    assert usage_log._filename_ext("Приказ_об_увольнении.pdf") == ".pdf"
+
+
+def test_request_total_filename_hash_and_ext_recorded_correctly():
+    with _temp_log_path() as log_path, _patched_filename_hash_secret(""):
+        with usage_log.request_context(filename="ГПХ_Петров_П.П.pdf", chars=100):
+            usage_log.record_call("llm_detect", seconds=0.1, ok=True)
+        summary = next(l for l in _read_lines(log_path) if l["kind"] == "request_total")
+
+    assert summary["filename_hash"] == usage_log._filename_hash("ГПХ_Петров_П.П.pdf")
+    assert summary["filename_ext"] == ".pdf"
+    assert "filename" not in summary
+
+
+def test_request_total_filename_none_yields_null_hash_and_ext():
+    """filename=None (text-only /anonymize) must not fabricate a hash of an
+    empty string — both fields must be None."""
+    with _temp_log_path() as log_path:
+        with usage_log.request_context(chars=100):  # filename left at default None
+            usage_log.record_call("llm_detect", seconds=0.1, ok=True)
+        summary = next(l for l in _read_lines(log_path) if l["kind"] == "request_total")
+
+    assert summary["filename_hash"] is None
+    assert summary["filename_ext"] is None
+    assert "filename" not in summary
 
 
 def test_seconds_by_kind_sums_correctly_including_failed_calls():
@@ -802,6 +892,61 @@ def test_server_run_anonymize_text_ignores_malformed_ids_without_failing():
     summary = next(l for l in lines if l["kind"] == "request_total")
     assert summary["account_id"] is None
     assert summary["user_id"] is None
+
+
+def test_server_run_anonymize_file_download_name_unaffected_by_journal_change():
+    """The journal no longer stores the plaintext filename (see the
+    filename_hash/filename_ext tests above), but the CLIENT-FACING download
+    name derivation in server._run_anonymize_file (PurePosixPath(filename)
+    .stem -> f"{stem}.anon.docx") must be completely unaffected — this test
+    goes through the real handler (not a re-implementation of its stem
+    logic) with an actual .docx to prove that end-to-end."""
+    import base64
+    import io
+
+    import docx
+
+    from anonymizer import server
+
+    doc = docx.Document()
+    doc.add_paragraph("просто текст без ПДн")
+    buf = io.BytesIO()
+    doc.save(buf)
+    file_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    orig_detectors = server._DETECTORS
+    orig_defaults = server._DEFAULTS
+    orig_review_cfg = server._REVIEW_CFG
+    orig_ner_backend = server._NER_BACKEND
+    orig_needs_lock = server._NEEDS_MODEL_LOCK
+    server._DETECTORS = {}
+    server._DEFAULTS = {name: False for name in server._STAGE_NAMES}
+    server._REVIEW_CFG = None
+    server._NER_BACKEND = "none"
+    server._NEEDS_MODEL_LOCK = False
+    try:
+        with _temp_log_path() as log_path:
+            result = server._run_anonymize_file({"filename": "Договор.docx", "file_base64": file_b64})
+            lines = _read_lines(log_path)
+    finally:
+        server._DETECTORS = orig_detectors
+        server._DEFAULTS = orig_defaults
+        server._REVIEW_CFG = orig_review_cfg
+        server._NER_BACKEND = orig_ner_backend
+        server._NEEDS_MODEL_LOCK = orig_needs_lock
+
+    # Client-facing response: unchanged in every respect (task constraint).
+    assert result["filename"] == "Договор.docx"
+    assert result["document_name"] == "Договор.anon.docx"
+    assert result["document_mime"] == (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+
+    # Journal: no plaintext name, only hash + extension.
+    summary = next(l for l in lines if l["kind"] == "request_total")
+    assert "filename" not in summary
+    assert summary["filename_hash"] == usage_log._filename_hash("Договор.docx")
+    assert summary["filename_ext"] == ".docx"
 
 
 def test_coerce_id_accepts_ints_and_digit_strings_rejects_the_rest():
