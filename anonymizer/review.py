@@ -74,7 +74,7 @@ import time
 from dataclasses import dataclass, field, replace
 
 from . import http_pool, usage_log
-from .detectors import can_unmask_person  # deterministic PERSON-unmask veto
+from .detectors import can_trim_person, can_unmask_person  # deterministic PERSON-unmask veto
 from .llm import _extract_json_array  # reuse the same tolerant JSON-array scanner
 from .spans import Span
 
@@ -560,6 +560,7 @@ def review_spans(
     # печати построчно внутри цикла. См. комментарий у can_unmask_person.
     _person_gate_refused: list[tuple[str, list]] = []
     _person_gate_allowed: list[tuple[str, list]] = []
+    _person_trim_refused: list[tuple[str, str, list]] = []
     _person_gate_unavailable = False
     for idx, key in enumerate(keys):
         # ``verdicts`` is exceptions-only (see _build_review_prompt): a
@@ -607,7 +608,21 @@ def review_spans(
         trim = v.get("trim")
         cand_text = candidates[key].text
         if isinstance(trim, str) and trim and trim != cand_text and trim in cand_text:
-            trimmed_text[key] = trim
+            # trim у PERSON — это частичное снятие маски: отрезанное остаётся
+            # в тексте открытым. Поэтому отрезанная часть проходит тот же
+            # шлюз, что и keep=false. Иначе модель могла обрезать
+            # «Максимилиан Фролов-Заречный» до «Максимилиан», и фамилия утекала
+            # в обход шлюза.
+            if candidates[key].label == "PERSON":
+                removed = cand_text.replace(trim, " ", 1)
+                allowed, gate_verdicts = can_trim_person(removed)
+                if not allowed:
+                    if not gate_verdicts:
+                        _person_gate_unavailable = True
+                    _person_trim_refused.append((cand_text, trim, gate_verdicts))
+                    trim = None
+            if trim:
+                trimmed_text[key] = trim
         mw = v.get("merge_with")
         if isinstance(mw, int) and 0 <= mw < len(keys):
             target = keys[mw]
@@ -661,6 +676,20 @@ def review_spans(
             print(
                 f"[review] person-gate: confirmed model's keep=false for {text!r} "
                 f"via {paths} — unmasked",
+                file=sys.stderr,
+            )
+
+    if _person_trim_refused:
+        import sys
+
+        for text, trim, gate_verdicts in _person_trim_refused:
+            reasons = (
+                "; ".join(f"{w!r} — {why}" for w, ok, why in gate_verdicts if not ok)
+                or "dictionary unavailable"
+            )
+            print(
+                f"[review] person-gate: refused model's trim {text!r} -> {trim!r} "
+                f"({reasons}) — kept masked in full",
                 file=sys.stderr,
             )
 

@@ -144,6 +144,38 @@ def test_morphology_unavailable_does_not_crash_and_does_not_affect_org():
     assert out == []
 
 
+# --- trim: partial unmask goes through the same gate ------------------------
+
+def test_trim_that_cuts_off_a_surname_is_refused():
+    """trim used to bypass the gate: «Максимилиан Фролов-Заречный» trimmed to
+    «Максимилиан» left the double surname in plain text."""
+    text = "Блокнот нашёл Максимилиан Фролов-Заречный вчера."
+    spans = _mk_spans(text, [("PERSON", "Максимилиан Фролов-Заречный")])
+    cfg = ReviewConfig(model="test-model")
+    response = [
+        {"id": 0, "text": "Максимилиан Фролов-Заречный", "trim": "Максимилиан"}
+    ]
+    with _patched_post_json(_ok(response)), _captured_stderr() as buf:
+        out = review_spans(text, spans, cfg)
+
+    assert [s.text for s in out] == ["Максимилиан Фролов-Заречный"]
+    assert "refused model's trim" in buf.getvalue()
+
+
+def test_trim_that_cuts_off_an_ordinary_word_still_applies():
+    """Control: trimming a status word glued to the name keeps working."""
+    text = "Договор подписал Самозанятый Андрей Смирнов."
+    spans = _mk_spans(text, [("PERSON", "Самозанятый Андрей Смирнов")])
+    cfg = ReviewConfig(model="test-model")
+    response = [
+        {"id": 0, "text": "Самозанятый Андрей Смирнов", "trim": "Андрей Смирнов"}
+    ]
+    with _patched_post_json(_ok(response)):
+        out = review_spans(text, spans, cfg)
+
+    assert [s.text for s in out] == ["Андрей Смирнов"]
+
+
 if __name__ == "__main__":
     import traceback
 

@@ -102,11 +102,18 @@ _BLOB = r"\d(?:" + _DIGSEP + r"*\d)*"
 # Cyrillic local parts / domains / .рф are legal and appear in RU contracts.
 # ВАЖНО: разделитель [ \t]?, а не \s? — иначе матч перепрыгивает перенос строки
 # и заглатывает следующее слово («…edu.\nСогласовано»).
+# Точка в ДОМЕНЕ. Пробел после неё допустим («aol . com»), но не перед словом
+# следующего предложения: «…@ravenmail.ru. Под её именем» раньше давало email
+# «ravenmail.ru. Под», и слово «Под» исчезало из текста под плейсхолдером.
+# Отсекаем заглавную букву и кириллицу (кроме зоны «рф») после «. ».
+# (?-i:...) — детектор работает с IGNORECASE, без этого «aol . com» тоже
+# считался бы началом предложения.
+_EMAIL_DOMAIN_DOT = r"[ \t]?\.(?![ \t]+(?-i:[A-ZА-ЯЁ]|(?!рф\b)[а-яё]))[ \t]?"
 EMAIL = RegexDetector(
     "EMAIL",
     r"[A-Za-zА-Яа-яЁё0-9_%+\-]+(?:[ \t]?\.[ \t]?[A-Za-zА-Яа-яЁё0-9_%+\-]+)*"
-    r"[ \t]?@[ \t]?[A-Za-zА-Яа-яЁё0-9\-]+(?:[ \t]?\.[ \t]?[A-Za-zА-Яа-яЁё0-9\-]+)*"
-    r"[ \t]?\.[ \t]?[A-Za-zА-Яа-яЁё]{2,}",
+    r"[ \t]?@[ \t]?[A-Za-zА-Яа-яЁё0-9\-]+(?:" + _EMAIL_DOMAIN_DOT + r"[A-Za-zА-Яа-яЁё0-9\-]+)*"
+    + _EMAIL_DOMAIN_DOT + r"[A-Za-zА-Яа-яЁё]{2,}",
 )
 
 # Common TLDs used to recognize bare domains (no http/www), e.g. "lamoda.ru/login".
@@ -329,16 +336,20 @@ _PATRONYMIC = r"[А-ЯЁ][а-яё]+(?:вич(?:[ауеё]|ем)?|вн[аеоуы
 # Статусные слова перед ФИО — они НЕ часть имени и не должны попадать в спан
 # (иначе «Самозанятый» маскируется, а стоящая рядом фамилия может утечь).
 _NAME_STATUS = r"(?:Самозанят\w+|Граждан\w+|Индивидуальн\w+|Учредител\w+|Директор\w*)"
+# Слово ФИО, включая двойную фамилию через дефис («Фролов-Заречный»). Без
+# дефиса спан обрывался на первой части: «Максимилиан Игнатьевич Фролов» под
+# маской, а «-Заречный» оставался в тексте открытым.
+_NAME_WORD = r"[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?"
 PERSON_PATRONYMIC = RegexDetector(
     "PERSON",
     # 1-2 заглавных слова перед отчеством (Фамилия/Имя), НО не статусное слово,
     # + отчество + ОПЦИОНАЛЬНАЯ фамилия ПОСЛЕ отчества. Порядок «Имя Отчество
     # Фамилия» («Андрей Петрович Смирнов») раньше терял фамилию — она утекала.
-    r"(?:(?!" + _NAME_STATUS + r"\b)[А-ЯЁ][а-яё]+\s+){1,2}" + _PATRONYMIC
+    r"(?:(?!" + _NAME_STATUS + r"\b)" + _NAME_WORD + r"\s+){1,2}" + _PATRONYMIC
     # Фамилия после отчества — ТОЛЬКО на той же строке ([ \t]+, не \s+): иначе
     # хвост перепрыгивал перенос и цеплял первое слово следующей строки
     # («…Николаевна\nДата»), спан становился 4-словным и его резал шумовой фильтр.
-    + r"(?:[ \t]+[А-ЯЁ][а-яё]+)?(?![а-яё])",
+    + r"(?:[ \t]+" + _NAME_WORD + r")?(?![а-яё])",
     # Case-sensitive: without this, IGNORECASE makes the «-вно/-вне» suffix match
     # common lowercase adverbs («условно», «оперативно», «всё равно», «вовне»).
     ignorecase=False,
@@ -1279,6 +1290,23 @@ def can_unmask_person(value: str) -> tuple[bool, list[tuple[str, bool, str]]]:
     return allowed, verdicts
 
 
+_NAME_STATUS_RE = re.compile(_NAME_STATUS)
+
+
+def can_trim_person(removed: str) -> tuple[bool, list[tuple[str, bool, str]]]:
+    """Шлюз для ``trim`` у PERSON: можно ли вернуть в текст отрезанную часть.
+
+    То же, что ``can_unmask_person``, но статусные слова и должности
+    («Самозанятый», «Директор») отрезать можно всегда — ради них trim и
+    существует, а словарь знает не все из них («Самозанятый» в нём нет).
+    """
+    rest = " ".join(
+        w for w in removed.split()
+        if not (_NAME_STATUS_RE.fullmatch(w.strip(_PERSON_WORD_STRIP)) or is_non_pii(w))
+    )
+    return can_unmask_person(rest)
+
+
 # NER/LLM labels are "soft": models sometimes tag pronouns or function words
 # ("я", "он", "это") as PERSON/LOCATION/ORG. Masking those is catastrophic with
 # mask_all_occurrences (every "я" inside "сегодня", "друзья" gets replaced), so
@@ -1408,6 +1436,9 @@ _INTERJECTIONS = frozenset({
 })
 
 
+_NAME_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё]+(?:-[A-Za-zА-Яа-яЁё]+)*")
+
+
 def _alpha_tokens(text: str) -> list[str]:
     return _WORD_RE.findall(text.lower())
 
@@ -1477,7 +1508,10 @@ def is_noise_span(text: str, label: str) -> bool:
             return True
         if not s[0].isupper():  # настоящее ФИО начинается с заглавной
             return True
-        if len(toks) >= 4:  # слишком длинно для имени — фраза
+        # Слишком длинно для имени — фраза. Слова считаем вместе с дефисом:
+        # двойная фамилия — одно слово. Иначе «Максимилиан Игнатьевич
+        # Фролов-Заречный» насчитывал 4 токена и выбрасывался как шум целиком.
+        if len(_NAME_TOKEN_RE.findall(s)) >= 4:
             return True
         if toks and all(
             t in _ENTITY_STOPWORDS or t in _PREPOSITIONS or t in _INTERJECTIONS
@@ -1542,6 +1576,13 @@ def propagate_entity_aliases(text: str, spans: list[Span]) -> list[Span]:
                 # одиночное повторение («директор Денисов А.А. (Денисов)») не
                 # утекало голым словом в другом месте документа.
                 aliases = parts
+            # Части двойной фамилии тоже встречаются поодиночке: «Фамилия
+            # Заречный — не его» при пойманном «Фролов-Заречный».
+            aliases = aliases + [
+                h for p in parts if "-" in p
+                for h in p.split("-")
+                if len(h) >= 3 and h[0].isupper()
+            ]
         elif s.label == "ORG":
             m = re.search(r"[«\"]([^»\"\n]{3,60})[»\"]", s.text)
             if m:
@@ -1588,6 +1629,48 @@ def _decl_stem(val: str) -> str:
     return val[:-1]
 
 
+_DECL_SUFFIX_ALT = "|".join(
+    sorted((re.escape(s) for s in _DECL_SUFFIXES), key=len, reverse=True)
+)
+
+# Фамилии на -ов/-ев/-ин/-ын: «Вельяминов» → «Вельяминова», «Вельяминовой».
+# Общий _decl_stem их не склоняет: «ов» намеренно не отрезается (см. выше), и
+# основа «Вельямино» с «Вельяминова» не совпадает.
+_POSSESSIVE_SURNAME_RE = re.compile(r"(.{2,}?(?:ов|ев|ёв|ин|ын))(?:а|у|ым|ом|е|ой|ы|ых|ыми)?")
+_POSSESSIVE_ENDINGS = r"(?:ыми|ым|ом|ой|ых|а|у|е|ы)?"
+# Фамилии-прилагательные: «Заречный» → «Заречных», «Лунная» → «Лунной».
+_ADJ_SURNAME_RE = re.compile(r"(.{3,}?)(?:ыми|ими|ого|его|ому|ему|ый|ий|ой|ая|яя|ым|им|ую|юю|ых|их)")
+_ADJ_ENDINGS = r"(?:ыми|ими|ого|его|ому|ему|ый|ий|ой|ая|яя|ое|ее|ым|им|ую|юю|ых|их)?"
+
+
+def _person_word_decl_regex(word: str) -> str:
+    """Шаблон падежных форм ОДНОГО слова имени (без границ слова).
+
+    Всегда включает прежний общий шаблон (основа + падежное окончание), так
+    что всё, что ловилось раньше, ловится и теперь; к нему добавляются формы
+    фамилий на -ов/-ин, фамилий-прилагательных и имён на согласную
+    («Максимилиан» → «Максимилиана»).
+    """
+    if len(word) < 4:
+        return re.escape(word)
+    alts = [re.escape(_decl_stem(word)) + r"(?:" + _DECL_SUFFIX_ALT + r")?"]
+    if word[-1].lower() not in _CYRILLIC_VOWELS and word[-1].lower() not in "йь":
+        alts.append(re.escape(word) + r"(?:" + _DECL_SUFFIX_ALT + r")?")
+    m = _POSSESSIVE_SURNAME_RE.fullmatch(word)
+    if m:
+        alts.append(re.escape(m.group(1)) + _POSSESSIVE_ENDINGS)
+    m = _ADJ_SURNAME_RE.fullmatch(word)
+    if m:
+        alts.append(re.escape(m.group(1)) + _ADJ_ENDINGS)
+    return "(?:" + "|".join(alts) + ")"
+
+
+def _person_decl_regex(val: str) -> str:
+    """Шаблон падежных форм имени; двойная фамилия склоняется по частям
+    («Тараканова-Лунная» → «Таракановой-Лунной»)."""
+    return "-".join(_person_word_decl_regex(p) for p in val.split("-"))
+
+
 def propagate_declensions(text: str, spans: list[Span]) -> list[Span]:
     """Find declined case-forms of already-detected single-word entities.
 
@@ -1610,22 +1693,36 @@ def propagate_declensions(text: str, spans: list[Span]) -> list[Span]:
         if s.label not in _DECLENSION_LABELS:
             continue
         val = s.text.strip()
-        if " " in val or len(val) < 5 or not val[0].isupper():
-            continue
-        stem = _decl_stem(val)
-        key = (s.label, stem.casefold())
-        if key in seen_stems or len(stem) < 4:
-            continue
-        seen_stems.add(key)
-        pattern = re.compile(
-            r"(?<![А-Яа-яЁёA-Za-z])" + re.escape(stem) + r"(?:" + suffix_alt + r")?"
-            r"(?![А-Яа-яЁёA-Za-z])"
-        )
-        for m in pattern.finditer(text):
-            a, b = m.start(), m.end()
-            if any(a < e and st < b for st, e in existing):
+        # Части многословного ФИО склоняются по отдельности: «Таракановой-
+        # Лунной» при пойманной лишь «Ясмина Тараканова-Лунная» иначе не
+        # находилась — голой «Тараканова-Лунная» в тексте может не быть вовсе,
+        # и алиас (а с ним и склонение) не появлялся.
+        if s.label == "PERSON" and " " in val:
+            seeds = [w.strip(",.") for w in val.split()]
+        else:
+            seeds = [val]
+        for word in seeds:
+            if " " in word or len(word) < 5 or not word[0].isupper():
                 continue
-            if any(a < e2 and st2 < b for st2, e2 in ((x.start, x.end) for x in extra)):
+            stem = _decl_stem(word)
+            if len(stem) < 4:
                 continue
-            extra.append(Span(a, b, s.label, text[a:b], source="morph"))
+            if s.label == "PERSON":
+                body = _person_decl_regex(word)
+            else:
+                body = re.escape(stem) + r"(?:" + suffix_alt + r")?"
+            key = (s.label, body.casefold())
+            if key in seen_stems:
+                continue
+            seen_stems.add(key)
+            pattern = re.compile(
+                r"(?<![А-Яа-яЁёA-Za-z])" + body + r"(?![А-Яа-яЁёA-Za-z])"
+            )
+            for m in pattern.finditer(text):
+                a, b = m.start(), m.end()
+                if any(a < e and st < b for st, e in existing):
+                    continue
+                if any(a < e2 and st2 < b for st2, e2 in ((x.start, x.end) for x in extra)):
+                    continue
+                extra.append(Span(a, b, s.label, text[a:b], source="morph"))
     return extra
