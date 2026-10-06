@@ -142,6 +142,30 @@ GLINER_TOKENS_PER_CALL: float = float(os.getenv("ANONYMIZER_GLINER_TOKENS_PER_CA
 # всегда, см. _accumulate.
 USAGE_LOG_CALLS: str = (os.getenv("ANONYMIZER_USAGE_LOG_CALLS") or "errors").strip().lower()
 
+# ОПАСНО: отладочный переключатель. Включённый, он возвращает в stderr (а на
+# проде это journald, где строки живут неделями) и в поле error журнала
+# ПЕРСОНАЛЬНЫЕ ДАННЫЕ документа: значения кандидатов (фамилии, имена, короткие
+# числа), сырой ответ LLM слоя recall и тела HTTP-ответов шлюза. Нужен только
+# для локальной отладки на синтетических документах. НИКОГДА не включать в
+# проде: журнал перестаёт быть «только метаданные». Дефолт — выключено;
+# включается ТОЛЬКО явным ANONYMIZER_UNSAFE_LOG_PERSONAL_DATA=1/true/yes/on.
+# Читать как usage_log.UNSAFE_LOG_PERSONAL_DATA в момент вызова, не копировать.
+UNSAFE_LOG_PERSONAL_DATA: bool = (
+    os.getenv("ANONYMIZER_UNSAFE_LOG_PERSONAL_DATA") or ""
+).strip().lower() in ("1", "true", "yes", "on")
+
+
+def describe_http_error(status: int, body: bytes | str) -> str:
+    """Текст для исключения при не-200 ответе шлюза: статус и длина тела в
+    байтах, а САМО тело — только при UNSAFE_LOG_PERSONAL_DATA (шлюз может
+    эхом вернуть кусок запроса, а исключение уходит в журнал как error=)."""
+    raw = body.encode("utf-8", "replace") if isinstance(body, str) else bytes(body or b"")
+    text = f"HTTP {status}, тело ответа {len(raw)} байт"
+    if UNSAFE_LOG_PERSONAL_DATA:
+        text += f" (UNSAFE, первые 200 байт): {raw[:200].decode('utf-8', 'replace')!r}"
+    return text
+
+
 # Ключ HMAC для хеширования имени файла в request_total (см. _filename_hash
 # ниже) — имя файла само по себе персональные данные (например,
 # «Приказ_об_увольнении_Иванова_И.И.docx»), поэтому в журнал попадает только

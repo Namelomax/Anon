@@ -427,7 +427,7 @@ class LLMDetector:
                 # raised HTTPError — a subclass of URLError — and was caught
                 # by the same except clause below with the same message.
                 raise http_pool.PoolConnectionError(
-                    f"HTTP {status}: {resp_body[:200]!r}"
+                    usage_log.describe_http_error(status, resp_body)
                 )
             data = json.loads(resp_body)
         except OSError as exc:  # connection refused, timeout, non-2xx status, ...

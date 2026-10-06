@@ -381,17 +381,17 @@ class RemoteGLiNERDetector:
                     f"GLiNER API {cfg.base_url} недоступен: {exc}"
                 ) from exc
             if status != 200:
-                body = resp_body[:200].decode("utf-8", "replace")
+                body = usage_log.describe_http_error(status, resp_body)
                 usage_log.record_call(
                     "gliner", seconds=time.time() - t0, chars=len(chunk),
-                    ok=False, error=f"HTTP {status}: {body}",
+                    ok=False, error=body,
                 )
                 if status >= 500 and attempt + 1 < attempts:
                     self._wait_before_retry(attempt)
                     continue
                 self._bump_circuit_breaker()
                 raise RuntimeError(
-                    f"GLiNER API {cfg.base_url} вернул HTTP {status}: {body}"
+                    f"GLiNER API {cfg.base_url} вернул {body}"
                 )
             data = json.loads(resp_body)
             usage_log.record_call("gliner", seconds=time.time() - t0, chars=len(chunk), ok=True)

@@ -158,8 +158,8 @@ def test_dropped_candidates_are_printed_to_stderr_not_in_warnings():
 
     assert out == []
     stderr_text = buf.getvalue()
-    assert "Excel" in stderr_text
-    assert "неизвестным типом" in stderr_text
+    assert "Excel" not in stderr_text  # document-derived values are not logged
+    assert "неизвестным типом: 1" in stderr_text
     assert warnings == []
     for w in warnings:
         assert "Excel" not in json.dumps(w, ensure_ascii=False)

@@ -95,7 +95,10 @@ def test_captain_yakov_and_vaigus_both_kept_masked_despite_model_dropping_both()
     assert len(out) == 2
     logged = buf.getvalue()
     assert "person-gate" in logged
-    assert "Яков" in logged  # the blocking word is named in the refusal reason
+    # Values never reach the log by default; only counts and reasons do (see
+    # test_log_no_personal_data.py for the full leak regression).
+    assert "Яков" not in logged and "Вайгус" not in logged
+    assert "refused model's keep=false for 2 candidate(s)" in logged
 
 
 def test_ordinary_word_person_drop_still_goes_through():

@@ -103,6 +103,17 @@ _REVIEWABLE_LABELS = frozenset({
 # morph, glossary) высокоточны и на пересмотр не отдаются — см. _group_candidates.
 _NER_LLM_SOURCES = frozenset({"gliner", "ner", "llm", "llm2", "llm-recall"})
 
+def _reason_counts(verdict_lists: list, *, blocked_only: bool) -> str:
+    """Сводка причин шлюза PERSON без самих слов: «причина ×N»."""
+    counts: dict[str, int] = {}
+    for gate_verdicts in verdict_lists:
+        for _w, ok, why in gate_verdicts:
+            if blocked_only and ok:
+                continue
+            counts[why] = counts.get(why, 0) + 1
+    return ", ".join(f"{why} ×{n}" for why, n in sorted(counts.items()))
+
+
 def _build_review_prompt(subject: bool = False) -> str:
     """Промпт ревьюера. ``subject`` — включён ли режим предмета договора.
 
@@ -652,44 +663,89 @@ def review_spans(
     if _person_gate_refused or _person_gate_allowed:
         import sys
 
-        for text, gate_verdicts in _person_gate_refused:
-            if not gate_verdicts:
+        if usage_log.UNSAFE_LOG_PERSONAL_DATA:
+            for text, gate_verdicts in _person_gate_refused:
+                if not gate_verdicts:
+                    print(
+                        f"[review] person-gate: kept masked, dictionary unavailable: {text!r}",
+                        file=sys.stderr,
+                    )
+                    continue
+                reasons = "; ".join(
+                    f"{w!r} — {why}" for w, ok, why in gate_verdicts if not ok
+                )
                 print(
-                    f"[review] person-gate: kept masked, dictionary unavailable: {text!r}",
+                    f"[review] person-gate: refused model's keep=false for {text!r} "
+                    f"({reasons}) — kept masked",
                     file=sys.stderr,
                 )
-                continue
-            reasons = "; ".join(
-                f"{w!r} — {why}" for w, ok, why in gate_verdicts if not ok
-            )
-            print(
-                f"[review] person-gate: refused model's keep=false for {text!r} "
-                f"({reasons}) — kept masked",
-                file=sys.stderr,
-            )
-        for text, gate_verdicts in _person_gate_allowed:
-            paths = (
-                ", ".join(f"{w!r}={why}" for w, _ok, why in gate_verdicts)
-                if gate_verdicts
-                else "no Cyrillic capitalised words (out of scope)"
-            )
-            print(
-                f"[review] person-gate: confirmed model's keep=false for {text!r} "
-                f"via {paths} — unmasked",
-                file=sys.stderr,
-            )
+            for text, gate_verdicts in _person_gate_allowed:
+                paths = (
+                    ", ".join(f"{w!r}={why}" for w, _ok, why in gate_verdicts)
+                    if gate_verdicts
+                    else "no Cyrillic capitalised words (out of scope)"
+                )
+                print(
+                    f"[review] person-gate: confirmed model's keep=false for {text!r} "
+                    f"via {paths} — unmasked",
+                    file=sys.stderr,
+                )
+        else:
+            if _person_gate_refused:
+                _unavail = sum(1 for _t, gv in _person_gate_refused if not gv)
+                _checked = [gv for _t, gv in _person_gate_refused if gv]
+                _parts = []
+                if _unavail:
+                    _parts.append(f"dictionary unavailable ×{_unavail}")
+                if _checked:
+                    _parts.append(_reason_counts(_checked, blocked_only=True))
+                print(
+                    f"[review] person-gate: refused model's keep=false for "
+                    f"{len(_person_gate_refused)} candidate(s) "
+                    f"({'; '.join(p for p in _parts if p)}) — kept masked",
+                    file=sys.stderr,
+                )
+            if _person_gate_allowed:
+                _paths = _reason_counts(
+                    [gv for _t, gv in _person_gate_allowed if gv], blocked_only=False
+                )
+                _oos = sum(1 for _t, gv in _person_gate_allowed if not gv)
+                if _oos:
+                    _paths = "; ".join(
+                        p for p in (_paths, f"out of scope (no Cyrillic capitalised words) ×{_oos}") if p
+                    )
+                print(
+                    f"[review] person-gate: confirmed model's keep=false for "
+                    f"{len(_person_gate_allowed)} candidate(s) via {_paths} — unmasked",
+                    file=sys.stderr,
+                )
 
     if _person_trim_refused:
         import sys
 
-        for text, trim, gate_verdicts in _person_trim_refused:
-            reasons = (
-                "; ".join(f"{w!r} — {why}" for w, ok, why in gate_verdicts if not ok)
-                or "dictionary unavailable"
-            )
+        if usage_log.UNSAFE_LOG_PERSONAL_DATA:
+            for text, trim, gate_verdicts in _person_trim_refused:
+                reasons = (
+                    "; ".join(f"{w!r} — {why}" for w, ok, why in gate_verdicts if not ok)
+                    or "dictionary unavailable"
+                )
+                print(
+                    f"[review] person-gate: refused model's trim {text!r} -> {trim!r} "
+                    f"({reasons}) — kept masked in full",
+                    file=sys.stderr,
+                )
+        else:
+            _unavail = sum(1 for _t, _tr, gv in _person_trim_refused if not gv)
+            _parts = []
+            if _unavail:
+                _parts.append(f"dictionary unavailable ×{_unavail}")
+            _checked = [gv for _t, _tr, gv in _person_trim_refused if gv]
+            if _checked:
+                _parts.append(_reason_counts(_checked, blocked_only=True))
             print(
-                f"[review] person-gate: refused model's trim {text!r} -> {trim!r} "
-                f"({reasons}) — kept masked in full",
+                f"[review] person-gate: refused model's trim for "
+                f"{len(_person_trim_refused)} candidate(s) "
+                f"({'; '.join(p for p in _parts if p)}) — kept masked in full",
                 file=sys.stderr,
             )
 
@@ -736,16 +792,17 @@ def review_spans(
                 _confirmed.append(candidates[key].text)
         import sys
 
+        _unsafe = usage_log.UNSAFE_LOG_PERSONAL_DATA
         if _restored:
             print(
                 "[review] adjacency re-check kept masked (name/callsign): "
-                + ", ".join(sorted(_restored)),
+                + (", ".join(sorted(_restored)) if _unsafe else f"{len(_restored)} candidate(s)"),
                 file=sys.stderr,
             )
         if _confirmed:
             print(
                 "[review] adjacency re-check confirmed unmask (role word): "
-                + ", ".join(sorted(_confirmed)),
+                + (", ".join(sorted(_confirmed)) if _unsafe else f"{len(_confirmed)} candidate(s)"),
                 file=sys.stderr,
             )
 
@@ -831,7 +888,9 @@ def _chat_completion(cfg: "ReviewConfig", payload: dict) -> dict:
         # Mirrors the old urlopen behaviour, where a non-2xx status raised
         # HTTPError (a urllib.error.URLError subclass) and was caught by the
         # same except clause as any other connection failure.
-        raise http_pool.PoolConnectionError(f"HTTP {status}: {resp_body[:200]!r}")
+        raise http_pool.PoolConnectionError(
+            usage_log.describe_http_error(status, resp_body)
+        )
     return json.loads(resp_body)
 
 
@@ -930,9 +989,13 @@ def _judge_short_numbers(
 
     import sys
 
+    if usage_log.UNSAFE_LOG_PERSONAL_DATA:
+        _kept_desc = kept_values or "—"
+    else:
+        _kept_desc = len(kept_values)
     print(
         f"[short-num] коротких чисел: {len(by_value)}; "
-        f"модель оставила замаскированными: {kept_values or '—'}",
+        f"модель оставила замаскированными: {_kept_desc}",
         file=sys.stderr,
     )
     return drop
@@ -1578,15 +1641,19 @@ def recall_spans(
                 continue
             out.append(Span(a, b, label, text[a:b], source="llm-recall"))
             taken.append((a, b))
+    _unsafe = usage_log.UNSAFE_LOG_PERSONAL_DATA
     if unknown_dropped:
+        if _unsafe:
+            _drop_desc = f"{len(unknown_dropped)} — примеры: {unknown_dropped[:8]}"
+        else:
+            _drop_desc = f"{len(unknown_dropped)}"
         print(
-            "[recall] отброшено кандидатов с неизвестным типом: "
-            f"{len(unknown_dropped)} — примеры: {unknown_dropped[:8]}",
+            f"[recall] отброшено кандидатов с неизвестным типом: {_drop_desc}",
             file=sys.stderr,
         )
     print(
         f"[recall] модель вернула {len(found)} кандидат(ов), добавлено спанов: {len(out)}"
-        + (f" — примеры: {[v for v, _ in found[:8]]}" if found else ""),
+        + (f" — примеры: {[v for v, _ in found[:8]]}" if found and _unsafe else ""),
         file=sys.stderr,
     )
     return out
@@ -1639,7 +1706,14 @@ def _ask_recall(interim_text: str, cfg: ReviewConfig) -> list[tuple[str, str]]:
     content = msg.get("content") or msg.get("reasoning_content") or ""
     import sys
 
-    print(f"[recall] сырой ответ LLM ({len(content)} симв.): {content[:600]!r}", file=sys.stderr)
+    if usage_log.UNSAFE_LOG_PERSONAL_DATA:
+        print(f"[recall] сырой ответ LLM ({len(content)} симв.): {content[:600]!r}", file=sys.stderr)
+    else:
+        print(
+            f"[recall] ответ LLM: {len(content)} симв., "
+            f"кандидатов разобрано: {len(_parse_recall(content))}",
+            file=sys.stderr,
+        )
     return _parse_recall(content)
 
 
