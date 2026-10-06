@@ -7,9 +7,8 @@
 контекст не попадают ни в ответ клиенту, ни в stderr; (5) документ без
 медицинских маркеров обрабатывается как обычно (регресс); (6)
 ``--allow-special-categories`` (``server._ALLOW_SPECIAL_CATEGORIES``)
-отключает шлюз; (7) после удаления MED_ICD/MED_RECORD из
-``DEFAULT_DETECTORS`` метка ``MEDICAL`` больше не появляется даже при
-включённом escape hatch и рабочих regex-детекторах.
+отключает шлюз; (7) при этом спаны спецкатегорий маскируются, а не
+проходят насквозь.
 
 Не поднимает реальный сокет — тот же приём, что в ``test_server_auth.py``:
 Handler строится вручную (``__new__``, минуя socket-driven ``__init__``), а
@@ -271,14 +270,14 @@ def test_allow_special_categories_flag_processes_document():
     assert "anonymized_text" in body
 
 
-# --- 7. MEDICAL больше не появляется среди меток даже под escape hatch -----
+# --- 7. Под escape hatch спецкатегории МАСКИРУЮТСЯ, а не проходят насквозь ---
 
-def test_medical_label_absent_from_default_detectors_under_escape_hatch():
+def test_medical_value_masked_under_escape_hatch():
     server._ALLOW_SPECIAL_CATEGORIES = True
 
     with _regex_pipeline(), _temp_usage_log():
         result = server._run_anonymize_text({"text": _MEDICAL_TEXT, "regex": True})
 
-    assert "MEDICAL" not in result["summary"]
-    labels = {span["label"] for span in result["spans"]}
-    assert "MEDICAL" not in labels
+    assert _MEDICAL_MARKER not in result["anonymized_text"]
+    assert _MEDICAL_MARKER in result["mapping"].values()
+    assert "MEDICAL" in {span["label"] for span in result["spans"]}

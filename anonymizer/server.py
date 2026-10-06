@@ -61,7 +61,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from anonymizer import depersonalization_log  # noqa: E402
 from anonymizer import usage_log  # noqa: E402
-from anonymizer.detectors import SPECIAL_CATEGORY_DETECTORS, run_detectors  # noqa: E402
+from anonymizer.detectors import (  # noqa: E402
+    SPECIAL_CATEGORY_DETECTORS,
+    SPECIAL_CATEGORY_NAMES,
+    run_detectors,
+)
 from anonymizer.engine import Anonymizer  # noqa: E402
 from anonymizer.llm import Cancelled  # noqa: E402
 
@@ -517,6 +521,11 @@ def _compose(
         else:
             dets.extend(_DETECTORS[name])
 
+    # Спецкатегории разрешены -> их спаны МАСКИРУЮТСЯ наравне с остальными ПДн
+    # (иначе без отказа и без маски они прошли бы насквозь). Не зависит от
+    # стадии "regex": маскирование спецкатегорий не отключается флагами запроса.
+    dets.extend(_special_category_masking_detectors())
+
     review_on = stages.get("review")
     if review_on is None:
         review_on = _DEFAULTS.get("review", False)
@@ -562,6 +571,19 @@ class _SpecialCategoryRefused(Exception):
     """
 
 
+def _special_category_masking_detectors() -> tuple:
+    """Детекторы спецкатегорий, которые нужно добавить в набор маскирования.
+
+    Пусто, пока шлюз включён (документ с такими признаками отклоняется ещё до
+    композиции пайплайна). При ``--allow-special-categories`` — полный набор:
+    оператор взял на себя законность обработки, но данные всё равно должны быть
+    замаскированы. Единственная точка принятия решения: когда разрешение станет
+    пооперационным (per-account), меняется только условие здесь и в
+    ``_check_special_categories``.
+    """
+    return tuple(SPECIAL_CATEGORY_DETECTORS) if _ALLOW_SPECIAL_CATEGORIES else ()
+
+
 def _check_special_categories(text: str) -> None:
     """Входной шлюз спецкатегорий ПДн (медицинские данные). Вызывается ДО
     ``usage_log.request_context(...)`` в обоих ``_run_anonymize_*`` — см. их
@@ -578,7 +600,7 @@ def _check_special_categories(text: str) -> None:
     момент, когда обнаружили, что делать этого нельзя.
 
     В лог/исключение НИКОГДА не попадает само совпадение или его контекст —
-    только количество и то, что это метка "MEDICAL": само совпадение и есть
+    только количество и метки категорий (MEDICAL, ETHNICITY, ...): само совпадение и есть
     та специальная категория ПДн, которую мы отказываемся обрабатывать, и
     записать его означало бы хранить именно то, от чего мы отказываемся.
     ``--allow-special-categories`` отключает проверку целиком (см.
@@ -589,14 +611,17 @@ def _check_special_categories(text: str) -> None:
     spans = run_detectors(text, SPECIAL_CATEGORY_DETECTORS)
     if not spans:
         return
+    labels = sorted({sp.label for sp in spans})
+    names = [SPECIAL_CATEGORY_NAMES.get(label, label) for label in labels]
     print(
-        f"[server] отказ: признаки специальных категорий ПДн (MEDICAL), "
-        f"совпадений: {len(spans)} — документ не обрабатывается",
+        f"[server] отказ: признаки специальных категорий ПДн "
+        f"({', '.join(labels)}), совпадений: {len(spans)} — "
+        f"документ не обрабатывается",
         file=sys.stderr,
     )
     raise _SpecialCategoryRefused(
-        "Документ, по всей видимости, содержит медицинские сведения — "
-        "специальную категорию персональных данных. Сервис не обрабатывает "
+        "Документ, по всей видимости, содержит специальные категории "
+        f"персональных данных ({', '.join(names)}). Сервис не обрабатывает "
         "специальные категории персональных данных. Пожалуйста, удалите эти "
         "сведения из документа и повторите попытку."
     )

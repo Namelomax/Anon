@@ -195,7 +195,7 @@ def test_card_solid_16_digits():
 def test_medical_icd_and_record_are_gate_not_mask():
     """MED_ICD/MED_RECORD НЕ входят в DEFAULT_DETECTORS — это входной шлюз
     (см. SPECIAL_CATEGORY_DETECTORS и server._check_special_categories), а не
-    маска: документ с такими признаками должен быть целиком отклонён ДО
+    маска по умолчанию: документ с такими признаками должен быть целиком отклонён ДО
     анонимизации (см. test_server_special_categories.py), а не замаскирован
     и пропущен дальше по пайплайну. Поэтому обычный маскирующий Anonymizer
     (``_A``, собранный из DEFAULT_DETECTORS) их больше НЕ трогает.
