@@ -245,14 +245,15 @@ def test_rtf_without_libreoffice_degrades_to_a_word_document(monkeypatch):
     assert res["document_source"] == "text"
 
 
-# --- PDF: сознательно остаётся текстом -------------------------------------
+# --- PDF без LibreOffice: текст + предупреждение --------------------------
 
-def test_pdf_stays_text_on_purpose(monkeypatch):
-    """Решение принято отдельно: переписать текст в PDF без потери вёрстки
-    умеет только PyMuPDF под AGPL-3. Тест фиксирует решение, чтобы PDF не
-    «починили» случайно кругом через LibreOffice."""
+def test_pdf_without_libreoffice_degrades_to_text_with_warning(monkeypatch):
+    """PDF идёт через LibreOffice Draw (см. test_pdf_layout.py); без неё он
+    собирается из текста, и пользователю об этом говорят."""
+    monkeypatch.setattr(documents, "_pdf_page_text_sizes", lambda data: [500])
     monkeypatch.setattr(documents, "_read_pdf_bytes", lambda data: f"Почта {_EMAIL}")
-    res = _anonymize("скан.pdf", b"%PDF-1.4 fake")
-    assert res["document_name"] == "скан.anon.txt"
+    res = _anonymize("договор.pdf", b"%PDF-1.4 fake")
+    assert res["document_name"] == "договор.anon.txt"
     assert res["document_mime"] == "text/plain"
     assert res["document_source"] == "text"
+    assert any("оформление" in w for w in res["warnings"])

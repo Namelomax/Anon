@@ -170,6 +170,52 @@ def _read_pdf_bytes(data: bytes) -> str:
     return "\n".join((page.extract_text() or "") for page in reader.pages)
 
 
+# Порог распознавания скана: в среднем меньше стольких непробельных знаков
+# текстового слоя на страницу. Живая страница (даже титульная или с таблицей
+# реквизитов) даёт сотни знаков; скан — ноль, а на практике у сканов бывает
+# мусорный слой в несколько знаков (номер страницы, штамп программы).
+_SCAN_MIN_CHARS_PER_PAGE = 25
+# Страница без текста вообще — меньше стольких знаков. Если таких больше
+# половины, документ — скан или его большая часть, даже когда одна-две
+# текстовые страницы тянут среднее вверх.
+_SCAN_EMPTY_PAGE_CHARS = 10
+
+
+class ScannedPdfError(ValueError):
+    """PDF без текстового слоя: маскировать в нём нечего.
+
+    Сообщение безопасно для клиента как есть (см. server._ScanRefused).
+    """
+
+
+SCANNED_PDF_MESSAGE = (
+    "Файл похож на скан: в PDF нет текстового слоя, а на страницах только "
+    "изображения. Сервис не может найти и скрыть в картинке персональные "
+    "данные, поэтому документ не обработан. Для сканов нужно сначала "
+    "распознать текст (OCR) и загрузить PDF с текстовым слоем или документ "
+    "в формате .docx."
+)
+
+
+def _pdf_page_text_sizes(data: bytes) -> list[int]:
+    """Число непробельных знаков текстового слоя на каждой странице PDF."""
+    import io
+
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(data))
+    return [len("".join((page.extract_text() or "").split())) for page in reader.pages]
+
+
+def _looks_scanned(sizes: list[int]) -> bool:
+    if not sizes:
+        return True
+    if sum(sizes) < _SCAN_MIN_CHARS_PER_PAGE * len(sizes):
+        return True
+    empty = sum(1 for n in sizes if n < _SCAN_EMPTY_PAGE_CHARS)
+    return empty * 2 > len(sizes)
+
+
 def _read_xlsx_bytes(data: bytes) -> str:
     import io
 
@@ -484,7 +530,7 @@ def read_text_from_bytes(name: str, data: bytes) -> str:
         return _read_xls_bytes(data)
     if ext == ".xml":
         return _read_xml_bytes(data)
-    if ext == ".odt":
+    if ext in (".odt", ".odg"):
         return _read_odt_bytes(data)
     if ext == ".rtf":
         return _read_rtf_bytes(data)
@@ -537,16 +583,24 @@ def _rewritten_docx(src_data: bytes, replace) -> bytes:
 #   "text"      — ни того, ни другого нет: документ собирается заново из
 #                 обезличенного текста, разметка теряется.
 #
-# .pdf сознательно остаётся текстом: переписать текст в PDF, не развалив
-# вёрстку, умеет только PyMuPDF под AGPL-3, а круг pdf→docx→pdf через
-# LibreOffice превращает страницу в мешанину текстовых блоков — это хуже
-# честного .txt.
+# .pdf идёт уровнем "converted" через LibreOffice Draw: pdf → .odg → правка
+# текстовых узлов → .odg → pdf. Draw держит каждый текстовый блок рамкой с
+# абсолютными координатами, поэтому вёрстка и картинки (отдельные файлы в
+# Pictures/) остаются на месте; Writer тот же PDF рассыпал бы в мешанину.
+# Текст при этом именно заменяется, а не закрашивается. PyMuPDF не
+# используется: он под AGPL-3. Скан (PDF без текстового слоя) отклоняется
+# целиком — см. ScannedPdfError: маскировать в картинке нечего, а отдать такой
+# файл как «обезличенный» значило бы выдать открытые данные за закрытые.
+# Если LibreOffice нет или конвертация не удалась, PDF, как и .doc/.xls/.rtf,
+# собирается из текста, а в ответ идёт предупреждение (PreparedDocument.warnings).
 
 _MIME_BY_EXT = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
     ".odt": "application/vnd.oasis.opendocument.text",
+    ".odg": "application/vnd.oasis.opendocument.graphics",
+    ".pdf": "application/pdf",
     ".rtf": "application/rtf",
     ".xml": "application/xml",
     ".json": "application/json",
@@ -758,6 +812,9 @@ class PreparedDocument:
     working_data: bytes | None
     output_extension: str
     source: str  # "original" | "converted" | "text"
+    # Предупреждения для клиента (уходят в тот же канал ``warnings``, что и
+    # предупреждения движка): сейчас — «разметку сохранить не удалось».
+    warnings: tuple[str, ...] = ()
 
     def degraded(self) -> "PreparedDocument":
         """То же, но без правимого оригинала.
@@ -766,12 +823,60 @@ class PreparedDocument:
         падать из-за этого незачем — документ просто собирается из текста.
         Обратный шаг конвертации (.docx → .rtf) при этом тоже отпадает.
         """
-        out = ".docx" if self.output_extension == ".rtf" else self.output_extension
-        return PreparedDocument(self.extension, "", None, out, "text")
+        out = _TEXT_FALLBACK_EXT.get(self.output_extension, self.output_extension)
+        return PreparedDocument(
+            self.extension, "", None, out, "text",
+            self.warnings + (_lost_formatting_warning(self.extension, out, False),),
+        )
 
 
 # Форматы, которые правятся напрямую, без конвертации.
 _DIRECT_REWRITE = (".docx", ".xlsx", ".xlsm", ".odt", ".xml")
+
+# Во что превращается документ, собранный заново из текста.
+_TEXT_FALLBACK_EXT = {".rtf": ".docx", ".pdf": ".txt"}
+
+
+def _lost_formatting_warning(ext: str, out_ext: str, soffice_missing: bool) -> str:
+    """Текст предупреждения о потере оформления (клиенту уходит как есть)."""
+    why = (
+        "на сервере не установлен LibreOffice"
+        if soffice_missing
+        else "конвертация через LibreOffice не удалась"
+    )
+    return (
+        f"Исходное оформление документа {ext} сохранить не удалось: {why}. "
+        f"Документ собран заново из текста и отдан как {out_ext} — разметка, "
+        "таблицы, колонтитулы и изображения не перенесены."
+    )
+
+
+def _converted_or_text(
+    ext: str, data: bytes, convert, work_ext: str, out_ext: str
+) -> PreparedDocument:
+    """Поднять документ через LibreOffice или откатиться на текст с предупреждением."""
+    converted = convert(data)
+    if converted is not None:
+        return PreparedDocument(ext, work_ext, converted, out_ext, "converted")
+    text_ext = _TEXT_FALLBACK_EXT.get(out_ext, out_ext)
+    return PreparedDocument(
+        ext, "", None, text_ext, "text",
+        (_lost_formatting_warning(ext, text_ext, _find_soffice() is None),),
+    )
+
+
+def pdf_to_odg_bytes(data: bytes) -> bytes | None:
+    """.pdf → .odg (LibreOffice Draw). ``None``, если LibreOffice нет или не вышло.
+
+    Draw, а не Writer: каждый текстовый блок PDF становится рамкой с
+    абсолютными координатами, так что вёрстка не перетекает.
+    """
+    return _libreoffice_convert(data, ".pdf", "odg", ".odg")
+
+
+def odg_to_pdf_bytes(data: bytes) -> bytes | None:
+    """.odg → .pdf, обратный шаг для PDF-документов."""
+    return _libreoffice_convert(data, ".odg", "pdf", ".pdf")
 
 
 def prepare_document(name: str, data: bytes) -> PreparedDocument:
@@ -779,6 +884,8 @@ def prepare_document(name: str, data: bytes) -> PreparedDocument:
 
     Единственное место, где живёт политика форматов: и обезличивание, и
     восстановление ходят сюда, чтобы не разъезжаться.
+
+    Для скана PDF бросает ``ScannedPdfError``: отдавать такой файл нельзя.
     """
     ext = Path(name).suffix.lower()
     if ext in _DIRECT_REWRITE:
@@ -788,21 +895,23 @@ def prepare_document(name: str, data: bytes) -> PreparedDocument:
         # нечего, обезличенный текст — уже готовый файл того же типа.
         return PreparedDocument(ext, "", None, ext, "original")
     if ext == ".doc":
-        converted = doc_to_docx_bytes(data)
-        if converted is not None:
-            return PreparedDocument(ext, ".docx", converted, ".docx", "converted")
-        return PreparedDocument(ext, "", None, ".docx", "text")
+        return _converted_or_text(ext, data, doc_to_docx_bytes, ".docx", ".docx")
     if ext == ".xls":
-        converted = xls_to_xlsx_bytes(data)
-        if converted is not None:
-            return PreparedDocument(ext, ".xlsx", converted, ".xlsx", "converted")
-        return PreparedDocument(ext, "", None, ".xlsx", "text")
+        return _converted_or_text(ext, data, xls_to_xlsx_bytes, ".xlsx", ".xlsx")
     if ext == ".rtf":
-        converted = _libreoffice_convert(data, ".rtf", "docx:MS Word 2007 XML", ".docx")
-        if converted is not None:
-            return PreparedDocument(ext, ".docx", converted, ".rtf", "converted")
-        return PreparedDocument(ext, "", None, ".docx", "text")
-    # .pdf и всё незнакомое — только текст (см. комментарий к блоку выше).
+        return _converted_or_text(
+            ext,
+            data,
+            lambda d: _libreoffice_convert(d, ".rtf", "docx:MS Word 2007 XML", ".docx"),
+            ".docx",
+            ".rtf",
+        )
+    if ext == ".pdf":
+        if _looks_scanned(_pdf_page_text_sizes(data)):
+            raise ScannedPdfError(SCANNED_PDF_MESSAGE)
+        return _converted_or_text(ext, data, pdf_to_odg_bytes, ".odg", ".pdf")
+    # Всё незнакомое — только текст, как и раньше (расширение не «формат»,
+    # который LibreOffice мог бы сохранить, предупреждать не о чем).
     return PreparedDocument(ext, "", None, ".txt", "text")
 
 
@@ -827,16 +936,28 @@ def rebuild_document(prepared: PreparedDocument, replace, text: str) -> tuple[by
         rewritten = _rewrite_xlsx_cells(
             prepared.working_data, replace, keep_vba=(work_ext == ".xlsm")
         )
-    elif work_ext == ".odt":
+    elif work_ext in (".odt", ".odg"):
+        # .odg лежит в том же ODF-контейнере; его текст сидит глубже
+        # (draw:frame → draw:text-box → text:p), но _rewrite_odt_paragraphs
+        # ищет абзацы по всему дереву, так что отдельной ветки не надо.
         rewritten = _rewrite_odt_paragraphs(prepared.working_data, replace)
     else:  # .xml
         rewritten = _rewrite_xml_nodes(prepared.working_data, replace)
 
     if prepared.output_extension == work_ext:
         return rewritten, work_ext, prepared.source
-    # Остался обратный шаг конвертации (сейчас только .docx → .rtf). Если он
-    # не удался, отдаём то, что уже переписано: формат не тот, зато документ
-    # на руках и обезличен.
+    # Остался обратный шаг конвертации (.docx → .rtf, .odg → .pdf).
+    if prepared.output_extension == ".pdf":
+        back = odg_to_pdf_bytes(rewritten)
+        if back is None:
+            # .odg пользователю не нужен, а непереписанный PDF отдавать нельзя:
+            # собираем обезличенный текст — вёрстка потеряна, данных в файле нет.
+            # Расхождение source ("text" вместо "converted") сервер превращает
+            # в предупреждение.
+            return text.encode("utf-8"), ".txt", "text"
+        return back, ".pdf", prepared.source
+    # Если обратный шаг .docx → .rtf не удался, отдаём то, что уже переписано:
+    # формат не тот, зато документ на руках и обезличен.
     back = docx_to_rtf_bytes(rewritten)
     if back is None:
         return rewritten, work_ext, prepared.source

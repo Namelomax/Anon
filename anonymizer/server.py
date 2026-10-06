@@ -105,9 +105,17 @@ def _prepared_source(filename: str, raw: bytes):
     источник текста и цель подстановки расходятся, и часть найденных значений
     (колонтитулы, ячейки таблиц) в файле просто не находится.
     """
-    from anonymizer.documents import prepare_document, read_text_from_bytes
+    from anonymizer.documents import ScannedPdfError, prepare_document, read_text_from_bytes
 
-    prepared = prepare_document(filename, raw)
+    try:
+        prepared = prepare_document(filename, raw)
+    except ScannedPdfError as exc:
+        # Скан: маскировать нечего, документ не отдаётся (см. _ScanRefused).
+        print(
+            "[server] отказ: PDF без текстового слоя (скан) — документ не обрабатывается",
+            file=sys.stderr,
+        )
+        raise _ScanRefused(str(exc)) from exc
     if prepared.working_data is not None and prepared.source == "converted":
         try:
             return prepared, read_text_from_bytes(
@@ -123,6 +131,21 @@ def _prepared_source(filename: str, raw: bytes):
             )
             prepared = prepared.degraded()
     return prepared, read_text_from_bytes(filename, raw)
+
+
+def _document_warnings(prepared, doc_source: str, engine_warnings) -> list:
+    """Предупреждения движка + предупреждения о судьбе оформления документа.
+
+    Если на сборке итогового файла откатились на текст (``doc_source`` не
+    совпал с тем, что обещала подготовка), это тоже потеря оформления — например,
+    LibreOffice подняла PDF, а обратно в PDF не собрала.
+    """
+    from anonymizer.documents import _lost_formatting_warning
+
+    out = list(engine_warnings) + list(prepared.warnings)
+    if doc_source != prepared.source and doc_source == "text":
+        out.append(_lost_formatting_warning(prepared.extension, ".txt", False))
+    return out
 
 
 # --- Async job store (for /jobs/anonymize-file) --------------------------
@@ -559,7 +582,18 @@ class _BadRequest(Exception):
     """Raised by _run_anonymize_file for a 400-worthy input error."""
 
 
-class _SpecialCategoryRefused(Exception):
+class _DocumentRefused(Exception):
+    """Общий предок осознанных отказов по содержанию документа (HTTP 422)."""
+
+
+class _ScanRefused(_DocumentRefused):
+    """PDF без текстового слоя (скан): отклонён, документ не возвращается.
+
+    Сообщение исключения уходит клиенту как есть (см. documents.SCANNED_PDF_MESSAGE).
+    """
+
+
+class _SpecialCategoryRefused(_DocumentRefused):
     """Документ отклонён на входе из-за признаков спецкатегории ПДн.
 
     Отдельный от ``_BadRequest`` класс: отказ по содержанию документа — это
@@ -817,7 +851,7 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
         "stages": used,
         "elapsed_seconds": round(elapsed, 2),
         "preexisting_placeholders": res.preexisting_placeholders,
-        "warnings": list(res.warnings),
+        "warnings": _document_warnings(prepared, doc_source, res.warnings),
         "document_base64": base64.b64encode(doc_bytes).decode("ascii"),
         "document_name": doc_name,
         "document_mime": doc_mime,
@@ -969,7 +1003,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_text(self):
         try:
             self._send(200, _run_anonymize_text(self._read_json()))
-        except _SpecialCategoryRefused as exc:
+        except _DocumentRefused as exc:
             # 422, а не 400: запрос корректен, отказ — по содержанию
             # документа (см. _SpecialCategoryRefused). Сообщение исключения
             # уже безопасно для клиента (см. _check_special_categories).
@@ -1060,7 +1094,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = self._read_json()
             self._send(200, _run_anonymize_file(data))
-        except _SpecialCategoryRefused as exc:
+        except _DocumentRefused as exc:
             # 422, а не 400: запрос корректен, отказ — по содержанию
             # документа (см. _SpecialCategoryRefused). Сообщение исключения
             # уже безопасно для клиента (см. _check_special_categories).
