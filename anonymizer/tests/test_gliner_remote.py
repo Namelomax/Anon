@@ -106,6 +106,23 @@ def test_extract_records_gliner_call_with_chars_and_no_tokens():
     assert seen_pools == ["gliner"]
 
 
+def test_extract_sends_key_in_both_auth_headers():
+    # Шлюз проверяет Bearer, сервис напрямую (:8226) — X-Internal-API-Key
+    # и на один Bearer отвечает 401. Ключ должен уходить в обоих.
+    det = RemoteGLiNERDetector(RemoteGLiNERConfig(api_key="secret-key"))
+    seen = []
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        seen.append(headers)
+        return 200, b'{"entities": []}'
+
+    with _temp_usage_log(), _patched_post_json(_fake):
+        det._extract("Иван пошёл домой")
+
+    assert seen[0]["Authorization"] == "Bearer secret-key"
+    assert seen[0]["X-Internal-API-Key"] == "secret-key"
+
+
 def test_extract_records_failure_on_http_error():
     # 400, not 500: HTTP 5xx is now retried (see the "Retry" section below),
     # so it no longer produces exactly one call — a deterministic 4xx is
