@@ -40,10 +40,13 @@ Design, standard library only:
 * A pooled connection that has sat idle can be closed by the server between
   calls; the next request on it then raises (``RemoteDisconnected`` and
   friends — see ``_RETRYABLE``). ``post_json`` treats that as transient: it
-  discards the dead socket (never returns it to the free-list), checks out
-  a fresh connection to the same ``(scheme, host, port)`` and retries the
-  SAME request exactly once. Only if the retry also fails does the caller
-  see an exception. This is not hypothetical: a bare persistent connection
+  discards the dead socket (never returns it to the free-list), flushes the
+  rest of that key's idle list (after an idle gap the server has closed ALL
+  of them, so they are almost certainly dead too), opens a brand-new
+  connection via ``_new_connection`` (NOT another checkout from the pool,
+  which would just pop another stale socket) and retries the SAME request
+  exactly once. Only if the retry also fails does the caller see an
+  exception. This is not hypothetical: a bare persistent connection
   reproducibly died with ``ConnectionAbortedError`` after a 60 s idle pause.
 * DNS resolution failures (``socket.gaierror``, e.g. ``EAI_AGAIN``) get
   their OWN retry class, separate from the dead-connection retry above —
@@ -136,7 +139,7 @@ _DNS_RETRY_ATTEMPTS = 3  # initial attempt + up to 2 retries
 _DNS_RETRY_BACKOFF_SECONDS = 0.15  # pause before each DNS-failure retry
 
 # The pre-existing "dead pooled connection" retry (see module docstring):
-# exactly one retry on a freshly checked-out connection, no backoff — a
+# exactly one retry on a brand-new connection, no backoff — a
 # socket the peer already closed is expected to be fixed immediately by
 # opening a new one, unlike a resolver hiccup.
 _MAX_DEAD_CONN_RETRIES = 1
@@ -277,6 +280,17 @@ class _ConnectionPool:
             # the lock so a slow close() can't stall other threads.
             _close_quietly(conn)
 
+    def drop_idle(self, scheme: str, host: str, port: int) -> None:
+        """Remove and close every idle connection for this key. Called when a
+        pooled connection turned out to be dead: the server closes idle
+        keep-alive sockets together, so the rest are almost certainly dead
+        too. Closing happens outside the lock."""
+        key = (scheme, host, port)
+        with self._lock:
+            stale = self._idle.pop(key, [])
+        for conn in stale:
+            _close_quietly(conn)
+
     def discard(self, conn: http.client.HTTPConnection) -> None:
         """A connection that raised during use is dead — close it, and never
         return it to the free-list."""
@@ -339,8 +353,15 @@ def post_json(
         last_exc: BaseException | None = None
         dead_conn_retries = 0
         dns_attempts = 0
+        force_new = False
         while True:
-            conn = _pool.checkout(scheme, host, port)
+            # After a dead-connection failure the retry must NOT come from the
+            # pool (the next idle socket is likely dead too): open a new one.
+            if force_new:
+                conn = _new_connection(scheme, host, port)
+                force_new = False
+            else:
+                conn = _pool.checkout(scheme, host, port)
             try:
                 conn.timeout = timeout
                 if conn.sock is not None:
@@ -360,8 +381,10 @@ def post_json(
                 _pool.discard(conn)
                 last_exc = exc
                 dead_conn_retries += 1
+                _pool.drop_idle(scheme, host, port)
                 if dead_conn_retries > _MAX_DEAD_CONN_RETRIES:
                     break
+                force_new = True
                 continue
             else:
                 _pool.checkin(scheme, host, port, conn)

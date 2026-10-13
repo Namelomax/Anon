@@ -106,6 +106,22 @@ def test_extract_records_gliner_call_with_chars_and_no_tokens():
     assert seen_pools == ["gliner"]
 
 
+def test_extract_sends_both_auth_headers_with_same_key():
+    body = json.dumps({"entities": []}).encode("utf-8")
+    det = RemoteGLiNERDetector(RemoteGLiNERConfig(api_key="k-123"))
+    seen = {}
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        seen.update(headers)
+        return 200, body
+
+    with _temp_usage_log(), _patched_post_json(_fake):
+        det._extract("текст")
+
+    assert seen["Authorization"] == "Bearer k-123"
+    assert seen["X-Internal-API-Key"] == "k-123"
+
+
 def test_extract_records_failure_on_http_error():
     # 400, not 500: HTTP 5xx is now retried (see the "Retry" section below),
     # so it no longer produces exactly one call — a deterministic 4xx is

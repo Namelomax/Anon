@@ -1292,7 +1292,8 @@ def main() -> None:
     ap.add_argument(
         "--gliner-api-key",
         default=os.getenv("ANONYMIZER_GLINER_API_KEY", ""),
-        help="Bearer-токен для GLiNER-эндпоинта (--ner remote). Пусто по "
+        help="Ключ GLiNER-эндпоинта (--ner remote); шлётся и как Bearer, и "
+             "как X-Internal-API-Key. Пусто по "
              "умолчанию — тогда используется --llm-api-key, один ключ "
              "обслуживает оба эндпоинта. Переопределяется "
              "ANONYMIZER_GLINER_API_KEY.",

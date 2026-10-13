@@ -14,6 +14,7 @@ trip through the pool.
 from __future__ import annotations
 
 import concurrent.futures
+import http.client
 import http.server
 import json
 import socket
@@ -338,6 +339,41 @@ def test_dead_connection_is_discarded_and_next_caller_gets_a_working_one():
 
     assert _CloseAfterFirstHandler.requests == 2
     assert _CloseAfterFirstHandler.connections == 2
+
+
+class _DeadIdleConnection:
+    """Stand-in for a pooled keep-alive connection the server already closed."""
+
+    sock = None
+    closed = False
+
+    def request(self, method, path, body=None, headers=None):
+        raise http.client.RemoteDisconnected("Remote end closed connection without response")
+
+    def close(self):
+        self.closed = True
+
+
+def test_retry_after_dead_pooled_connection_uses_new_connection_not_another_idle_one():
+    """After an idle gap every pooled connection is dead. The retry must open
+    a brand-new connection (not pop the next stale one), and the other stale
+    idle connections must be flushed."""
+    _CountingHandler.connections = 0
+    _CountingHandler.requests = 0
+    with _run_server(_CountingHandler) as (host, port):
+        url = f"http://{host}:{port}/extract"
+        key = ("http", host, port)
+        dead = [_DeadIdleConnection() for _ in range(3)]
+        http_pool._pool._idle[key] = list(dead)
+
+        status, _ = http_pool.post_json(url, b"{}", {"Content-Type": "application/json"}, 5.0)
+        assert status == 200
+
+        assert all(c.closed for c in dead)
+        assert len(http_pool._pool._idle.get(key, [])) == 1  # only the fresh one
+
+    assert _CountingHandler.requests == 1
+    assert _CountingHandler.connections == 1
 
 
 # --- 2b. DNS-resolution-failure retry (socket.gaierror / EAI_AGAIN) ---------
