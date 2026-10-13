@@ -9,8 +9,8 @@
 Эндпоинт (проверен вживую 03.08.2026):
 
     POST {base_url}/extract
-    Authorization: Bearer <ключ>        (шлюз oui.interfonica.cloud)
-    X-Internal-API-Key: <тот же ключ>   (прямой сервис, порт 8226)
+    Authorization: Bearer <ключ>          (шлюз)
+    X-Internal-API-Key: <ключ>            (сервис напрямую, :8228)
     {"text": "...", "labels": ["person", ...], "threshold": 0.5}
     -> {"entities": [{"text","label","start","end","score"}, ...]}
 
@@ -361,9 +361,10 @@ class RemoteGLiNERDetector:
         }
         url = cfg.base_url + "/extract"
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        # Два заголовка с ОДНИМ ключом: прямой сервис на :8226 принимает только
-        # X-Internal-API-Key, шлюз oui.interfonica.cloud — только Bearer.
-        # Шлём оба, чтобы переключение между ними менялось одним .env.
+        # Ключ — в двух заголовках: шлюз oui.interfonica.cloud проверяет
+        # Authorization: Bearer, а сам сервис GLiNER (31.44.249.3:8228, когда к
+        # нему идут напрямую мимо шлюза) — X-Internal-API-Key и на Bearer
+        # отвечает 401. Так между ними переключаются одним URL в .env.
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {cfg.api_key}",
