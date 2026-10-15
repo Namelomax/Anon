@@ -40,7 +40,10 @@ model Plan {
   /// индивидуальных исключений поверх плана).
   pagesPerMonth    Int?     @map("pages_per_month")
   maxUsers         Int?     @map("max_users")
+  /// Цена за 1 месяц, в копейках.
   priceKopecks     Int      @map("price_kopecks")
+  /// Цена за год (12 календарных месяцев), в копейках; null = годовой оплаты нет.
+  priceYearKopecks Int?     @map("price_year_kopecks")
   createdAt        DateTime @default(now()) @map("created_at")
 
   accounts Account[]
@@ -62,12 +65,21 @@ model Account {
   pageLimitOverrideTenths Int?     @map("page_limit_override_tenths")
   isActive                Boolean  @default(true) @map("is_active")
   createdAt               DateTime @default(now()) @map("created_at")
+  /// Начало текущего оплаченного (или пробного) срока — дата оплаты либо
+  /// регистрации. От неё считаются 30-дневные окна квоты (lib/period.ts).
+  /// null вместе с paidUntil = срока нет (безлимитный root-аккаунт): квота
+  /// считается по календарному месяцу, доступ не истекает.
+  periodAnchorAt          DateTime? @map("period_anchor_at")
+  /// Конец срока (не включая). Начиная с этого момента загрузка отказывает с
+  /// 402. Пробный план не продлевается: после paidUntil — только оплата.
+  paidUntil               DateTime? @map("paid_until")
 
   users         User[]
   usageRecords  UsageRecord[]
   quotaCounters QuotaCounter[]
   quotaGrants   QuotaGrant[]
   invitations   Invitation[]
+  glossaryTerms GlossaryTerm[]
 
   @@map("accounts")
 }
@@ -103,6 +115,7 @@ model User {
   consents         Consent[]
   invitationsSent  Invitation[]  @relation("InvitationCreatedBy")
   invitationUsed   Invitation?   @relation("InvitationAcceptedBy")
+  glossaryTerms    GlossaryTerm[]
 
   @@map("users")
 }
@@ -179,7 +192,8 @@ model UsageRecord {
   account             Account  @relation(fields: [accountId], references: [id])
   userId              Int?     @map("user_id")
   user                User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  /// Формат 'YYYY-MM' — период, за который расход учитывается в квоте.
+  /// Ключ периода (lib/period.ts): ISO-UTC начала 30-дневного окна или
+  /// 'YYYY-MM' у аккаунта без срока — период, за который расход учитывается в квоте.
   period              String
   requestId           String   @unique @map("request_id")
   chars               Int
@@ -278,7 +292,8 @@ model QuotaGrant {
   id                Int      @id @default(autoincrement())
   accountId         Int      @map("account_id")
   account           Account  @relation(fields: [accountId], references: [id])
-  /// null = бессрочный грант (не привязан к конкретному 'YYYY-MM').
+  /// null = бессрочный грант (не привязан к конкретному окну квоты; ключ окна
+  /// — как в UsageRecord.period).
   period            String?
   pagesTenths       Int      @map("pages_tenths")
   reason            String
@@ -291,4 +306,23 @@ model QuotaGrant {
 
   @@index([accountId, period])
   @@map("quota_grants")
+}
+
+/// Личный словарь аккаунта («Мои термины»): слова и названия, которые ВСЕГДА
+/// маскируются, но только в документах этого аккаунта (передаются бэкенду
+/// полем custom_terms в /api/anonymize, см. lib/glossary.ts). Термины
+/// конфиденциальны — не логировать значения. `aliases` — как введено,
+/// через запятую; `canonical` — имя в карте замен.
+model GlossaryTerm {
+  id          Int      @id @default(autoincrement())
+  accountId   Int      @map("account_id")
+  account     Account  @relation(fields: [accountId], references: [id])
+  aliases     String
+  canonical   String
+  createdById Int?     @map("created_by_id")
+  createdBy   User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([accountId])
+  @@map("glossary_terms")
 }

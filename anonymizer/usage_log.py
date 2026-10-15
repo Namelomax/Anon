@@ -481,8 +481,21 @@ def request_context(
         _ACTIVE[request_id] = _Accumulator()
     token = _current_request.set(request_id)
     t0 = time.time()
+    # Исход документа для биллинга: "ok" — блок вышел штатно (работа сделана,
+    # результат можно забрать — это биллится, даже если веб его не забрал);
+    # "cancelled" — вылетел Cancelled (DELETE/heartbeat); "error" — любое
+    # другое исключение, результата нет. Строку пишем при ЛЮБОМ исходе: стоимость
+    # реально потраченных вызовов нужна учёту, а не-"ok" импортёр не списывает.
+    outcome = "ok"
     try:
         yield totals
+    except BaseException as exc:
+        # Cancelled живёт в llm.py, а тот импортирует usage_log — прямой
+        # импорт дал бы цикл, поэтому сверяем по имени класса по всему MRO.
+        outcome = "cancelled" if any(
+            c.__name__ == "Cancelled" for c in type(exc).__mro__
+        ) else "error"
+        raise  # исключение уходит наружу без изменений
     finally:
         _current_request.reset(token)
         elapsed = round(time.time() - t0, 3)
@@ -558,6 +571,11 @@ def request_context(
                 # содержат — см. test_usage_log.py на обратную совместимость).
                 "account_id": account_id,
                 "user_id": user_id,
+                # "ok" | "cancelled" | "error": биллится только "ok" (и
+                # отсутствие поля в старых строках — они биллились всегда).
+                # Отказ по спецкатегориям ПДн сюда не доходит вовсе: шлюз
+                # срабатывает ДО request_context, строки нет.
+                "outcome": outcome,
             })
         except Exception as exc:  # noqa: BLE001
             print(f"[usage_log] сводная запись документа не удалась: {exc}", file=sys.stderr)

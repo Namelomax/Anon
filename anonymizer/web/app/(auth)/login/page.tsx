@@ -27,7 +27,12 @@ function LoginForm() {
       // cookie сессии Auth.js (см. app/api/login/route.ts), и
       // SessionProvider (app/providers.tsx) подхватит её при монтировании
       // на новой странице — проще и надёжнее, чем вручную дёргать update().
-      window.location.href = "/";
+      // ?next=... — возврат на страницу приглашения после входа. Только
+      // путь внутри сайта: "//host" и "/\host" браузер понял бы как чужой
+      // адрес (открытый редирект).
+      const next = searchParams.get("next") || "";
+      const safeNext = /^\/(?![/\\])/.test(next) ? next : "/";
+      window.location.href = safeNext;
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

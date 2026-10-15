@@ -36,6 +36,22 @@ from anonymizer.detectors import (  # noqa: E402
     morph_gate_available,
 )
 
+# pymorphy2 (и natasha, которая строит MorphVocab поверх него) ищет словари
+# через `pkg_resources`, а его убрали из свежих setuptools. Там запасные пути
+# цепочки pymorphy3 → pymorphy2 → natasha физически не поднимаются — это
+# свойство окружения, а не дефект шлюза; основной путь (pymorphy3) от этого
+# не зависит. Тесты запасных путей в таком окружении пропускаются, а не падают.
+try:
+    import pkg_resources  # noqa: F401
+    _HAS_PKG_RESOURCES = True
+except ImportError:
+    _HAS_PKG_RESOURCES = False
+
+_needs_pkg_resources = pytest.mark.skipif(
+    not _HAS_PKG_RESOURCES,
+    reason="нет pkg_resources (setuptools без него): pymorphy2/natasha не загрузят словари",
+)
+
 
 def test_dictionary_gate_is_available_in_this_environment():
     # Sanity check: every other test in this file assumes natasha's
@@ -188,6 +204,7 @@ def test_prefers_pymorphy3_when_available(monkeypatch):
     assert allowed is False, f"should refuse, got why={why!r}"
 
 
+@_needs_pkg_resources
 def test_falls_back_to_pymorphy2_when_pymorphy3_import_blocked(monkeypatch):
     # Priming import: constructing a bare `pymorphy2.MorphAnalyzer()` on
     # Python 3.13 with pymorphy2==0.9.1 raises `AttributeError: module
@@ -211,6 +228,7 @@ def test_falls_back_to_pymorphy2_when_pymorphy3_import_blocked(monkeypatch):
     assert allowed is False, f"should refuse, got why={why!r}"
 
 
+@_needs_pkg_resources
 def test_falls_back_to_natasha_when_both_pymorphy_imports_blocked(monkeypatch):
     import natasha  # noqa: F401 - ensures natasha's own pymorphy2 ref is cached
 

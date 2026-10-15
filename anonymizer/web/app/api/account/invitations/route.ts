@@ -6,6 +6,7 @@ import {
   getSeatUsage,
   inviteExpiryFrom,
   inviteUrl,
+  publicOrigin,
   newInviteToken,
   pendingInvitationWhere,
 } from "@/lib/invitations";
@@ -82,17 +83,21 @@ export async function POST(req: NextRequest) {
       if (seats.free != null && seats.free <= 0) {
         // Разворачиваем в простые поля, а не возвращаем объект seats целиком:
         // сузить union по `in` для вложенного объекта TypeScript не может.
-        return { limitReached: true as const, taken: seats.taken, limit: seats.limit };
+        return { limitReached: true as const, taken: seats.taken, limit: seats.limit, planTitle: seats.planTitle };
       }
 
-      // Адрес уже зарегистрирован — приглашать некого: users.email уникален
-      // на весь сервис, и активация всё равно упала бы. Отвечаем заранее и
-      // не тратим место на заведомо мёртвое приглашение. Это НЕ раскрытие
-      // чужой регистрации: приглашать может только админ, и только в свой
-      // аккаунт, где состав ему и так виден.
+      // Адрес уже зарегистрирован — это допустимо: такой пользователь
+      // вступит в аккаунт через /api/invite/join (см. checkJoinEligibility).
+      // Отказываем только там, где приглашение заведомо бессмысленно: человек
+      // уже в этом аккаунте, либо это root (его переводить нельзя никогда).
       const existing = await tx.user.findUnique({ where: { email } });
       if (existing) {
-        return { alreadyUser: true as const };
+        if (existing.accountId === manager.accountId) {
+          return { alreadyMember: true as const };
+        }
+        if (existing.role === "root") {
+          return { rootUser: true as const };
+        }
       }
 
       // Живое приглашение на тот же адрес в этот аккаунт — не плодим
@@ -118,6 +123,17 @@ export async function POST(req: NextRequest) {
     });
 
     if ("limitReached" in created) {
+      if (created.limit === 1) {
+        // Однопользовательский тариф (пробный/«Тест»): приглашения недоступны вовсе.
+        return NextResponse.json(
+          {
+            error:
+              `На тарифе «${created.planTitle}» работает один пользователь — приглашения недоступны. ` +
+              "Чтобы подключить сотрудников, перейдите на тариф «Бизнес» или «Корпоратив».",
+          },
+          { status: 402 },
+        );
+      }
       return NextResponse.json(
         {
           error:
@@ -128,9 +144,15 @@ export async function POST(req: NextRequest) {
         { status: 402 },
       );
     }
-    if ("alreadyUser" in created) {
+    if ("alreadyMember" in created) {
       return NextResponse.json(
-        { error: "Пользователь с таким адресом уже зарегистрирован." },
+        { error: "Этот пользователь уже состоит в аккаунте." },
+        { status: 409 },
+      );
+    }
+    if ("rootUser" in created) {
+      return NextResponse.json(
+        { error: "Этого пользователя нельзя пригласить в аккаунт." },
         { status: 409 },
       );
     }
@@ -141,7 +163,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const origin = req.nextUrl.origin;
+    const origin = publicOrigin(req);
     return NextResponse.json({
       id: created.invitation.id,
       email: created.invitation.email,

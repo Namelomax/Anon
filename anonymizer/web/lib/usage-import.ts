@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
-import { periodFromIso } from "@/lib/period";
+import { dateFromIso, windowFor } from "@/lib/period";
 
 /**
  * Импорт биллингового JSONL-лога `anonymizer/usage_log.py` в БД.
@@ -191,7 +191,7 @@ export async function importUsageLog(): Promise<ImportResult> {
 
 /**
  * Внести одну строку `request_total` в БД: UsageRecord (по requestId,
- * идемпотентно) + инкремент QuotaCounter — ОДНОЙ транзакцией, чтобы счётчик
+ * идемпотентно) + инкремент QuotaCounter (только для outcome ok/отсутствует) — ОДНОЙ транзакцией, чтобы счётчик
  * никогда не разошёлся с суммой UsageRecord.
  *
  * Конкурентные вызовы `importUsageLog` могут прочитать одну и ту же строку
@@ -212,7 +212,28 @@ async function _importOne(rec: Record<string, unknown>): Promise<"imported" | "d
   const completionTokens = Math.round(Number(rec.completion_tokens_total ?? 0));
   const glinerTokensEst = Math.round(Number(rec.gliner_tokens_est ?? 0));
   const seconds = Number(rec.seconds ?? 0);
-  const period = periodFromIso(rec.ts);
+  // Исход документа (usage_log.request_context): "ok" | "cancelled" | "error".
+  // Биллится только "ok" и ОТСУТСТВИЕ поля: строки, записанные до появления
+  // outcome, обязаны вести себя как раньше (иначе повторный импорт/идемпотентность
+  // разойдутся с уже посчитанными счётчиками). Любое иное значение (в т.ч.
+  // незнакомое будущее) — не списывать: лучше не взять лишнего с клиента.
+  const billed = rec.outcome == null || rec.outcome === "ok";
+  // Период — по якорю аккаунта и ВРЕМЕНИ ЗАПИСИ (`ts`), не импорта: см.
+  // windowFor. Якорь меняется только при оплате (activate-plan), а запись из
+  // прошлого окна должна остаться в своём окне — поэтому окно считается по
+  // текущему якорю, но от `ts`; запись до новой оплаты может уйти в
+  // «виртуальное» окно перед якорем, что безопасно (текущее окно не
+  // затрагивается).
+  const account = await prisma.account.findUnique({
+    where: { id: accountId },
+    select: { periodAnchorAt: true },
+  });
+  if (!account) {
+    // Как и раньше: без аккаунта вставка падала на внешнем ключе и исключение
+    // шло наверх — молча терять запись нельзя.
+    throw new Error(`[usage-import] аккаунт ${accountId} не найден (request_id=${requestId})`);
+  }
+  const period = windowFor(account.periodAnchorAt, dateFromIso(rec.ts)).key;
 
   try {
     await prisma.$transaction(async (tx) => {
@@ -224,29 +245,35 @@ async function _importOne(rec: Record<string, unknown>): Promise<"imported" | "d
           requestId,
           chars,
           pagesTenths,
-          // "Мягкая" политика биллинга: сейчас списываем страницы целиком,
-          // без деления на "билящиеся"/"нет". Более строгая (например,
-          // токен-based) политика сможет в будущем посчитать
-          // billablePagesTenths иначе — не трогая уже сохранённые
-          // pagesTenths/requestId, то есть без пересчёта истории.
-          billablePagesTenths: pagesTenths,
+          // "Мягкая" политика биллинга: списываем страницы целиком для
+          // успешных документов; отменённые/упавшие (outcome != ok) пишутся
+          // для аудита и учёта себестоимости (pagesTenths/costKopecks —
+          // фактические), но billablePagesTenths = 0 и квоту не трогают.
+          // Более строгая политика сможет посчитать billablePagesTenths иначе
+          // — не трогая pagesTenths/requestId, то есть без пересчёта истории.
+          billablePagesTenths: billed ? pagesTenths : 0,
           promptTokens,
           completionTokens,
           glinerTokensEst,
           costKopecks,
           seconds,
-          // `request_total` пишется БЕЗУСЛОВНО по завершении обработки (см.
-          // докстринг usage_log.py) — сам лог не несёт отдельного флага
-          // успеха/неуспеха документа. Раз строка попала в лог — работа
-          // была сделана и подлежит оплате, поэтому здесь всегда true.
-          ok: true,
+          // `request_total` пишется БЕЗУСЛОВНО (даже для отменённого/упавшего
+          // документа — себестоимость потраченных вызовов нужна учёту), а
+          // исход несёт поле outcome. ok=true — документ завершён (работа
+          // сделана, подлежит оплате, даже если веб не забрал результат) либо
+          // это старая строка без outcome; ok=false — cancelled/error.
+          ok: billed,
         },
       });
-      await tx.quotaCounter.upsert({
-        where: { accountId_period: { accountId, period } },
-        update: { pagesUsedTenths: { increment: pagesTenths } },
-        create: { accountId, period, pagesUsedTenths: pagesTenths },
-      });
+      // Квота растёт только за биллящийся документ; счётчик и сумма
+      // billablePagesTenths по UsageRecord остаются согласованными.
+      if (billed) {
+        await tx.quotaCounter.upsert({
+          where: { accountId_period: { accountId, period } },
+          update: { pagesUsedTenths: { increment: pagesTenths } },
+          create: { accountId, period, pagesUsedTenths: pagesTenths },
+        });
+      }
     });
     return "imported";
   } catch (err) {

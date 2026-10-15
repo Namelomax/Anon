@@ -55,6 +55,10 @@ type AccountSummary = {
     allowanceTenths: number | null;
     remainingTenths: number | null;
     exhausted: boolean;
+    periodStart: string;
+    periodEnd: string | null;
+    paidUntil: string | null;
+    expired: boolean;
   };
   canManage: boolean;
   users: {
@@ -146,6 +150,130 @@ function cancelJob(jobId: string, keepalive = false) {
   }).catch(() => {});
 }
 
+// Срок жизни результата во вкладке и окно, в которое задачу ещё можно забрать с
+// сервера. ОБЯЗАН совпадать с _JOB_TTL_SECONDS в anonymizer/server.py (10 минут):
+// короче — потеряем результат, который сервер ещё держит; длиннее — будем
+// ходить за задачей, которой там уже нет.
+const JOB_TTL_MS = 10 * 60 * 1000;
+
+// Пережить перезагрузку страницы. ТОЛЬКО sessionStorage (живёт, пока открыта
+// вкладка): ни localStorage, ни IndexedDB — результат содержит ключ
+// деанонимизации и не должен переживать вкладку. Содержимое результата не
+// логируется.
+// В обеих записях лежит userId сессии: запись чужого пользователя (или без
+// сессии) игнорируется и стирается — результат содержит ключ деанонимизации.
+const JOB_KEY = "anon.job.v1"; // {userId, jobId, fileName, startedAt}
+const RESULT_KEY = "anon.result.v1"; // {userId, savedAt, expiresAt, fileName, result}
+// Больше — не кэшируем (квота sessionStorage ~5 МБ на origin, а строка UTF-16).
+// Тогда после перезагрузки результат забирается опросом по jobId в окне TTL.
+const RESULT_CACHE_MAX_CHARS = 2_000_000;
+
+const GONE_MESSAGE =
+  "Результат больше не доступен: прошло более 10 минут с загрузки документа или страница была закрыта. Загрузите документ заново.";
+
+type SavedJob = { userId: string; jobId: string; fileName: string; startedAt: number };
+
+// Любой доступ к хранилищу — в try/catch: в приватном режиме/при запрете
+// cookies sessionStorage бросает, и страница должна работать и без него.
+function readJob(userId: string | null): SavedJob | null {
+  try {
+    const raw = window.sessionStorage.getItem(JOB_KEY);
+    if (!raw) return null;
+    const j = JSON.parse(raw);
+    if (
+      userId !== null &&
+      j?.userId === userId &&
+      typeof j?.jobId === "string" &&
+      typeof j?.fileName === "string" &&
+      typeof j?.startedAt === "number"
+    ) {
+      return j as SavedJob;
+    }
+  } catch {
+    /* повреждённая запись или хранилище недоступно */
+  }
+  clearJob(); // чужая/битая запись
+  return null;
+}
+
+// Без userId (нет сессии) не пишем: такую запись всё равно никто не прочтёт.
+function writeJob(job: Omit<SavedJob, "userId">, userId: string | null): boolean {
+  if (userId === null) return false;
+  try {
+    window.sessionStorage.setItem(JOB_KEY, JSON.stringify({ userId, ...job }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function clearJob() {
+  try {
+    window.sessionStorage.removeItem(JOB_KEY);
+  } catch {
+    /* нечего чистить */
+  }
+}
+
+function clearCachedResult() {
+  try {
+    window.sessionStorage.removeItem(RESULT_KEY);
+  } catch {
+    /* нечего чистить */
+  }
+}
+
+// Кэш результата, если он есть и не истёк; истёкший/битый сразу удаляется.
+function readCachedResult(
+  userId: string | null,
+): { fileName: string; result: AnonResult } | null {
+  try {
+    const raw = window.sessionStorage.getItem(RESULT_KEY);
+    if (!raw) return null;
+    const c = JSON.parse(raw);
+    if (
+      userId !== null &&
+      c?.userId === userId &&
+      typeof c?.expiresAt === "number" &&
+      c.expiresAt > Date.now() &&
+      c.result &&
+      typeof c.result.anonymized_text === "string" &&
+      typeof c.result.document_base64 === "string"
+    ) {
+      return { fileName: typeof c.fileName === "string" ? c.fileName : "", result: c.result };
+    }
+  } catch {
+    /* битая запись — удалим ниже */
+  }
+  clearCachedResult();
+  return null;
+}
+
+// true — результат сохранён. Не влезло/квота/приватный режим — просто false.
+function writeCachedResult(
+  userId: string | null,
+  fileName: string,
+  startedAt: number,
+  result: AnonResult,
+): boolean {
+  const expiresAt = startedAt + JOB_TTL_MS;
+  if (userId === null || expiresAt <= Date.now()) return false;
+  try {
+    const json = JSON.stringify({ userId, savedAt: Date.now(), expiresAt, fileName, result });
+    if (json.length > RESULT_CACHE_MAX_CHARS) return false;
+    window.sessionStorage.setItem(RESULT_KEY, json);
+    return true;
+  } catch {
+    return false; // QuotaExceededError, SecurityError
+  }
+}
+
+// Бэкенд не знает задачу (истёк TTL, перезапуск, либо она чужая — для чужой
+// бэкенд намеренно отвечает так же).
+class JobGoneError extends Error {}
+// Связь пропала, но задача могла остаться жива — запись о ней не стираем.
+class JobConnectionError extends Error {}
+
 function base64ToBuffer(b64: string): ArrayBuffer {
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
@@ -165,8 +293,8 @@ function base64ToBuffer(b64: string): ArrayBuffer {
 async function pollJob(
   jobId: string,
   onTick: (sec: number) => void,
+  startedAt: number = Date.now(),
 ): Promise<any> {
-  const startedAt = Date.now();
   let delayMs = 1000;
   let failures = 0;
 
@@ -183,7 +311,7 @@ async function pollJob(
         cache: "no-store",
       });
     } catch {
-      if (++failures > 10) throw new Error("Связь с сервером потеряна");
+      if (++failures > 10) throw new JobConnectionError("Связь с сервером потеряна");
       continue;
     }
     failures = 0;
@@ -195,6 +323,7 @@ async function pollJob(
     } catch {
       continue; // прокси вклинился HTML-заглушкой — спросим ещё раз
     }
+    if (resp.status === 404) throw new JobGoneError(GONE_MESSAGE);
     if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
     // A cancelled job is not an error — someone (this tab on unload, or a new
     // job replacing it) asked the backend to stop it. Stop polling quietly.
@@ -369,6 +498,35 @@ function periodLabel(period: string): string {
   return d.toLocaleDateString("ru", { month: "long", year: "numeric", timeZone: "UTC" });
 }
 
+/** ISO -> «дд.мм.гггг» по UTC (границы окон квоты считаются в UTC, lib/period.ts). */
+function dateRu(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("ru", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+/** Подпись периода квоты: «период дд.мм.гггг–дд.мм.гггг», у аккаунта без срока — месяц. */
+function quotaPeriodLabel(q: {
+  period: string;
+  periodStart: string;
+  periodEnd: string | null;
+}): string {
+  if (!q.periodEnd) return periodLabel(q.period);
+  return `период ${dateRu(q.periodStart)}–${dateRu(q.periodEnd)}`;
+}
+
+/** Сообщение об истёкшем сроке — тот же текст, что отдаёт checkQuota (lib/quota.ts). */
+function expiredMessage(planCode: string, paidUntil: string): string {
+  return planCode === "trial"
+    ? `Пробный период закончился ${dateRu(paidUntil)}. Чтобы продолжить, оплатите тариф.`
+    : `Срок действия тарифа закончился ${dateRu(paidUntil)}. Продлите подписку, чтобы продолжить.`;
+}
+
 function extOf(name: string): string {
   const m = /\.[^.]+$/.exec(name);
   return m ? m[0].toLowerCase() : "";
@@ -404,11 +562,18 @@ function deanonClient(text: string, m: Record<string, string>): string {
   return out;
 }
 
+type GlossaryRow = { id: number; aliases: string; canonical: string };
+
 export default function Home() {
   // Только отображение личности/выход — проверка прав и квоты в этой задаче
   // сознательно не делается (см. спеку: "не строить проверки квоты в этой
   // задаче"), поэтому статус сессии здесь ни на что не влияет, кроме шапки.
   const { data: session, status: sessionStatus } = useSession();
+  // Id пользователя сессии — привязка sessionStorage-кэша к человеку. В ref,
+  // чтобы колбэки ниже читали актуальное значение без пересоздания.
+  const userId = session?.user?.id ?? null;
+  const userIdRef = useRef<string | null>(userId);
+  userIdRef.current = userId;
   const [tab, setTab] = useState<Tab>("anon");
   // Сводка кабинета: тариф, остаток квоты, история. Нужна не только самому
   // кабинету — по ней в меню показывается остаток, а исчерпанная квота
@@ -426,6 +591,17 @@ export default function Home() {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [inviteCopied, setInviteCopied] = useState(false);
+  // Словарь терминов аккаунта («Мои термины»): список, формы добавления и
+  // массового импорта. Значения терминов конфиденциальны — только в UI.
+  const [glTerms, setGlTerms] = useState<GlossaryRow[]>([]);
+  const [glMax, setGlMax] = useState(500);
+  const [glAliases, setGlAliases] = useState("");
+  const [glCanonical, setGlCanonical] = useState("");
+  const [glBulk, setGlBulk] = useState("");
+  const [glBulkOpen, setGlBulkOpen] = useState(false);
+  const [glBusy, setGlBusy] = useState(false);
+  const [glError, setGlError] = useState<string | null>(null);
+  const [glNote, setGlNote] = useState<string | null>(null);
 
   // --- Anonymize state ---
   const [file, setFile] = useState<File | null>(null);
@@ -446,6 +622,14 @@ export default function Home() {
   // Set when the currently displayed job was cancelled rather than errored —
   // rendered as a neutral note, never in the red error style.
   const [cancelled, setCancelled] = useState(false);
+  // Нейтральное сообщение (не ошибка): результат пропал с сервера.
+  const [notice, setNotice] = useState<string | null>(null);
+  // Имя документа в работе — показывается в «обрабатываю», в том числе после
+  // перезагрузки, когда объекта File уже нет.
+  const [jobName, setJobName] = useState<string | null>(null);
+  // Лежит ли показанный результат в sessionStorage (от этого зависит текст
+  // под результатом).
+  const [resultCached, setResultCached] = useState(false);
   const [drag, setDrag] = useState(false);
   // Боковое меню открыто по умолчанию на любой ширине; на узком экране оно
   // выезжает поверх содержимого и закрывается по выбору пункта.
@@ -462,6 +646,14 @@ export default function Home() {
   // cancelled) so a finished job is never cancelled by a later unload/new
   // submit.
   const activeJobIdRef = useRef<string | null>(null);
+  // Записан ли jobId в sessionStorage. Если да — pagehide задачу НЕ отменяет:
+  // перезагрузка страницы обязана её пережить (вкладку от перезагрузки на
+  // pagehide не отличить). Если хранилища нет — возобновлять нечем, и
+  // отмена на выгрузке остаётся, как раньше.
+  const jobPersistedRef = useRef(false);
+  // Защита от двойного запуска восстановления: в dev-режиме StrictMode монтирует
+  // эффект дважды, а второй опрос той же задачи нам не нужен.
+  const restoredRef = useRef(false);
   // Placeholders the user manually chose to KEEP in plain text (undo a mask).
   // Reversible: clicking again re-masks. Everything downstream (preview,
   // mapping.json, downloaded document) is derived from this set.
@@ -527,7 +719,7 @@ export default function Home() {
   useEffect(() => {
     const onPageHide = () => {
       const jobId = activeJobIdRef.current;
-      if (!jobId) return;
+      if (!jobId || jobPersistedRef.current) return;
       cancelJob(jobId, true);
     };
     window.addEventListener("pagehide", onPageHide);
@@ -543,10 +735,103 @@ export default function Home() {
     setError(null);
     setResult(null);
     setCancelled(false);
+    setNotice(null);
+    setResultCached(false);
+    // Новый документ — прежний результат и запись о задаче больше не нужны.
+    clearCachedResult();
+    clearJob();
     setFile(f);
   };
 
   const toggle = (k: StageKey) => setStages((s) => ({ ...s, [k]: !s[k] }));
+
+  // Показать готовый результат и попытаться пережить им перезагрузку.
+  // Если результат лёг в sessionStorage, запись о задаче больше не нужна; если
+  // нет (велик/квота/приватный режим) — запись остаётся, и перезагрузка
+  // добирает результат опросом по jobId, пока сервер его держит.
+  const showResult = useCallback(
+    (res: AnonResult, fileName: string, startedAt: number) => {
+      setResult(res);
+      setKept(new Set());
+      setDeUseLast(true);
+      setDeResult(null);
+      const cached = writeCachedResult(userIdRef.current, fileName, startedAt, res);
+      setResultCached(cached);
+      if (cached) clearJob();
+      // Документ списан — остаток в меню и кабинете должен это показать
+      // сразу, а не после следующей загрузки.
+      void loadSummary();
+    },
+    [loadSummary],
+  );
+
+  // Опрос уже поставленной задачи + разбор исхода. Общий для свежего запуска и
+  // для возобновления после перезагрузки. «Задача пропала» — нейтральное
+  // notice, остальные сбои — красная ошибка.
+  const trackJob = useCallback(
+    async (jobId: string, fileName: string, startedAt: number) => {
+      activeJobIdRef.current = jobId;
+      jobPersistedRef.current = writeJob({ jobId, fileName, startedAt }, userIdRef.current);
+      try {
+        const final = await pollJob(jobId, setElapsed, startedAt);
+        // Terminal state reached (done or cancelled) — clear the ref so a
+        // later unload/new submit never sends a cancel for this job again.
+        activeJobIdRef.current = null;
+        if (final?.cancelled) {
+          clearJob();
+          setCancelled(true);
+        } else {
+          showResult(final as AnonResult, fileName, startedAt);
+        }
+      } catch (e: unknown) {
+        activeJobIdRef.current = null;
+        if (e instanceof JobGoneError) {
+          clearJob();
+          setNotice(GONE_MESSAGE);
+        } else if (e instanceof JobConnectionError) {
+          // Запись оставляем: после перезагрузки опрос можно продолжить.
+          setError(e.message);
+        } else {
+          clearJob(); // задача завершилась ошибкой — возобновлять нечего
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      }
+    },
+    [showResult],
+  );
+
+  // Восстановление после перезагрузки (один раз, как только известна сессия:
+  // до этого не понять, чей кэш лежит в хранилище). Порядок:
+  // 1) кэш результата — показываем сразу, без сети; 2) иначе запись о задаче —
+  // возобновляем опрос, если окно TTL ещё не прошло. Хранилища нет — всё это
+  // молча пропускается.
+  useEffect(() => {
+    if (restoredRef.current || sessionStatus === "loading") return;
+    restoredRef.current = true;
+
+    // Нет сессии — userId=null: чужие/ничьи записи стираются, не показываются.
+    const cached = readCachedResult(userId);
+    if (cached) {
+      clearJob(); // результат на экране и сохранён — задача не нужна
+      setResult(cached.result);
+      setResultCached(true);
+      return;
+    }
+    const job = readJob(userId);
+    if (!job) {
+      if (userId === null) clearJob();
+      return;
+    }
+    if (job.startedAt + JOB_TTL_MS <= Date.now()) {
+      clearJob();
+      setNotice(GONE_MESSAGE);
+      return;
+    }
+    setLoading(true);
+    setJobName(job.fileName);
+    setElapsed(Math.max(0, Math.round((Date.now() - job.startedAt) / 1000)));
+    void trackJob(job.jobId, job.fileName, job.startedAt).finally(() => setLoading(false));
+  }, [sessionStatus, userId, trackJob]);
 
   const run = useCallback(async () => {
     if (!file) return;
@@ -561,8 +846,17 @@ export default function Home() {
     setLoading(true);
     setError(null);
     setCancelled(false);
+    setNotice(null);
     setResult(null);
+    setResultCached(false);
     setElapsed(0);
+    setJobName(file.name);
+    // Старт отсчитываем ДО отправки: окно жизни результата считается на
+    // сервере от постановки задачи, поэтому так мы его не переоценим.
+    const startedAt = Date.now();
+    clearCachedResult();
+    clearJob();
+    jobPersistedRef.current = false;
     try {
       const fd = new FormData();
       fd.append("file", file);
@@ -591,32 +885,17 @@ export default function Home() {
       // браузера. Раньше ожидание сидело внутри серверной функции, и её предел
       // становился пределом анонимизации; на Hobby это ещё и ломало деплой
       // («invalid maxDuration for plan»). Браузер же не ограничен ничем.
-      let final: any = data;
       if (data?.jobId && !data?.done) {
-        activeJobIdRef.current = data.jobId;
-        final = await pollJob(data.jobId, setElapsed);
-        // Terminal state reached (done or cancelled) — clear the ref so a
-        // later unload/new submit never sends a cancel for this job again.
-        activeJobIdRef.current = null;
-      }
-
-      if (final?.cancelled) {
-        setCancelled(true);
+        await trackJob(data.jobId, file.name, startedAt);
       } else {
-        setResult(final as AnonResult);
-        setKept(new Set());
-        setDeUseLast(true);
-        setDeResult(null);
-        // Документ списан — остаток в меню и кабинете должен это показать
-        // сразу, а не после следующей загрузки.
-        void loadSummary();
+        showResult(data as AnonResult, file.name, startedAt);
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [file, stages, loadSummary]);
+  }, [file, stages, trackJob, showResult]);
 
   const toggleKept = (ph: string) =>
     setKept((prev) => {
@@ -763,9 +1042,11 @@ export default function Home() {
   };
 
   const entityCount = result ? Object.keys(result.mapping).length : 0;
-  // Только явно исчерпанная квота: пока сводки нет (не вошёл, режим без
-  // авторизации, сеть) — не мешаем работать, решение всё равно за бэкендом.
-  const quotaExhausted = summary?.quota.exhausted === true;
+  // Только явно исчерпанная квота или истёкший срок: пока сводки нет (не
+  // вошёл, режим без авторизации, сеть) — не мешаем работать, решение всё
+  // равно за бэкендом.
+  const quotaExpired = summary?.quota.expired === true;
+  const quotaExhausted = summary?.quota.exhausted === true || quotaExpired;
 
   const createInvite = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -816,6 +1097,75 @@ export default function Home() {
       await loadSummary();
     } catch (e: unknown) {
       setInviteError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const loadGlossary = useCallback(async () => {
+    try {
+      const resp = await fetch("/api/account/glossary", { cache: "no-store" });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      setGlTerms(Array.isArray(data?.terms) ? (data.terms as GlossaryRow[]) : []);
+      if (typeof data?.max === "number") setGlMax(data.max);
+    } catch {
+      /* словарь — вспомогательная карточка, не мешаем остальному кабинету */
+    }
+  }, []);
+
+  const hasSummary = summary !== null;
+  useEffect(() => {
+    if (hasSummary) void loadGlossary();
+  }, [hasSummary, loadGlossary]);
+
+  const addGlossary = async (body: { aliases?: string; canonical?: string; bulk?: string }) => {
+    setGlBusy(true);
+    setGlError(null);
+    setGlNote(null);
+    try {
+      const resp = await fetch("/api/account/glossary", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+      if (body.bulk !== undefined) {
+        const skipped: { line: number; reason: string }[] = Array.isArray(data?.skipped)
+          ? data.skipped
+          : [];
+        setGlNote(
+          `Добавлено: ${data.added}. Пропущено: ${skipped.length}` +
+            (skipped.length
+              ? " — " +
+                skipped
+                  .slice(0, 5)
+                  .map((s) => (s.line ? `строка ${s.line}: ${s.reason}` : s.reason))
+                  .join(" ")
+              : "."),
+        );
+        setGlBulk("");
+      } else {
+        setGlAliases("");
+        setGlCanonical("");
+      }
+      await loadGlossary();
+    } catch (e: unknown) {
+      setGlError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGlBusy(false);
+    }
+  };
+
+  const deleteGlossary = async (id: number) => {
+    setGlError(null);
+    setGlNote(null);
+    try {
+      const resp = await fetch(`/api/account/glossary?id=${id}`, { method: "DELETE" });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+      await loadGlossary();
+    } catch (e: unknown) {
+      setGlError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -961,7 +1311,16 @@ export default function Home() {
           {sessionStatus === "authenticated" && session?.user?.email ? (
             <>
               <div className="note sidebar-user">{session.user.email}</div>
-              <button className="nav-item" onClick={() => signOut({ callbackUrl: "/" })}>
+              <button
+                className="nav-item"
+                onClick={() => {
+                  // Результат предыдущего пользователя не должен всплыть у
+                  // следующего в этой же вкладке.
+                  clearCachedResult();
+                  clearJob();
+                  void signOut({ callbackUrl: "/" });
+                }}
+              >
                 <LogOut size={16} />
                 Выйти
               </button>
@@ -1067,13 +1426,20 @@ export default function Home() {
                 </button>
                 {loading && (
                   <span className="note" style={{ textAlign: "center" }}>
-                    Запрос идёт на бэкенд (GLiNER + LLM){elapsed > 0 ? `, ${elapsed} с` : ""}. Это
-                    может занять несколько минут — вкладку можно свернуть.
+                    {jobName ? `Документ «${jobName}»: ` : ""}запрос идёт на бэкенд (GLiNER + LLM)
+                    {elapsed > 0 ? `, ${elapsed} с` : ""}. Это может занять несколько минут —
+                    вкладку можно свернуть, а страницу — перезагрузить.
                   </span>
                 )}
-                {quotaExhausted && (
+                {quotaExpired && (
                   <div className="error">
-                    Лимит страниц на {periodLabel(summary!.quota.period)} исчерпан:
+                    {expiredMessage(summary!.plan.code, summary!.quota.paidUntil!)} Новые
+                    документы не обрабатываются.
+                  </div>
+                )}
+                {quotaExhausted && !quotaExpired && (
+                  <div className="error">
+                    Лимит страниц на {quotaPeriodLabel(summary!.quota)} исчерпан:
                     использовано {pages(summary!.quota.usedTenths)} из{" "}
                     {pages(summary!.quota.allowanceTenths ?? 0)}. Новые документы не
                     обрабатываются до следующего периода или увеличения лимита.
@@ -1081,6 +1447,7 @@ export default function Home() {
                 )}
                 {error && <div className="error">Ошибка: {error}</div>}
                 {cancelled && !error && <div className="note">Задача отменена.</div>}
+                {notice && !error && <div className="note">{notice}</div>}
               </div>
 
               {result && (
@@ -1248,6 +1615,12 @@ export default function Home() {
                     <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
                       <TriangleAlert size={16} className="inline-icon" />
                       Mapping — ключ восстановления. Храните его отдельно от обезличенного документа.
+                    </p>
+                    <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
+                      <Info size={16} className="inline-icon" />
+                      {resultCached
+                        ? "Результат сохранён в этой вкладке до её закрытия (не дольше 10 минут). Скачайте файл и карту соответствий — после закрытия вкладки получить их повторно нельзя."
+                        : "Результат доступен на сервере не дольше 10 минут с момента загрузки документа. Скачайте файл и карту соответствий — потом получить их повторно нельзя."}
                     </p>
                   </div>
 
@@ -1435,11 +1808,20 @@ export default function Home() {
                       )}
                   </div>
 
-                  <div className={`card${summary.quota.exhausted ? " warn-card" : ""}`}>
+                  <div
+                    className={`card${summary.quota.exhausted || summary.quota.expired ? " warn-card" : ""}`}
+                  >
                     <h2>
                       <Gauge size={18} />
-                      Квота — {periodLabel(summary.quota.period)}
+                      Квота — {quotaPeriodLabel(summary.quota)}
                     </h2>
+                    {summary.quota.paidUntil && (
+                      <p className="note" style={{ marginTop: 0 }}>
+                        {summary.quota.expired
+                          ? expiredMessage(summary.plan.code, summary.quota.paidUntil)
+                          : `Тариф действует до ${dateRu(summary.quota.paidUntil)}.`}
+                      </p>
+                    )}
                     {summary.quota.unlimited ? (
                       <p className="note" style={{ marginTop: 0 }}>
                         Лимит не установлен. Израсходовано за период:{" "}
@@ -1490,9 +1872,10 @@ export default function Home() {
                       </>
                     )}
                     <p className="note" style={{ marginBottom: 0, marginTop: 12 }}>
-                      Единица учёта — страница, 1800 символов. Период считается по UTC и
-                      обнуляется первого числа. За {periodLabel(summary.quota.period)}{" "}
-                      обработано документов: {summary.periodTotals.documents}, символов:{" "}
+                      Единица учёта — страница, 1800 символов. Лимит действует один календарный
+                      месяц с даты оплаты (для пробного тарифа — с даты регистрации); пробный
+                      период не продлевается. Границы периода — по UTC. За{" "}
+                      {quotaPeriodLabel(summary.quota)} обработано документов: {summary.periodTotals.documents}, символов:{" "}
                       {summary.periodTotals.chars.toLocaleString("ru")}.
                     </p>
                   </div>
@@ -1503,12 +1886,25 @@ export default function Home() {
                       Пользователи аккаунта
                     </h2>
                     <p className="note" style={{ marginTop: 0 }}>
-                      Занято мест: {summary.users.taken}
-                      {summary.users.limit != null
-                        ? ` из ${summary.users.limit} по тарифу`
-                        : " (тариф без ограничения)"}
-                      . Место занимает и активный пользователь, и ещё не активированное
-                      приглашение; отключённый пользователь место освобождает.
+                      {summary.users.limit === 1 ? (
+                        <>
+                          На тарифе «{summary.plan.title}» работает один пользователь — приглашения
+                          недоступны. Чтобы подключить сотрудников, перейдите на тариф «Бизнес»
+                          или «Корпоратив».
+                        </>
+                      ) : summary.users.limit != null ? (
+                        <>
+                          Занято мест: {summary.users.taken} из {summary.users.limit} по
+                          тарифу. Место занимает и активный пользователь, и ещё не
+                          активированное приглашение; отключённый пользователь место
+                          освобождает.
+                        </>
+                      ) : (
+                        <>
+                          Пользователей и приглашений: {summary.users.taken}. Число
+                          пользователей не ограничено; все они расходуют общий лимит страниц.
+                        </>
+                      )}
                     </p>
 
                     <div className="scroll-tbl">
@@ -1575,7 +1971,7 @@ export default function Home() {
                       </table>
                     </div>
 
-                    {summary.canManage && (
+                    {summary.canManage && summary.users.limit !== 1 && (
                       <>
                         <form className="row" style={{ marginTop: 16 }} onSubmit={createInvite}>
                           <input
@@ -1641,6 +2037,133 @@ export default function Home() {
                   </div>
 
                   <div className="card">
+                    <h2>
+                      <ShieldCheck size={18} />
+                      Словарь терминов
+                    </h2>
+                    <p className="note" style={{ marginTop: 0 }}>
+                      Эти слова и названия всегда маскируются в документах вашего аккаунта —
+                      например, названия месторождений, объектов, шифры проектов. Падежи
+                      учитываются автоматически. Термины видны только пользователям вашего
+                      аккаунта.
+                    </p>
+                    <p className="note">
+                      Записей: {glTerms.length} из {glMax}
+                      {!summary.canManage && " · изменять словарь может администратор аккаунта"}
+                    </p>
+
+                    {glTerms.length > 0 && (
+                      <div className="scroll-tbl">
+                        <table className="map">
+                          <thead>
+                            <tr>
+                              <th>Варианты написания</th>
+                              <th>В карте замен</th>
+                              {summary.canManage && <th>Действие</th>}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {glTerms.map((t) => (
+                              <tr key={t.id}>
+                                <td>{t.aliases}</td>
+                                <td>{t.canonical}</td>
+                                {summary.canManage && (
+                                  <td>
+                                    <button
+                                      className="ghost"
+                                      style={{ padding: "4px 10px", fontSize: 13 }}
+                                      onClick={() => deleteGlossary(t.id)}
+                                    >
+                                      Удалить
+                                    </button>
+                                  </td>
+                                )}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    {summary.canManage && (
+                      <>
+                        <form
+                          className="row"
+                          style={{ marginTop: 16 }}
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            void addGlossary({ aliases: glAliases, canonical: glCanonical });
+                          }}
+                        >
+                          <input
+                            required
+                            placeholder="Варианты написания через запятую"
+                            value={glAliases}
+                            onChange={(e) => setGlAliases(e.target.value)}
+                            style={{ flex: 2, minWidth: 220 }}
+                          />
+                          <input
+                            placeholder="Как называть в карте замен (необязательно)"
+                            value={glCanonical}
+                            onChange={(e) => setGlCanonical(e.target.value)}
+                            style={{ flex: 1, minWidth: 200 }}
+                          />
+                          <button
+                            className="ghost"
+                            type="submit"
+                            disabled={glBusy || glTerms.length >= glMax}
+                          >
+                            Добавить
+                          </button>
+                        </form>
+
+                        <p style={{ marginBottom: 0 }}>
+                          <button
+                            className="ghost"
+                            style={{ padding: "4px 10px", fontSize: 13 }}
+                            onClick={() => setGlBulkOpen((v) => !v)}
+                          >
+                            {glBulkOpen ? "Скрыть массовый ввод" : "Вставить списком"}
+                          </button>
+                        </p>
+                        {glBulkOpen && (
+                          <>
+                            <p className="note">
+                              По одной записи в строке: «вариант1, вариант2 = Каноническое имя».
+                              Часть после «=» необязательна; всё после «#» в строке игнорируется.
+                            </p>
+                            <textarea
+                              rows={6}
+                              value={glBulk}
+                              onChange={(e) => setGlBulk(e.target.value)}
+                              placeholder={"Ямбург, Ямбургское = Месторождение А\nШФ-7"}
+                              style={{ width: "100%", boxSizing: "border-box" }}
+                            />
+                            <button
+                              className="ghost"
+                              style={{ marginTop: 8 }}
+                              disabled={glBusy || !glBulk.trim()}
+                              onClick={() => void addGlossary({ bulk: glBulk })}
+                            >
+                              Добавить списком
+                            </button>
+                          </>
+                        )}
+                      </>
+                    )}
+                    {glError && (
+                      <div className="error" style={{ marginTop: 12 }}>
+                        {glError}
+                      </div>
+                    )}
+                    {glNote && (
+                      <p className="note" style={{ marginBottom: 0 }}>
+                        {glNote}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="card">
                     <h2>История обработки</h2>
                     {summary.recent.length === 0 ? (
                       <p className="note" style={{ margin: 0 }}>
@@ -1668,7 +2191,9 @@ export default function Home() {
                                 <td>{pages(r.billablePagesTenths)}</td>
                                 <td>{r.seconds.toFixed(1)} с</td>
                                 <td>
-                                  <span className="tag">{r.ok ? "успешно" : "ошибка"}</span>
+                                  {/* Не-ok запись (отмена/ошибка) в БД не различает причину — отдельной
+                                      колонки нет; главное для клиента, что страницы не списаны. */}
+                                  <span className="tag">{r.ok ? "успешно" : "отменено или ошибка — не списано"}</span>
                                 </td>
                               </tr>
                             ))}

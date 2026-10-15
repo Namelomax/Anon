@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { callBackend, callBackendGet, callBackendDelete, describeError } from "../_shared";
 import { resolveIdentity } from "@/lib/auth-guard";
 import { checkQuota } from "@/lib/quota";
+import { prisma } from "@/lib/db";
+import { toBackendTerms } from "@/lib/glossary";
 
 export const runtime = "nodejs";
 // Ни один запрос сюда не длится дольше нескольких секунд: POST только СТАВИТ
@@ -35,6 +37,15 @@ const _REQUEST_TIMEOUT_MS = 45_000;
 // never hang a closing page, so this timeout is deliberately much shorter
 // than the submit/poll one above.
 const _CANCEL_TIMEOUT_MS = 10_000;
+
+// Личность владельца для опроса/отмены: бэкенд отдаёт задачу, у которой есть
+// владелец, только его user_id (чужая — тот же 404, что и несуществующая).
+// Без сессии (переходный режим ANONYMIZER_REQUIRE_AUTH=false) параметров нет —
+// такая задача и создана без владельца.
+function ownerQuery(identity: { accountId: number; userId: number } | null | undefined): string {
+  if (!identity) return "";
+  return `?account_id=${encodeURIComponent(String(identity.accountId))}&user_id=${encodeURIComponent(String(identity.userId))}`;
+}
 
 /**
  * POST — принять файл и ПОСТАВИТЬ задачу на бэкенде.
@@ -84,6 +95,18 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Личный словарь аккаунта («Мои термины») — всегда маскируется, только в
+    // документах этого аккаунта. Значения конфиденциальны: не логировать.
+    const customTerms = identity
+      ? toBackendTerms(
+          await prisma.glossaryTerm.findMany({
+            where: { accountId: identity.accountId },
+            orderBy: { id: "asc" },
+            select: { aliases: true, canonical: true },
+          }),
+        )
+      : [];
+
     const buf = Buffer.from(await file.arrayBuffer());
     const payload = {
       filename: file.name,
@@ -93,6 +116,7 @@ export async function POST(req: NextRequest) {
       // Python (см. server.py:_coerce_id) — отсутствует, если сессии нет и
       // ANONYMIZER_REQUIRE_AUTH=false (переходный режим, см. lib/auth-guard.ts).
       ...(identity ? { account_id: identity.accountId, user_id: identity.userId } : {}),
+      ...(customTerms.length ? { custom_terms: customTerms } : {}),
     };
 
     const submitResp = await callBackend(
@@ -142,7 +166,7 @@ export async function POST(req: NextRequest) {
  * браузер должен остановить опрос и показать нейтральное сообщение.
  */
 export async function GET(req: NextRequest) {
-  const { error: authError } = await resolveIdentity();
+  const { identity, error: authError } = await resolveIdentity();
   if (authError) return authError;
 
   const jobId = new URL(req.url).searchParams.get("jobId");
@@ -152,7 +176,7 @@ export async function GET(req: NextRequest) {
 
   try {
     const pollResp = await callBackendGet(
-      `${BACKEND_URL}/jobs/${jobId}`,
+      `${BACKEND_URL}/jobs/${encodeURIComponent(jobId)}${ownerQuery(identity)}`,
       BACKEND_KEY,
       _REQUEST_TIMEOUT_MS,
     );
@@ -206,7 +230,7 @@ export async function GET(req: NextRequest) {
  * закрытие страницы.
  */
 export async function DELETE(req: NextRequest) {
-  const { error: authError } = await resolveIdentity();
+  const { identity, error: authError } = await resolveIdentity();
   if (authError) return authError;
 
   const jobId = req.nextUrl.searchParams.get("jobId");
@@ -216,7 +240,7 @@ export async function DELETE(req: NextRequest) {
 
   try {
     const cancelResp = await callBackendDelete(
-      `${BACKEND_URL}/jobs/${jobId}`,
+      `${BACKEND_URL}/jobs/${encodeURIComponent(jobId)}${ownerQuery(identity)}`,
       BACKEND_KEY,
       _CANCEL_TIMEOUT_MS,
     );

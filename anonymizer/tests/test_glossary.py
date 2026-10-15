@@ -106,3 +106,54 @@ def test_propagate_does_not_shrink_surname():
     extra = propagate_declensions(text, [span])
     assert all(e.text != "Иван" for e in extra)
     assert all(not e.text.startswith("Иван ") for e in extra)
+
+
+# --- Склонение прилагательных и многословных алиасов --------------------------
+
+def _found(entry, text):
+    return {s.text for s in GlossaryDetector([entry]).find(text)}
+
+
+def test_multiword_adjective_noun_all_cases():
+    e = GlossaryEntry("Ярактинское месторождение", ("Ярактинское месторождение",))
+    forms = [
+        "Ярактинское месторождение", "Ярактинского месторождения",
+        "Ярактинскому месторождению", "Ярактинским месторождением",
+        "Ярактинском месторождении", "Ярактинские месторождения",
+        "Ярактинских месторождений", "Ярактинским месторождениям",
+        "Ярактинскими месторождениями", "Ярактинских месторождениях",
+    ]
+    text = ". ".join(f"x {f} y" for f in forms)
+    assert _found(e, text) == set(forms)
+    assert _found(e, "на  Ярактинском\nместорождении") == {"Ярактинском\nместорождении"}
+
+
+def test_single_adjective_alias():
+    e = GlossaryEntry("Ярактинское", ("Ярактинское",))
+    forms = ["Ярактинское", "Ярактинского", "Ярактинскому", "Ярактинским", "Ярактинском"]
+    assert _found(e, "; ".join(forms)) == set(forms)
+    assert _found(e, "Ярактинскоеместо") == set()
+
+
+def test_feminine_adjective_noun():
+    e = GlossaryEntry("Верхнечонская площадь", ("Верхнечонская площадь",))
+    assert _found(e, "на Верхнечонской площади") == {"Верхнечонской площади"}
+    assert _found(e, "про Верхнечонскую площадь") == {"Верхнечонскую площадь"}
+
+
+def test_hyphenated_noun_still_inflects():
+    e = GlossaryEntry("Усть-Кут", ("Усть-Кут",))
+    assert _found(e, "в Усть-Куте") == {"Усть-Куте"}
+
+
+def test_acronyms_and_codes_exact_only():
+    e = GlossaryEntry("ВЧНГКМ", ("ВЧНГКМ",))
+    assert _found(e, "на ВЧНГКМ добыча") == {"ВЧНГКМ"}
+    assert _found(e, "ВЧНГКМА") == set()
+    c = GlossaryEntry("ЦПС-3", ("ЦПС-3",))
+    assert _found(c, "ЦПС-3, ЦПС-3а") == {"ЦПС-3"}
+
+
+def test_noun_alias_does_not_match_derived_adjective():
+    e = GlossaryEntry("Марково", ("Марково",))
+    assert _found(e, "Марково и Марковского") == {"Марково"}

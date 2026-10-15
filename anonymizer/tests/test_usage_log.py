@@ -992,3 +992,47 @@ if __name__ == "__main__":
                 traceback.print_exc()
     print(f"\n{'OK' if not failures else str(failures) + ' FAILURE(S)'}")
     sys.exit(1 if failures else 0)
+
+
+# --- outcome в request_total (биллинг: списывается только "ok") -------------
+
+def test_request_total_outcome_ok_on_normal_exit():
+    with _temp_log_path() as log_path:
+        with usage_log.request_context(chars=100):
+            pass
+        lines = _read_lines(log_path)
+    assert len(lines) == 1 and lines[0]["outcome"] == "ok"
+
+
+def test_request_total_outcome_cancelled_and_exception_propagates():
+    from anonymizer.llm import Cancelled
+
+    exc = Cancelled("stop")
+    with _temp_log_path() as log_path:
+        try:
+            with usage_log.request_context(chars=3600):
+                usage_log.record_call("llm_detect", prompt_tokens=10, completion_tokens=5, seconds=0.1)
+                raise exc
+        except Cancelled as caught:
+            assert caught is exc  # то же исключение, без обёрток
+        else:
+            raise AssertionError("Cancelled должен пробрасываться")
+        lines = _read_lines(log_path)
+    # Строка пишется и при отмене: потраченные токены/стоимость не теряются.
+    assert len(lines) == 1
+    assert lines[0]["outcome"] == "cancelled"
+    assert lines[0]["prompt_tokens_total"] == 10 and lines[0]["pages"] == 2.0
+
+
+def test_request_total_outcome_error_and_exception_propagates():
+    exc = RuntimeError("boom")
+    with _temp_log_path() as log_path:
+        try:
+            with usage_log.request_context(chars=100):
+                raise exc
+        except RuntimeError as caught:
+            assert caught is exc
+        else:
+            raise AssertionError("исключение должно пробрасываться")
+        lines = _read_lines(log_path)
+    assert len(lines) == 1 and lines[0]["outcome"] == "error"

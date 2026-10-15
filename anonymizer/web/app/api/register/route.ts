@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { hash } from "@node-rs/argon2";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
+import { addMonthsClamped } from "@/lib/period";
 import { isValidEmail, validatePasswordStrength } from "@/lib/password";
 
 export const runtime = "nodejs";
@@ -91,9 +92,19 @@ export async function POST(req: NextRequest) {
   const ip = getClientIp(req);
 
   try {
+    // Пробный период — разовый календарный месяц с момента регистрации, не
+    // продлевается (см. lib/period.ts, lib/quota.ts: после paidUntil — 402).
+    const now = new Date();
+    const paidUntil = addMonthsClamped(now, 1);
     await prisma.$transaction(async (tx) => {
       const account = await tx.account.create({
-        data: { name: accountName, planId: plan.id, isActive: true },
+        data: {
+          name: accountName,
+          planId: plan.id,
+          isActive: true,
+          periodAnchorAt: now,
+          paidUntil,
+        },
       });
       const user = await tx.user.create({
         data: {

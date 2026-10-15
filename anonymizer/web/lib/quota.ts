@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { importUsageLog } from "@/lib/usage-import";
-import { currentPeriodUtc } from "@/lib/period";
+import { formatDateRu, windowFor } from "@/lib/period";
 
 /**
  * Проверка лимита страниц перед постановкой задачи (см. app/api/anonymize/
@@ -30,7 +30,15 @@ type AccountWithPlan = NonNullable<Awaited<ReturnType<typeof loadAccount>>>;
 
 export type QuotaState = {
   account: AccountWithPlan;
+  /** Ключ периода (см. lib/period.ts): ISO-UTC начала 30-дневного окна или 'YYYY-MM'. */
   period: string;
+  periodStart: Date;
+  /** Конец окна, обрезанный по paidUntil; null — у аккаунта без срока. */
+  periodEnd: Date | null;
+  /** Конец оплаченного/пробного срока (не включая); null — срока нет. */
+  paidUntil: Date | null;
+  /** Срок истёк (now >= paidUntil): загрузка закрыта независимо от остатка страниц. */
+  expired: boolean;
   usedTenths: number;
   limitTenths: number | null;
   grantsTenths: number;
@@ -74,7 +82,15 @@ export async function getQuotaState(accountId: number): Promise<QuotaState | nul
   const account = await loadAccount(accountId);
   if (!account) return null;
 
-  const period = currentPeriodUtc();
+  const now = new Date();
+  const paidUntil = account.paidUntil;
+  const expired = paidUntil != null && now.getTime() >= paidUntil.getTime();
+  // У истёкшего срока показываем последнее окно срока (а не «будущее» окно
+  // после paidUntil): именно в нём лежит расход, который человек хочет видеть,
+  // а счётчики после истечения ничем не сбрасываются.
+  const at = expired ? new Date(paidUntil!.getTime() - 1) : now;
+  const window = windowFor(account.periodAnchorAt, at, paidUntil);
+  const period = window.key;
 
   // Счётчик должен существовать ВСЕГДА, даже для безлимитных аккаунтов —
   // владелец сервиса хочет видеть расход и там, где формального лимита нет
@@ -106,6 +122,10 @@ export async function getQuotaState(accountId: number): Promise<QuotaState | nul
   return {
     account,
     period,
+    periodStart: window.start,
+    periodEnd: window.end,
+    paidUntil,
+    expired,
     usedTenths: counter.pagesUsedTenths,
     limitTenths,
     grantsTenths,
@@ -124,6 +144,17 @@ export async function checkQuota(accountId: number): Promise<QuotaCheckResult> {
   }
   if (!state.account.isActive) {
     return { ok: false, status: 403, message: "Аккаунт отключён." };
+  }
+  if (state.expired) {
+    const until = formatDateRu(state.paidUntil!);
+    return {
+      ok: false,
+      status: 402,
+      message:
+        state.account.plan.code === "trial"
+          ? `Пробный период закончился ${until}. Чтобы продолжить, оплатите тариф.`
+          : `Срок действия тарифа закончился ${until}. Продлите подписку, чтобы продолжить.`,
+    };
   }
   if (!state.exhausted) {
     return { ok: true };

@@ -30,6 +30,14 @@ export type AccountSummary = {
   };
   quota: {
     period: string;
+    /** ISO-UTC начала текущего окна квоты. */
+    periodStart: string;
+    /** ISO-UTC конца окна (обрезан по paidUntil); null — у аккаунта без срока. */
+    periodEnd: string | null;
+    /** ISO-UTC конца оплаченного/пробного срока; null — срока нет. */
+    paidUntil: string | null;
+    /** Срок истёк: загрузка закрыта (см. checkQuota). */
+    expired: boolean;
     unlimited: boolean;
     usedTenths: number;
     /** Лимит плана/индивидуального override БЕЗ грантов; null — безлимит. */
@@ -129,6 +137,10 @@ export async function getAccountSummary(
     },
     quota: {
       period: state.period,
+      periodStart: state.periodStart.toISOString(),
+      periodEnd: state.periodEnd?.toISOString() ?? null,
+      paidUntil: state.paidUntil?.toISOString() ?? null,
+      expired: state.expired,
       unlimited: state.allowanceTenths == null,
       usedTenths: state.usedTenths,
       limitTenths: state.limitTenths,
@@ -137,6 +149,9 @@ export async function getAccountSummary(
       remainingTenths: state.remainingTenths,
       exhausted: state.exhausted,
     },
+    // Оплата тарифа, когда появится, должна быть доступна ТОЛЬКО при
+    // canManage (admin/root) и проверяться по роли из сессии на сервере;
+    // member платить за аккаунт не может ни при каких условиях.
     canManage: user.role === "root" || user.role === "admin",
     users: {
       active: seats?.activeUsers ?? 0,

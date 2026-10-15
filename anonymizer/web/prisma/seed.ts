@@ -38,10 +38,22 @@ async function main() {
       code: "trial",
       title: "Пробный",
       pagesPerMonth: TRIAL_PAGES_PER_MONTH,
-      maxUsers: 1,
+      maxUsers: 1, // пробный — один пользователь, приглашения недоступны
       priceKopecks: 0,
     },
   });
+
+  // Платные тарифы. Как и для остальных планов update: {} — цены и лимиты на
+  // живой базе правятся миграцией/вручную, повторный сид их не перетирает.
+  // Деньги — целые копейки; maxUsers: null = без ограничения числа пользователей.
+  const paidPlans = [
+    { code: "test", title: "Тест", pagesPerMonth: 500, maxUsers: 1, priceKopecks: 50_000, priceYearKopecks: 550_000 },
+    { code: "business", title: "Бизнес", pagesPerMonth: 5000, maxUsers: null, priceKopecks: 450_000, priceYearKopecks: 5_200_000 },
+    { code: "corporate", title: "Корпоратив", pagesPerMonth: 10000, maxUsers: null, priceKopecks: 800_000, priceYearKopecks: 9_200_000 },
+  ];
+  for (const p of paidPlans) {
+    await prisma.plan.upsert({ where: { code: p.code }, update: {}, create: p });
+  }
 
   const rootEmail = process.env.ROOT_EMAIL;
   const rootPassword = process.env.ROOT_PASSWORD;

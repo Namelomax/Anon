@@ -56,6 +56,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -161,6 +162,55 @@ _JOBS_LOCK = threading.Lock()
 _JOB_TTL_SECONDS = 10 * 60  # evict finished jobs after 10 minutes
 
 _TERMINAL_STATUSES = ("done", "error", "cancelled")
+
+# Heartbeat веб-задач: владелец (Next.js от имени вкладки) опрашивает статус
+# каждые 1-5 с (см. pollJob в web/app/page.tsx). Если задачу с владельцем
+# не опрашивали дольше этого срока, вкладку считаем закрытой и задачу
+# отменяем — иначе она дошла бы до конца и была бы списана, хотя результат
+# никто не заберёт. Значение обязано быть >> интервала опроса + времени
+# перезагрузки страницы (во время неё опроса нет), а фоновая вкладка браузера
+# может опрашивать раз в десятки секунд, а после ~5 мин скрытия в Chrome — раз
+# в минуту (intensive throttling); отсюда 180 с по умолчанию, а не 45. Задачи
+# без владельца (API-ключ) не отменяются никогда.
+def _heartbeat_seconds() -> float:
+    try:
+        v = float(os.getenv("ANONYMIZER_JOB_HEARTBEAT_SECONDS") or 180)
+    except ValueError:
+        return 180.0
+    return v if v > 0 else 180.0
+
+
+_JOB_HEARTBEAT_SECONDS = _heartbeat_seconds()
+
+
+class _JobCancelEvent(threading.Event):
+    """cancel-Event задачи, который сам замечает протухший heartbeat.
+
+    Детекторы (LLM/GLiNER) проверяют ``is_set()`` между чанками, поэтому
+    отдельный фоновый поток-сторож не нужен: проверка идёт «в полосе», ровно
+    там, где воркер всё равно спрашивает про отмену. Сработав, событие
+    ставится как при явном DELETE; воркер ловит ``Cancelled`` и сам выставляет
+    статус ``cancelled`` (гонки с завершением нет: терминальные задачи не
+    перезаписываются, см. _worker). Чтение ``job["last_seen"]`` без
+    блокировки безопасно — это атомарное присваивание float.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.job: dict | None = None
+
+    def is_set(self) -> bool:
+        if super().is_set():
+            return True
+        job = self.job
+        if (
+            job is not None
+            and job.get("owner") is not None
+            and time.monotonic() - job["last_seen"] > _JOB_HEARTBEAT_SECONDS
+        ):
+            self.set()
+            return True
+        return False
 
 # Источники, которым разрешён кросс-доменный доступ из браузера. По умолчанию
 # пусто: текущая архитектура кросс-доменных браузерных запросов не делает
@@ -446,8 +496,16 @@ def _compose(
     stages: dict,
     ner_threshold=None,
     cancel_event: threading.Event | None = None,
+    account_terms: tuple = (),
 ) -> Anonymizer:
     """Build an Anonymizer from the selected stages.
+
+    ``account_terms`` — записи личного словаря аккаунта (``GlossaryEntry``, см.
+    ``_parse_custom_terms``). Для них строится СВЕЖИЙ ``GlossaryDetector`` на
+    запрос, поверх общего файлового глоссария (оба действуют); общие
+    ``_DETECTORS`` не мутируются, так что термины одного аккаунта не видны
+    другим запросам. Работают независимо от флага стадии ``glossary``: это
+    явный выбор админа аккаунта «маскировать всегда».
 
     ``ner_threshold`` optionally overrides GLiNER's confidence threshold for this
     request (lower => higher recall / more catches). The model itself is cached,
@@ -543,6 +601,11 @@ def _compose(
             dets.append(base_llm_detector)
         else:
             dets.extend(_DETECTORS[name])
+
+    if account_terms:
+        from anonymizer.glossary import GlossaryDetector
+
+        dets.append(GlossaryDetector(account_terms))
 
     # Спецкатегории разрешены -> их спаны МАСКИРУЮТСЯ наравне с остальными ПДн
     # (иначе без отказа и без маски они прошли бы насквозь). Не зависит от
@@ -661,6 +724,62 @@ def _check_special_categories(text: str) -> None:
     )
 
 
+# Пределы личного словаря аккаунта (зеркало валидации в web/lib/glossary.ts).
+_TERMS_MAX_ENTRIES = 500
+_TERMS_MAX_ALIASES = 20
+_TERMS_MIN_ALIAS = 2
+_TERMS_MAX_ALIAS = 100
+_TERMS_MAX_CANONICAL = 200
+
+
+def _parse_custom_terms(raw) -> tuple:
+    """Проверить поле ``custom_terms`` и собрать ``GlossaryEntry``.
+
+    Ожидается список ``{aliases: [str, ...], canonical: str}``; ``None`` —
+    поля нет, словарь пуст. Любое нарушение формата/размеров -> ``_BadRequest``.
+    Термины конфиденциальны: в тексты ошибок попадает только позиция записи,
+    никогда не значение.
+    """
+    from anonymizer.glossary import GlossaryEntry
+
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise _BadRequest("custom_terms должен быть списком")
+    if len(raw) > _TERMS_MAX_ENTRIES:
+        raise _BadRequest(f"custom_terms: не более {_TERMS_MAX_ENTRIES} записей")
+    entries = []
+    for i, item in enumerate(raw, 1):
+        if not isinstance(item, dict):
+            raise _BadRequest(f"custom_terms[{i}]: запись должна быть объектом")
+        aliases = item.get("aliases")
+        if not isinstance(aliases, list) or not aliases:
+            raise _BadRequest(f"custom_terms[{i}]: aliases должен быть непустым списком")
+        if len(aliases) > _TERMS_MAX_ALIASES:
+            raise _BadRequest(f"custom_terms[{i}]: не более {_TERMS_MAX_ALIASES} вариантов написания")
+        clean = []
+        for a in aliases:
+            if not isinstance(a, str):
+                raise _BadRequest(f"custom_terms[{i}]: вариант написания должен быть строкой")
+            a = a.strip()
+            if not (_TERMS_MIN_ALIAS <= len(a) <= _TERMS_MAX_ALIAS):
+                raise _BadRequest(
+                    f"custom_terms[{i}]: вариант написания — от {_TERMS_MIN_ALIAS} "
+                    f"до {_TERMS_MAX_ALIAS} символов"
+                )
+            clean.append(a)
+        canonical = item.get("canonical")
+        if canonical is None:
+            canonical = clean[0]
+        if not isinstance(canonical, str):
+            raise _BadRequest(f"custom_terms[{i}]: canonical должен быть строкой")
+        canonical = canonical.strip() or clean[0]
+        if len(canonical) > _TERMS_MAX_CANONICAL:
+            raise _BadRequest(f"custom_terms[{i}]: canonical длиннее {_TERMS_MAX_CANONICAL} символов")
+        entries.append(GlossaryEntry(canonical=canonical, aliases=tuple(clean)))
+    return tuple(entries)
+
+
 def _coerce_id(value) -> int | None:
     """Лёгкая валидация ``account_id``/``user_id`` из тела запроса.
 
@@ -707,6 +826,7 @@ def _run_anonymize_text(data: dict, cancel_event: threading.Event | None = None)
     # Отклонённый документ не должен стоить пользователю ничего и не должен
     # ни при каких обстоятельствах достичь внешнего шлюза. См.
     # _check_special_categories.
+    account_terms = _parse_custom_terms(data.get("custom_terms"))
     _check_special_categories(text)
     stages = {k: data[k] for k in _STAGE_NAMES if k in data}
     used = {k: stages.get(k, _DEFAULTS.get(k, False)) for k in _STAGE_NAMES}
@@ -721,7 +841,10 @@ def _run_anonymize_text(data: dict, cancel_event: threading.Event | None = None)
         # contextvar сбрасывается, и снаружи вернулся бы None.
         req_id = usage_log.current_request_id()
         with _model_lock():  # only held for local (in-process) models; see _LOCK
-            anon = _compose(stages, data.get("ner_threshold"), cancel_event=cancel_event)
+            anon = _compose(
+                stages, data.get("ner_threshold"), cancel_event=cancel_event,
+                account_terms=account_terms,
+            )
             res = anon.anonymize(text)
     elapsed = time.time() - t0
 
@@ -792,6 +915,8 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
     account_id = _coerce_id(data.get("account_id"))
     user_id = _coerce_id(data.get("user_id"))
 
+    account_terms = _parse_custom_terms(data.get("custom_terms"))
+
     prepared, text = _prepared_source(filename, raw)
     # Шлюз спецкатегорий ПДн — СТРОГО до request_context: тот начинает
     # биллинг, а дальше по пайплайну текст уходит во внешние GLiNER/LLM.
@@ -807,7 +932,10 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
         # см. комментарий в _run_anonymize_text — request_id снимается внутри
         req_id = usage_log.current_request_id()
         with _model_lock():  # only held for local (in-process) models; see _LOCK
-            anon = _compose(stages, data.get("ner_threshold"), cancel_event=cancel_event)
+            anon = _compose(
+                stages, data.get("ner_threshold"), cancel_event=cancel_event,
+                account_terms=account_terms,
+            )
             res = anon.anonymize(text)
     elapsed = time.time() - t0
 
@@ -928,8 +1056,26 @@ class Handler(BaseHTTPRequestHandler):
             self._send(401, {"error": "unauthorized"})
         return principal
 
+    def _job_route(self) -> tuple[str, str, tuple[int | None, int | None]]:
+        """Разбор пути ``/jobs/<id>?account_id=..&user_id=..``.
+
+        Возвращает (путь без query, job_id или "", (account_id, user_id) вызывающего).
+        Личность вызывающего передаёт ТОЛЬКО доверенный Next.js-сервер (под ключом
+        бэкенда) query-параметрами; браузер сюда напрямую не ходит. Параметры
+        проходят тот же ``_coerce_id``, что и в теле submit: мусор = отсутствует.
+        """
+        parts = urlsplit(self.path)
+        path = parts.path.rstrip("/")
+        q = parse_qs(parts.query)
+        caller = (
+            _coerce_id((q.get("account_id") or [None])[0]),
+            _coerce_id((q.get("user_id") or [None])[0]),
+        )
+        job_id = path.rsplit("/jobs/", 1)[1] if "/jobs/" in path else ""
+        return path, job_id, caller
+
     def do_GET(self):
-        path = self.path.rstrip("/")
+        path = self.path.split("?", 1)[0].rstrip("/")
         if path.endswith("health") or self.path in ("/", ""):
             # /health обязан отвечать БЕЗ авторизации (мониторинг), но полный
             # _INFO (конфигурация бэкенда, модель, стадии) — только
@@ -950,8 +1096,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, usage_log.usage_summary())
                 return
             if "/jobs/" in path:
-                job_id = path.rsplit("/jobs/", 1)[1]
-                self._handle_job_status(job_id)
+                _p, job_id, caller = self._job_route()
+                self._handle_job_status(job_id, caller)
                 return
             self._send(404, {"error": "not found"})
 
@@ -963,10 +1109,10 @@ class Handler(BaseHTTPRequestHandler):
         if principal is None:
             return
         with depersonalization_log.actor_context(principal):
-            path = self.path.rstrip("/")
+            path = self.path.split("?", 1)[0].rstrip("/")
             if "/jobs/" in path:
-                job_id = path.rsplit("/jobs/", 1)[1]
-                self._handle_job_cancel(job_id)
+                _p, job_id, caller = self._job_route()
+                self._handle_job_cancel(job_id, caller)
                 return
             self._send(404, {"error": "not found"})
 
@@ -1039,14 +1185,28 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": f"invalid json: {exc}"})
             return
 
+        # Битый custom_terms — 400 сразу при постановке, а не ошибка задачи при опросе.
+        try:
+            _parse_custom_terms(data.get("custom_terms") if isinstance(data, dict) else None)
+        except _BadRequest as exc:
+            self._send(400, {"error": str(exc)})
+            return
+
         job_id = uuid.uuid4().hex
-        cancel_event = threading.Event()
+        cancel_event = _JobCancelEvent()
+        # Владелец задачи: user_id/account_id из тела submit (их ставит только
+        # доверенный Next.js). None — вызов по API-ключу/аноним: владение для
+        # такой задачи не проверяется (прежнее поведение).
+        owner_user = _coerce_id(data.get("user_id")) if isinstance(data, dict) else None
+        owner_account = _coerce_id(data.get("account_id")) if isinstance(data, dict) else None
+        owner = (owner_account, owner_user) if owner_user is not None else None
         with _JOBS_LOCK:
             _sweep_jobs()
             _JOBS[job_id] = {
                 "status": "pending", "result": None, "error": None, "created": time.time(),
-                "cancel": cancel_event,
+                "cancel": cancel_event, "owner": owner, "last_seen": time.monotonic(),
             }
+            cancel_event.job = _JOBS[job_id]
 
         def _worker():
             with _JOBS_LOCK:
@@ -1104,10 +1264,28 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self._send(500, {"error": str(exc)})
 
-    def _handle_job_status(self, job_id: str):
-        """GET /jobs/<job_id> -> {status, result, error}. Never touches _LOCK,
-        so polling is served concurrently with a running job (the server is
-        ThreadingHTTPServer)."""
+    @staticmethod
+    def _job_visible(job: dict | None, caller) -> dict | None:
+        """Задача, если вызывающий вправе её видеть, иначе None.
+
+        У задачи есть владелец -> user_id вызывающего обязан совпасть (нет
+        user_id в запросе = не совпал). Чужая задача неотличима от
+        несуществующей: вызывающий получает тот же 404 {"error": "unknown job"},
+        факт существования чужого job_id не раскрывается. Задача без владельца
+        (API-ключ/аноним) доступна как раньше. Вызывать под _JOBS_LOCK.
+        """
+        if job is None:
+            return None
+        owner = job.get("owner")
+        if owner is not None and owner[1] != caller[1]:
+            return None
+        return job
+
+    def _handle_job_status(self, job_id: str, caller=(None, None)):
+        """GET /jobs/<job_id>[?account_id=..&user_id=..] -> {status, result, error}.
+        Never touches _LOCK, so polling is served concurrently with a running
+        job (the server is ThreadingHTTPServer). Чужая задача -> 404, см.
+        _job_visible."""
         # Snapshot under the lock, then release it before writing the response:
         # a finished result carries the document as base64 (megabytes), and a
         # slow client would otherwise hold _JOBS_LOCK for the whole socket
@@ -1119,7 +1297,10 @@ class Handler(BaseHTTPRequestHandler):
             # памяти неограниченно долго — то есть фактический срок хранения не
             # совпадал с декларируемым. Приказ РКН № 140, п. 1.6.
             _sweep_jobs()
-            job = _JOBS.get(job_id)
+            job = self._job_visible(_JOBS.get(job_id), caller)
+            if job is not None:
+                # Heartbeat — только от владельца (прошедшего _job_visible).
+                job["last_seen"] = time.monotonic()
             payload = None if job is None else {
                 "status": job["status"],
                 "result": job["result"],
@@ -1151,7 +1332,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(200, payload)
 
-    def _handle_job_cancel(self, job_id: str):
+    def _handle_job_cancel(self, job_id: str, caller=(None, None)):
         """DELETE /jobs/<job_id> -> {"status": ...}. Cooperative cancellation:
         sets the job's cancel event so the worker's detectors stop between
         chunks (see Cancelled in anonymizer/llm.py) rather than killing the
@@ -1163,7 +1344,7 @@ class Handler(BaseHTTPRequestHandler):
         a finished job's result.
         """
         with _JOBS_LOCK:
-            job = _JOBS.get(job_id)
+            job = self._job_visible(_JOBS.get(job_id), caller)
             if job is None:
                 self._send(404, {"error": "unknown job"})
                 return
