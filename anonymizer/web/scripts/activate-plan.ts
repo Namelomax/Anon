@@ -12,7 +12,8 @@
  *
  * Что делает: planId = план, periodAnchorAt = сейчас, paidUntil = сейчас +
  * months календарных месяцев; добавляет аудиторскую строку QuotaGrant (pagesTenths=0,
- * reason «Оплата: …»), чтобы платежи были прослеживаемы.
+ * reason «Оплата: …»), чтобы платежи были прослеживаемы. Та же функция
+ * (lib/plan-activation.ts) включает тариф при онлайн-оплате через Т-Банк.
  *
  * «Год» = 12 календарных месяцев = та же дата через год; срок укладывается в
  * целое число окон квоты (см. lib/period.ts). В оферте должно быть то же самое
@@ -25,9 +26,7 @@
  * срока при этом сгорает; скрипт печатает предупреждение с числом дней.
  */
 import { PrismaClient } from "@prisma/client";
-import { addMonthsClamped } from "../lib/period";
-
-const DAY_MS = 24 * 60 * 60 * 1000;
+import { activatePlan } from "../lib/plan-activation";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -83,31 +82,21 @@ async function main() {
         : `[activate-plan] цена по тарифу за ${months} мес.: ${(priceKopecks / 100).toLocaleString("ru-RU")} ₽`,
     );
 
-    const now = new Date();
-    if (account.paidUntil && account.paidUntil.getTime() > now.getTime()) {
-      const left = Math.ceil((account.paidUntil.getTime() - now.getTime()) / DAY_MS);
+    const { periodAnchorAt: now, paidUntil, lostDays } = await prisma.$transaction((tx) =>
+      activatePlan(tx, {
+        accountId: account.id,
+        planId: plan.id,
+        planCode: plan.code,
+        months,
+        note,
+      }),
+    );
+    if (lostDays > 0) {
       console.warn(
         `[activate-plan] ВНИМАНИЕ: у аккаунта ${account.id} срок ещё не истёк ` +
-          `(до ${account.paidUntil.toISOString()}, осталось ${left} дн.). ` +
-          "Новый срок начинается сейчас, остаток старого сгорает.",
+          `(оставалось ${lostDays} дн.). Новый срок начался сейчас, остаток старого сгорел.`,
       );
     }
-
-    const paidUntil = addMonthsClamped(now, months);
-    await prisma.$transaction(async (tx) => {
-      await tx.account.update({
-        where: { id: account.id },
-        data: { planId: plan.id, periodAnchorAt: now, paidUntil },
-      });
-      await tx.quotaGrant.create({
-        data: {
-          accountId: account.id,
-          period: null,
-          pagesTenths: 0,
-          reason: `Оплата: ${plan.code} на ${months} мес. ${note}`.trim(),
-        },
-      });
-    });
 
     console.log(
       `[activate-plan] аккаунт ${account.id} (${account.name}): план ${plan.code}, ` +

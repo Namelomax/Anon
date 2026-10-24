@@ -80,6 +80,7 @@ model Account {
   quotaGrants   QuotaGrant[]
   invitations   Invitation[]
   glossaryTerms GlossaryTerm[]
+  payments      Payment[]
 
   @@map("accounts")
 }
@@ -116,6 +117,7 @@ model User {
   invitationsSent  Invitation[]  @relation("InvitationCreatedBy")
   invitationUsed   Invitation?   @relation("InvitationAcceptedBy")
   glossaryTerms    GlossaryTerm[]
+  payments         Payment[]
 
   @@map("users")
 }
@@ -325,4 +327,40 @@ model GlossaryTerm {
 
   @@index([accountId])
   @@map("glossary_terms")
+}
+
+/// Онлайн-оплата тарифа через интернет-эквайринг Т-Банка (lib/tbank.ts).
+///
+/// Строка заводится ДО обращения к банку (POST /api/billing/checkout): её id
+/// и есть OrderId, а сумма и тариф фиксируются здесь, а не берутся из
+/// уведомления — банк лишь подтверждает, что именно ЭТУ сумму оплатили.
+/// Тариф включается только по уведомлению CONFIRMED с верной подписью и
+/// совпавшей суммой (app/api/billing/notify/route.ts); `activatedAt` делает
+/// включение однократным — банк повторяет уведомления, пока не получит «OK».
+model Payment {
+  id              Int       @id @default(autoincrement())
+  /// OrderId в Т-Банке: уникален на каждую попытку оплаты (требование банка).
+  orderId         String    @unique @map("order_id")
+  accountId       Int       @map("account_id")
+  account         Account   @relation(fields: [accountId], references: [id])
+  userId          Int?      @map("user_id")
+  user            User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  planCode        String    @map("plan_code")
+  /// 1 или 12 — как в scripts/activate-plan.ts.
+  months          Int
+  amountKopecks   Int       @map("amount_kopecks")
+  /// Последний статус от банка: NEW, FORM_SHOWED, AUTHORIZED, CONFIRMED,
+  /// REJECTED, CANCELED, … ('INIT_FAILED' — Init не прошёл, банк платежа не знает).
+  status          String
+  /// PaymentId в Т-Банке; null, пока Init не ответил.
+  tbankPaymentId  String?   @map("tbank_payment_id")
+  paymentUrl      String?   @map("payment_url")
+  errorCode       String?   @map("error_code")
+  /// Момент включения тарифа по этому платежу; null — тариф ещё не включён.
+  activatedAt     DateTime? @map("activated_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@index([accountId])
+  @@map("payments")
 }

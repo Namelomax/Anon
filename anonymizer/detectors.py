@@ -355,6 +355,61 @@ PERSON_PATRONYMIC = RegexDetector(
     ignorecase=False,
 )
 
+# «Имя Фамилия-Фамилия» без отчества («Аглая Вельяминова-Черкасская»,
+# «Иннокентия Дубровина-Старшего»). NER такие ФИО то пропускает целиком, то
+# ловит одно имя, оставляя двойную фамилию открытой («[PERSON_1]
+# Фролов-Заречный»). Точность держится на форме первой части двойной фамилии:
+# -ов/-ев/-ин/-ын или -ский/-цкий в любом падеже — так не цепляются
+# «Санкт-Петербург», «Петропавловск-Камчатский», «Нью-Йорк». Географические и
+# служебные слова перед ней — не имя («Улица Римского-Корсакова»).
+_DOUBLE_SURNAME_FIRST = (
+    r"[А-ЯЁ][а-яё]+(?:"
+    r"(?:ов|ев|ёв|ин|ын)(?:ыми|ым|ом|ой|ых|а|у|е|ы)?"
+    r"|(?:ск|цк)(?:ого|ому|ими|ий|ая|ой|им|ую|их|ие)"
+    r")"
+)
+_NOT_GIVEN_NAME = (
+    r"(?:Улиц\w*|Проспект\w*|Переул\w*|Площад\w*|Бульвар\w*|Набережн\w*|Шоссе"
+    r"|Город\w*|Сел\w*|Станци\w*|Метро|Район\w*|Област\w*|Республик\w*|Имени"
+    r"|Музе\w*|Театр\w*|Институт\w*|Университет\w*|Фамили\w*|Семь\w*|Брат\w*"
+    r"|Сестр\w*|Дело|Компани\w*|Фонд\w*|Завод\w*|Премия|Орден\w*|Медал\w*"
+    r"|" + _NAME_STATUS[3:-1] + r")"
+)
+_DOUBLE_SURNAME_RE = re.compile(
+    r"(?<![\w-])(?!" + _NOT_GIVEN_NAME + r"\s)(?P<given>[А-ЯЁ][а-яё]{2,})[ \t]+"
+    r"(?P<surname>" + _DOUBLE_SURNAME_FIRST + r"-[А-ЯЁ][а-яё]{2,})(?![\w-])"
+)
+
+
+def _may_be_given_name(word: str) -> bool:
+    """Слово перед двойной фамилией — имя? Отсекает обычные слова в начале
+    предложения («Номер Сидоровой-Полевой сохранили»). Без словаря — True:
+    лишнее слово под маской лучше утёкшего имени. Незнакомое словарю слово
+    тоже считается именем (редких имён в OpenCorpora нет)."""
+    morph = _morph_vocab()
+    try:
+        parses = morph.parse(word)
+        if not any(p.is_known for p in parses):
+            return True
+        return any(g in p.tag for p in parses for g in _PROPER_NAME_GRAMMEMES)
+    except Exception:  # noqa: BLE001 - нет pymorphy (или это MorphVocab natasha)
+        return True
+
+
+class DoubleSurnameDetector:
+    """«Имя Фамилия-Фамилия»; имя входит в спан, только если похоже на имя."""
+
+    def find(self, text: str) -> list[Span]:
+        spans: list[Span] = []
+        for m in _DOUBLE_SURNAME_RE.finditer(text):
+            group = 0 if _may_be_given_name(m.group("given")) else "surname"
+            a, b = m.span(group)
+            spans.append(Span(a, b, "PERSON", text[a:b], source="regex"))
+        return spans
+
+
+PERSON_DOUBLE_SURNAME = DoubleSurnameDetector()
+
 
 class SeriesNumberDetector:
     """Detect "серия NN NN ... номер NNNNNN" runs and label by local context.
@@ -1024,6 +1079,7 @@ DEFAULT_DETECTORS: tuple[Detector, ...] = (
     MILITARY_SERIES,
     PERSON_INITIALS,
     PERSON_PATRONYMIC,
+    PERSON_DOUBLE_SURNAME,
     POSTAL,
     POSTAL_ADDR,
     HOUSE,
@@ -1878,15 +1934,26 @@ def propagate_declensions(text: str, spans: list[Span]) -> list[Span]:
         else:
             seeds = [val]
         for word in seeds:
-            if " " in word or len(word) < 5 or not word[0].isupper():
+            if " " in word or not word[0].isupper():
                 continue
-            stem = _decl_stem(word)
-            if len(stem) < 4:
-                continue
-            if s.label == "PERSON":
-                body = _person_decl_regex(word)
+            # Короткие имена на согласную («Ефим», «Глеб», «Олег») склоняются
+            # только от целого слова: «Ефима», «Ефимом». Основа «Ефи» слишком
+            # короткая, общий шаблон для них не строится.
+            if (
+                s.label == "PERSON" and len(word) == 4 and word.isalpha()
+                and word[-1].lower() not in _CYRILLIC_VOWELS and word[-1].lower() not in "йь"
+            ):
+                body = re.escape(word) + r"(?:" + suffix_alt + r")?"
             else:
-                body = re.escape(stem) + r"(?:" + suffix_alt + r")?"
+                if len(word) < 5:
+                    continue
+                stem = _decl_stem(word)
+                if len(stem) < 4:
+                    continue
+                if s.label == "PERSON":
+                    body = _person_decl_regex(word)
+                else:
+                    body = re.escape(stem) + r"(?:" + suffix_alt + r")?"
             key = (s.label, body.casefold())
             if key in seen_stems:
                 continue

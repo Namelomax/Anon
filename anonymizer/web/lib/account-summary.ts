@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { getQuotaState } from "@/lib/quota";
 import { getSeatUsage, pendingInvitationWhere } from "@/lib/invitations";
+import { tbankConfig } from "@/lib/tbank";
 
 /**
  * Сводка для личного кабинета: кто вошёл, на каком тарифе сидит его аккаунт,
@@ -51,6 +52,21 @@ export type AccountSummary = {
   };
   /** Роль вошедшего позволяет управлять составом аккаунта (см. routes). */
   canManage: boolean;
+  /**
+   * Онлайн-оплата: тарифы, которые можно купить (без служебных unlimited/trial).
+   * null — оплата не настроена (нет TBANK_*) или вошедший не может платить
+   * (member). Сама проверка роли — в /api/billing/checkout.
+   */
+  offers:
+    | {
+        code: string;
+        title: string;
+        pagesPerMonth: number | null;
+        maxUsers: number | null;
+        priceKopecks: number;
+        priceYearKopecks: number | null;
+      }[]
+    | null;
   users: {
     active: number;
     /** Plan.maxUsers; null — без ограничения. */
@@ -98,7 +114,8 @@ export async function getAccountSummary(
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) return null;
 
-  const [seats, members, invitations, totals, recent] = await Promise.all([
+  const canManage = user.role === "root" || user.role === "admin";
+  const [seats, members, invitations, totals, recent, offers] = await Promise.all([
     getSeatUsage(accountId),
     prisma.user.findMany({
       where: { accountId },
@@ -119,6 +136,12 @@ export async function getAccountSummary(
       take: RECENT_LIMIT,
       include: { user: { select: { email: true } } },
     }),
+    canManage && tbankConfig()
+      ? prisma.plan.findMany({
+          where: { code: { notIn: ["unlimited", "trial"] }, priceKopecks: { gt: 0 } },
+          orderBy: { priceKopecks: "asc" },
+        })
+      : Promise.resolve(null),
   ]);
 
   return {
@@ -149,10 +172,19 @@ export async function getAccountSummary(
       remainingTenths: state.remainingTenths,
       exhausted: state.exhausted,
     },
-    // Оплата тарифа, когда появится, должна быть доступна ТОЛЬКО при
-    // canManage (admin/root) и проверяться по роли из сессии на сервере;
+    // Оплата тарифа доступна ТОЛЬКО при canManage (admin/root) и
+    // проверяется по роли из сессии на сервере (/api/billing/checkout);
     // member платить за аккаунт не может ни при каких условиях.
-    canManage: user.role === "root" || user.role === "admin",
+    canManage,
+    offers:
+      offers?.map((p) => ({
+        code: p.code,
+        title: p.title,
+        pagesPerMonth: p.pagesPerMonth,
+        maxUsers: p.maxUsers,
+        priceKopecks: p.priceKopecks,
+        priceYearKopecks: p.priceYearKopecks,
+      })) ?? null,
     users: {
       active: seats?.activeUsers ?? 0,
       limit: state.account.plan.maxUsers,

@@ -61,6 +61,16 @@ type AccountSummary = {
     expired: boolean;
   };
   canManage: boolean;
+  offers:
+    | {
+        code: string;
+        title: string;
+        pagesPerMonth: number | null;
+        maxUsers: number | null;
+        priceKopecks: number;
+        priceYearKopecks: number | null;
+      }[]
+    | null;
   users: {
     active: number;
     limit: number | null;
@@ -591,6 +601,11 @@ export default function Home() {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [inviteCopied, setInviteCopied] = useState(false);
+  // Онлайн-оплата (Т-Банк, lib/tbank.ts). payKey — какая кнопка ждёт ответа
+  // checkout ("plan:months"); payReturn — человек вернулся с платёжной формы.
+  const [payKey, setPayKey] = useState<string | null>(null);
+  const [payError, setPayError] = useState<string | null>(null);
+  const [payReturn, setPayReturn] = useState<"success" | "fail" | null>(null);
   // Словарь терминов аккаунта («Мои термины»): список, формы добавления и
   // массового импорта. Значения терминов конфиденциальны — только в UI.
   const [glTerms, setGlTerms] = useState<GlossaryRow[]>([]);
@@ -711,6 +726,23 @@ export default function Home() {
   useEffect(() => {
     if (sessionStatus === "authenticated") void loadSummary();
   }, [sessionStatus, loadSummary]);
+
+  // Возврат с платёжной формы банка (SuccessURL/FailURL из checkout). Сам
+  // возврат тариф не включает — это делает уведомление банка, которое может
+  // прийти на секунды позже, поэтому сводку перечитываем ещё пару раз.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const p = params.get("payment");
+    if (p !== "success" && p !== "fail") return;
+    setPayReturn(p);
+    setTab("account");
+    params.delete("payment");
+    const rest = params.toString();
+    window.history.replaceState(null, "", window.location.pathname + (rest ? `?${rest}` : ""));
+    if (p !== "success") return;
+    const timers = [3000, 8000, 15000].map((ms) => window.setTimeout(() => void loadSummary(), ms));
+    return () => timers.forEach((t) => window.clearTimeout(t));
+  }, [loadSummary]);
 
   // Cancel the in-flight job when the tab is closed, reloaded, or navigated
   // away from. `pagehide` (not `beforeunload`) is used because it also fires
@@ -1069,6 +1101,26 @@ export default function Home() {
       setInviteError(e instanceof Error ? e.message : String(e));
     } finally {
       setInviteBusy(false);
+    }
+  };
+
+  const startPayment = async (plan: string, months: 1 | 12) => {
+    setPayKey(`${plan}:${months}`);
+    setPayError(null);
+    try {
+      const resp = await fetch("/api/billing/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan, months }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || typeof data?.url !== "string") {
+        throw new Error(data?.error || `HTTP ${resp.status}`);
+      }
+      window.location.href = data.url;
+    } catch (e: unknown) {
+      setPayError(e instanceof Error ? e.message : String(e));
+      setPayKey(null);
     }
   };
 
@@ -1806,6 +1858,88 @@ export default function Home() {
                           тарифа, а не складывается с ним.
                         </p>
                       )}
+                    {payReturn === "success" && (
+                      <p className="note" style={{ marginBottom: 0 }}>
+                        <CircleCheckBig size={16} className="inline-icon" />
+                        Оплата прошла. Тариф включается, как только банк подтвердит платёж, —
+                        обычно в течение минуты; страница обновится сама.
+                      </p>
+                    )}
+                    {payReturn === "fail" && (
+                      <div className="error" style={{ marginTop: 12 }}>
+                        Оплата не прошла или была отменена. Деньги не списаны — можно
+                        попробовать ещё раз.
+                      </div>
+                    )}
+                    {summary.offers && summary.offers.length > 0 && (
+                      <>
+                        <h3 style={{ marginBottom: 8 }}>
+                          {summary.plan.priceKopecks > 0 ? "Продлить или сменить тариф" : "Оплатить тариф"}
+                        </h3>
+                        <div className="scroll-tbl">
+                          <table className="map">
+                            <thead>
+                              <tr>
+                                <th>Тариф</th>
+                                <th>Страниц в месяц</th>
+                                <th>Пользователей</th>
+                                <th>Оплата</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {summary.offers.map((o) => (
+                                <tr key={o.code}>
+                                  <td>
+                                    {o.title}
+                                    {o.code === summary.plan.code && (
+                                      <span className="tag" style={{ marginLeft: 8 }}>текущий</span>
+                                    )}
+                                  </td>
+                                  <td>{o.pagesPerMonth?.toLocaleString("ru") ?? "∞"}</td>
+                                  <td>{o.maxUsers ?? "без ограничения"}</td>
+                                  <td>
+                                    <div className="row">
+                                      <button
+                                        className="ghost"
+                                        style={{ padding: "4px 10px", fontSize: 13 }}
+                                        disabled={payKey !== null}
+                                        onClick={() => startPayment(o.code, 1)}
+                                      >
+                                        {payKey === `${o.code}:1`
+                                          ? "Открываю…"
+                                          : `${rubles(o.priceKopecks)} ₽ / мес.`}
+                                      </button>
+                                      {o.priceYearKopecks != null && (
+                                        <button
+                                          className="ghost"
+                                          style={{ padding: "4px 10px", fontSize: 13 }}
+                                          disabled={payKey !== null}
+                                          onClick={() => startPayment(o.code, 12)}
+                                        >
+                                          {payKey === `${o.code}:12`
+                                            ? "Открываю…"
+                                            : `${rubles(o.priceYearKopecks)} ₽ / год`}
+                                        </button>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <p className="note" style={{ marginBottom: 0 }}>
+                          Оплата картой или через СБП на защищённой странице Т-Банка — данные
+                          карты сервису не передаются. Новый срок начинается с даты оплаты;
+                          неиспользованный остаток текущего срока не переносится.
+                        </p>
+                        {payError && (
+                          <div className="error" style={{ marginTop: 12 }}>
+                            {payError}
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
 
                   <div

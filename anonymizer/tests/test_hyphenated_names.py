@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from anonymizer.detectors import (  # noqa: E402
     DEFAULT_DETECTORS,
     EMAIL,
+    PERSON_DOUBLE_SURNAME,
     PERSON_PATRONYMIC,
     is_noise_span,
 )
@@ -124,6 +125,66 @@ def test_mapping_restores_original_text():
         [*DEFAULT_DETECTORS, _FixedNER("Ясмина Тараканова-Лунная", "Максимилиан Фролов-Заречный")]
     ).anonymize(text)
     assert deanonymize(res.anonymized_text, res.mapping) == text
+
+
+# --- «Имя Фамилия-Фамилия» без отчества (Test2.docx) ----------------------
+
+def test_double_surname_name_missed_by_ner_is_masked():
+    # NER не нашёл «Аглая Вельяминова-Черкасская» вовсе.
+    out = _anon("Первым шло имя Аглая Вельяминова-Черкасская. Рядом — телефон.")
+    assert "Аглая" not in out
+    assert "Вельяминов" not in out
+    assert "Черкасск" not in out
+
+
+def test_double_surname_after_ner_first_name_is_masked():
+    # NER поймал только «Максимилиан» — фамилия оставалась открытой.
+    out = _anon("в обложке Максимилиан Фролов-Заречный нашёл вчера", "Максимилиан")
+    assert "Фролов" not in out
+    assert "Заречн" not in out
+
+
+def test_double_surname_in_oblique_case():
+    assert [s.text for s in PERSON_DOUBLE_SURNAME.find("данные Иннокентия Дубровина-Старшего: тел.")] == [
+        "Иннокентия Дубровина-Старшего"
+    ]
+
+
+def test_double_surname_generic_for_other_names():
+    out = _anon(
+        "Пришёл Аркадий Сомов-Приречный. Фамилия Приречный — чужая. "
+        "Архив семьи Приречных. Звонила Злата Мещерская-Орлова."
+    )
+    for leaked in ("Аркадий", "Сомов", "Приречн", "Злата", "Мещерск", "Орлов"):
+        assert leaked not in out, leaked
+
+
+def test_double_surname_keeps_common_word_before_it():
+    from anonymizer.detectors import morph_gate_available
+
+    if not morph_gate_available():
+        import pytest
+
+        pytest.skip("нет pymorphy: без словаря слово перед фамилией маскируется")
+    out = _anon("Звонила Варвара. Номер Сидоровой-Полевой сохранили.")
+    assert "Номер" in out
+    assert "Сидоров" not in out
+
+
+def test_short_consonant_first_name_declensions_are_masked():
+    out = _anon("Ефим нашёл ключ. У Ефима дрожали руки. Ефимом гордились.", "Ефим")
+    assert "Ефим" not in out
+
+
+def test_double_surname_ignores_toponyms_and_street_names():
+    for text in (
+        "Город Петропавловск-Камчатский",
+        "поездка в Санкт-Петербург",
+        "Улица Римского-Корсакова, 5",
+        "Москва Нью-Йорк",
+        "Северная Осетия-Алания",
+    ):
+        assert PERSON_DOUBLE_SURNAME.find(text) == [], text
 
 
 # --- email не съедает следующее слово --------------------------------------
