@@ -53,20 +53,23 @@ export type AccountSummary = {
   /** Роль вошедшего позволяет управлять составом аккаунта (см. routes). */
   canManage: boolean;
   /**
-   * Онлайн-оплата: тарифы, которые можно купить (без служебных unlimited/trial).
-   * null — оплата не настроена (нет TBANK_*) или вошедший не может платить
-   * (member). Сама проверка роли — в /api/billing/checkout.
+   * Тарифы, которые продаются (без служебных unlimited/trial) — показываются
+   * всем, чтобы было видно, на что можно перейти.
    */
-  offers:
-    | {
-        code: string;
-        title: string;
-        pagesPerMonth: number | null;
-        maxUsers: number | null;
-        priceKopecks: number;
-        priceYearKopecks: number | null;
-      }[]
-    | null;
+  offers: {
+    code: string;
+    title: string;
+    pagesPerMonth: number | null;
+    maxUsers: number | null;
+    priceKopecks: number;
+    priceYearKopecks: number | null;
+  }[];
+  /**
+   * Почему нельзя оплатить из кабинета: 'role' — вошедший не admin/root,
+   * 'not_configured' — не заданы TBANK_* (lib/tbank.ts); null — можно.
+   * Сама проверка роли — в /api/billing/checkout.
+   */
+  payBlockedReason: "role" | "not_configured" | null;
   users: {
     active: number;
     /** Plan.maxUsers; null — без ограничения. */
@@ -136,12 +139,10 @@ export async function getAccountSummary(
       take: RECENT_LIMIT,
       include: { user: { select: { email: true } } },
     }),
-    canManage && tbankConfig()
-      ? prisma.plan.findMany({
-          where: { code: { notIn: ["unlimited", "trial"] }, priceKopecks: { gt: 0 } },
-          orderBy: { priceKopecks: "asc" },
-        })
-      : Promise.resolve(null),
+    prisma.plan.findMany({
+      where: { code: { notIn: ["unlimited", "trial"] }, priceKopecks: { gt: 0 } },
+      orderBy: { priceKopecks: "asc" },
+    }),
   ]);
 
   return {
@@ -176,15 +177,15 @@ export async function getAccountSummary(
     // проверяется по роли из сессии на сервере (/api/billing/checkout);
     // member платить за аккаунт не может ни при каких условиях.
     canManage,
-    offers:
-      offers?.map((p) => ({
-        code: p.code,
-        title: p.title,
-        pagesPerMonth: p.pagesPerMonth,
-        maxUsers: p.maxUsers,
-        priceKopecks: p.priceKopecks,
-        priceYearKopecks: p.priceYearKopecks,
-      })) ?? null,
+    offers: offers.map((p) => ({
+      code: p.code,
+      title: p.title,
+      pagesPerMonth: p.pagesPerMonth,
+      maxUsers: p.maxUsers,
+      priceKopecks: p.priceKopecks,
+      priceYearKopecks: p.priceYearKopecks,
+    })),
+    payBlockedReason: !canManage ? "role" : !tbankConfig() ? "not_configured" : null,
     users: {
       active: seats?.activeUsers ?? 0,
       limit: state.account.plan.maxUsers,

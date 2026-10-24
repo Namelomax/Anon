@@ -233,7 +233,10 @@ export default function InvitePage() {
         <div className="error" style={{ marginBottom: 16 }}>
           {jc.reason}
         </div>
-        <button className="ghost" type="button" onClick={() => signOut({ callbackUrl: here })}>
+        <button className="ghost" type="button" onClick={() =>
+            // Без серверного редиректа — см. выход в app/page.tsx.
+            void signOut({ redirect: false }).then(() => window.location.assign(here))
+          }>
           Выйти
         </button>
       </>,

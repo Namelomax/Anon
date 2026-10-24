@@ -61,16 +61,15 @@ type AccountSummary = {
     expired: boolean;
   };
   canManage: boolean;
-  offers:
-    | {
-        code: string;
-        title: string;
-        pagesPerMonth: number | null;
-        maxUsers: number | null;
-        priceKopecks: number;
-        priceYearKopecks: number | null;
-      }[]
-    | null;
+  offers: {
+    code: string;
+    title: string;
+    pagesPerMonth: number | null;
+    maxUsers: number | null;
+    priceKopecks: number;
+    priceYearKopecks: number | null;
+  }[];
+  payBlockedReason: "role" | "not_configured" | null;
   users: {
     active: number;
     limit: number | null;
@@ -1370,7 +1369,10 @@ export default function Home() {
                   // следующего в этой же вкладке.
                   clearCachedResult();
                   clearJob();
-                  void signOut({ callbackUrl: "/" });
+                  // Без серверного редиректа: за nginx Auth.js строит его из
+                  // внутреннего адреса (https://localhost:8010), если не задан
+                  // AUTH_URL. Относительный путь браузер разрешит сам.
+                  void signOut({ redirect: false }).then(() => window.location.assign("/"));
                 }}
               >
                 <LogOut size={16} />
@@ -1871,7 +1873,7 @@ export default function Home() {
                         попробовать ещё раз.
                       </div>
                     )}
-                    {summary.offers && summary.offers.length > 0 && (
+                    {summary.offers.length > 0 && (
                       <>
                         <h3 style={{ marginBottom: 8 }}>
                           {summary.plan.priceKopecks > 0 ? "Продлить или сменить тариф" : "Оплатить тариф"}
@@ -1902,7 +1904,7 @@ export default function Home() {
                                       <button
                                         className="ghost"
                                         style={{ padding: "4px 10px", fontSize: 13 }}
-                                        disabled={payKey !== null}
+                                        disabled={payKey !== null || summary.payBlockedReason !== null}
                                         onClick={() => startPayment(o.code, 1)}
                                       >
                                         {payKey === `${o.code}:1`
@@ -1913,7 +1915,7 @@ export default function Home() {
                                         <button
                                           className="ghost"
                                           style={{ padding: "4px 10px", fontSize: 13 }}
-                                          disabled={payKey !== null}
+                                          disabled={payKey !== null || summary.payBlockedReason !== null}
                                           onClick={() => startPayment(o.code, 12)}
                                         >
                                           {payKey === `${o.code}:12`
@@ -1928,6 +1930,17 @@ export default function Home() {
                             </tbody>
                           </table>
                         </div>
+                        {summary.payBlockedReason === "role" && (
+                          <p className="note" style={{ marginBottom: 0 }}>
+                            Оплатить или сменить тариф может администратор аккаунта.
+                          </p>
+                        )}
+                        {summary.payBlockedReason === "not_configured" && (
+                          <div className="error" style={{ marginTop: 12 }}>
+                            Онлайн-оплата пока не подключена. Чтобы оплатить тариф, обратитесь
+                            в поддержку сервиса.
+                          </div>
+                        )}
                         <p className="note" style={{ marginBottom: 0 }}>
                           Оплата картой или через СБП на защищённой странице Т-Банка — данные
                           карты сервису не передаются. Новый срок начинается с даты оплаты;
