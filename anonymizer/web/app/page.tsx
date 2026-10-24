@@ -1938,7 +1938,7 @@ export default function Home() {
                                     <td style={{ textAlign: "center" }}>
                                       <button
                                         className="ghost"
-                                        style={{ padding: "4px 10px", fontSize: 13, minWidth: 130 }}
+                                        style={{ padding: "4px 10px", fontSize: 13, minWidth: 130, justifyContent: "center" }}
                                         disabled={payKey !== null || summary.payBlockedReason !== null}
                                         onClick={() => startPayment(o.code, 1)}
                                       >
@@ -1952,18 +1952,20 @@ export default function Home() {
                                         <>
                                           <button
                                             className="ghost"
-                                            style={{ padding: "4px 10px", fontSize: 13, minWidth: 130 }}
+                                            style={{ padding: "4px 10px", fontSize: 13, minWidth: 130, justifyContent: "center" }}
                                             disabled={payKey !== null || summary.payBlockedReason !== null}
                                             onClick={() => startPayment(o.code, 12)}
                                           >
                                             {payKey === `${o.code}:12`
                                               ? "Открываю…"
-                                              : `${rubles(o.priceYearKopecks)} ₽ / год` +
-                                                (yearSaving > 0
-                                                  ? `; ${rubles(Math.round(o.priceYearKopecks / 12 / 100) * 100)} ₽ / мес. ` +
-                                                    `(скидка ${Math.round((yearSaving / (o.priceKopecks * 12)) * 100)}%)`
-                                                  : "")}
+                                              : `${rubles(o.priceYearKopecks)} ₽ / год`}
                                           </button>
+                                          {yearSaving > 0 && (
+                                            <div className="note" style={{ marginTop: 4, fontSize: 12 }}>
+                                              {rubles(Math.round(o.priceYearKopecks / 12 / 100) * 100)} ₽ / мес.
+                                              (скидка {Math.round((yearSaving / (o.priceKopecks * 12)) * 100)}%)
+                                            </div>
+                                          )}
                                         </>
                                       ) : (
                                         <span className="note">—</span>
