@@ -82,15 +82,13 @@ async function main() {
         : `[activate-plan] цена по тарифу за ${months} мес.: ${(priceKopecks / 100).toLocaleString("ru-RU")} ₽`,
     );
 
-    const { periodAnchorAt: now, paidUntil, lostDays } = await prisma.$transaction((tx) =>
-      activatePlan(tx, {
-        accountId: account.id,
-        planId: plan.id,
-        planCode: plan.code,
-        months,
-        note,
-      }),
-    );
+    const { periodAnchorAt: now, paidUntil, lostDays } = await activatePlan(prisma, {
+      accountId: account.id,
+      planId: plan.id,
+      planCode: plan.code,
+      months,
+      note,
+    });
     if (lostDays > 0) {
       console.warn(
         `[activate-plan] ВНИМАНИЕ: у аккаунта ${account.id} срок ещё не истёк ` +

@@ -358,6 +358,14 @@ model Payment {
   errorCode       String?   @map("error_code")
   /// Момент включения тарифа по этому платежу; null — тариф ещё не включён.
   activatedAt     DateTime? @map("activated_at")
+  /// Конец срока, который открыл этот платёж (Account.paidUntil на момент
+  /// включения). По нему полный возврат понимает, что срок ещё «его», и
+  /// закрывает доступ; если с тех пор была новая оплата — не трогает.
+  accessUntil     DateTime? @map("access_until")
+  /// Сколько возвращено покупателю, копейки. Считается по GetState (цена
+  /// минус остаток), а не по статусу: у СБП частичный возврат приходит со
+  /// статусом REFUNDED, а не PARTIAL_REFUNDED (проверено на DEMO-терминале).
+  refundedKopecks Int       @default(0) @map("refunded_kopecks")
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 

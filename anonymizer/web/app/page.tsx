@@ -70,6 +70,17 @@ type AccountSummary = {
     priceYearKopecks: number | null;
   }[];
   payBlockedReason: "role" | "not_configured" | null;
+  payments: {
+    orderId: string;
+    createdAt: string;
+    planTitle: string;
+    months: number;
+    amountKopecks: number;
+    refundedKopecks: number;
+    status: string;
+    activated: boolean;
+    accessUntil: string | null;
+  }[];
   users: {
     active: number;
     limit: number | null;
@@ -527,6 +538,23 @@ function quotaPeriodLabel(q: {
 }): string {
   if (!q.periodEnd) return periodLabel(q.period);
   return `период ${dateRu(q.periodStart)}–${dateRu(q.periodEnd)}`;
+}
+
+/** Человекочитаемое состояние онлайн-платежа (статусы Т-Банка, см. app/api/billing/notify). */
+function paymentStatusLabel(p: AccountSummary["payments"][number]): string {
+  if (p.refundedKopecks > 0) {
+    return p.refundedKopecks >= p.amountKopecks ? "Возвращён полностью" : "Частичный возврат";
+  }
+  if (p.activated) return "Оплачен";
+  if (p.status === "CONFIRMED") return "Оплачен, тариф включается";
+  if (p.status === "AMOUNT_MISMATCH") return "Сумма не совпала — обратитесь в поддержку";
+  if (["REJECTED", "AUTH_FAIL", "DEADLINE_EXPIRED", "CANCELED", "ATTEMPTS_EXPIRED"].includes(p.status)) {
+    return "Отклонён";
+  }
+  if (["REFUNDED", "PARTIAL_REFUNDED", "REVERSED", "PARTIAL_REVERSED"].includes(p.status)) {
+    return "Возвращён";
+  }
+  return "Не завершён";
 }
 
 /** Сообщение об истёкшем сроке — тот же текст, что отдаёт checkQuota (lib/quota.ts). */
@@ -1863,8 +1891,8 @@ export default function Home() {
                     {payReturn === "success" && (
                       <p className="note" style={{ marginBottom: 0 }}>
                         <CircleCheckBig size={16} className="inline-icon" />
-                        Оплата прошла. Тариф включается, как только банк подтвердит платёж, —
-                        обычно в течение минуты; страница обновится сама.
+                        Оплата прошла, тариф включён. Если цифры ниже ещё старые — страница
+                        обновится сама в течение нескольких секунд.
                       </p>
                     )}
                     {payReturn === "fail" && (
@@ -1878,6 +1906,9 @@ export default function Home() {
                         <h3 style={{ marginBottom: 8 }}>
                           {summary.plan.priceKopecks > 0 ? "Продлить или сменить тариф" : "Оплатить тариф"}
                         </h3>
+                        <p className="note" style={{ marginTop: 0 }}>
+                          Оплата сразу за год дешевле, чем 12 месяцев по отдельности.
+                        </p>
                         <div className="scroll-tbl">
                           <table className="map">
                             <thead>
@@ -1885,25 +1916,29 @@ export default function Home() {
                                 <th>Тариф</th>
                                 <th>Страниц в месяц</th>
                                 <th>Пользователей</th>
-                                <th>Оплата</th>
+                                <th>Оплата за месяц</th>
+                                <th>Оплата за год</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {summary.offers.map((o) => (
-                                <tr key={o.code}>
-                                  <td>
-                                    {o.title}
-                                    {o.code === summary.plan.code && (
-                                      <span className="tag" style={{ marginLeft: 8 }}>текущий</span>
-                                    )}
-                                  </td>
-                                  <td>{o.pagesPerMonth?.toLocaleString("ru") ?? "∞"}</td>
-                                  <td>{o.maxUsers ?? "без ограничения"}</td>
-                                  <td>
-                                    <div className="row">
+                              {summary.offers.map((o) => {
+                                // Выгода годовой оплаты против 12 месяцев по отдельности.
+                                const yearSaving =
+                                  o.priceYearKopecks != null ? o.priceKopecks * 12 - o.priceYearKopecks : 0;
+                                return (
+                                  <tr key={o.code}>
+                                    <td>
+                                      {o.title}
+                                      {o.code === summary.plan.code && (
+                                        <span className="tag" style={{ marginLeft: 8 }}>текущий</span>
+                                      )}
+                                    </td>
+                                    <td>{o.pagesPerMonth?.toLocaleString("ru") ?? "∞"}</td>
+                                    <td>{o.maxUsers ?? "без ограничения"}</td>
+                                    <td>
                                       <button
                                         className="ghost"
-                                        style={{ padding: "4px 10px", fontSize: 13 }}
+                                        style={{ padding: "4px 10px", fontSize: 13, minWidth: 130 }}
                                         disabled={payKey !== null || summary.payBlockedReason !== null}
                                         onClick={() => startPayment(o.code, 1)}
                                       >
@@ -1911,22 +1946,35 @@ export default function Home() {
                                           ? "Открываю…"
                                           : `${rubles(o.priceKopecks)} ₽ / мес.`}
                                       </button>
-                                      {o.priceYearKopecks != null && (
-                                        <button
-                                          className="ghost"
-                                          style={{ padding: "4px 10px", fontSize: 13 }}
-                                          disabled={payKey !== null || summary.payBlockedReason !== null}
-                                          onClick={() => startPayment(o.code, 12)}
-                                        >
-                                          {payKey === `${o.code}:12`
-                                            ? "Открываю…"
-                                            : `${rubles(o.priceYearKopecks)} ₽ / год`}
-                                        </button>
+                                    </td>
+                                    <td>
+                                      {o.priceYearKopecks != null ? (
+                                        <>
+                                          <button
+                                            className="ghost"
+                                            style={{ padding: "4px 10px", fontSize: 13, minWidth: 130 }}
+                                            disabled={payKey !== null || summary.payBlockedReason !== null}
+                                            onClick={() => startPayment(o.code, 12)}
+                                          >
+                                            {payKey === `${o.code}:12`
+                                              ? "Открываю…"
+                                              : `${rubles(o.priceYearKopecks)} ₽ / год`}
+                                          </button>
+                                          {yearSaving > 0 && (
+                                            <div className="note" style={{ marginTop: 4, fontSize: 12 }}>
+                                              выгода {rubles(yearSaving)} ₽ (
+                                              {Math.round((yearSaving / (o.priceKopecks * 12)) * 100)}%) ·{" "}
+                                              ≈ {rubles(Math.round(o.priceYearKopecks / 12 / 100) * 100)} ₽/мес.
+                                            </div>
+                                          )}
+                                        </>
+                                      ) : (
+                                        <span className="note">—</span>
                                       )}
-                                    </div>
-                                  </td>
-                                </tr>
-                              ))}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
                             </tbody>
                           </table>
                         </div>
@@ -1951,6 +1999,46 @@ export default function Home() {
                             {payError}
                           </div>
                         )}
+                      </>
+                    )}
+                    {summary.payments.length > 0 && (
+                      <>
+                        <h3 style={{ marginBottom: 8 }}>Платежи</h3>
+                        <div className="scroll-tbl">
+                          <table className="map">
+                            <thead>
+                              <tr>
+                                <th>Дата</th>
+                                <th>Тариф</th>
+                                <th>Сумма</th>
+                                <th>Возвращено</th>
+                                <th>Состояние</th>
+                                <th>Доступ до</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {summary.payments.map((p) => (
+                                <tr key={p.orderId}>
+                                  <td>{new Date(p.createdAt).toLocaleString("ru")}</td>
+                                  <td>
+                                    {p.planTitle}, {p.months === 12 ? "12 мес." : "1 мес."}
+                                  </td>
+                                  <td>{rubles(p.amountKopecks)} ₽</td>
+                                  <td>{p.refundedKopecks > 0 ? `${rubles(p.refundedKopecks)} ₽` : "—"}</td>
+                                  <td>{paymentStatusLabel(p)}</td>
+                                  <td>
+                                    {p.accessUntil && p.activated ? dateRu(p.accessUntil) : "—"}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <p className="note" style={{ marginBottom: 0 }}>
+                          Полный возврат закрывает доступ по этому платежу сразу; при частичном
+                          возврате доступ сохраняется до конца срока. «Доступ до» — срок, который
+                          открыл платёж; действующий срок аккаунта — в карточке «Квота».
+                        </p>
                       </>
                     )}
                   </div>

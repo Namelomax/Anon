@@ -140,7 +140,10 @@ export async function initPayment(cfg: TbankConfig, a: InitArgs): Promise<InitRe
     OrderId: a.orderId,
     // Лимит Description — 140 символов (меньший из лимитов для карты и СБП).
     Description: a.description.slice(0, 140),
-    PayType: "O",
+    // PayType не передаём: параметр, противоречащий настройкам терминала,
+    // срывает платёж. Терминал должен быть ОДНОСТАДИЙНЫМ (ЛК → Магазины →
+    // Прием оплаты → «После оплаты заказа»): тариф включается по CONFIRMED,
+    // а при двухстадийной оплате деньги лишь холдируются (AUTHORIZED).
     Language: "ru",
     SuccessURL: a.successUrl,
     FailURL: a.failUrl,
@@ -166,12 +169,24 @@ export async function initPayment(cfg: TbankConfig, a: InitArgs): Promise<InitRe
       ],
     };
   }
-  body.Token = makeToken(body, cfg.password);
+  return callMethod<InitResponse>(cfg, "Init", body);
+}
 
-  const { status, text } = await postJson(`${cfg.apiUrl}/Init`, JSON.stringify(body));
+/**
+ * Вызов метода API банка: подставляет TerminalKey и подпись Token. Вложенные
+ * объекты (DATA, Receipt) в подпись не входят — см. makeToken.
+ */
+export async function callMethod<T = Record<string, unknown>>(
+  cfg: TbankConfig,
+  method: string,
+  params: Record<string, unknown>,
+): Promise<T> {
+  const body: Record<string, unknown> = { ...params, TerminalKey: cfg.terminalKey };
+  body.Token = makeToken(body, cfg.password);
+  const { status, text } = await postJson(`${cfg.apiUrl}/${method}`, JSON.stringify(body));
   try {
-    return JSON.parse(text) as InitResponse;
+    return JSON.parse(text) as T;
   } catch {
-    throw new Error(`Т-Банк Init: HTTP ${status}, не JSON: ${text.slice(0, 200)}`);
+    throw new Error(`Т-Банк ${method}: HTTP ${status}, не JSON: ${text.slice(0, 200)}`);
   }
 }

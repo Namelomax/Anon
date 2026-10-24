@@ -19,6 +19,9 @@ import { tbankConfig } from "@/lib/tbank";
 /** Сколько последних документов показывать в истории кабинета. */
 const RECENT_LIMIT = 20;
 
+/** Сколько последних онлайн-платежей показывать в кабинете. */
+const PAYMENTS_LIMIT = 10;
+
 export type AccountSummary = {
   user: { email: string; role: string };
   account: { id: number; name: string; isActive: boolean };
@@ -70,6 +73,21 @@ export type AccountSummary = {
    * Сама проверка роли — в /api/billing/checkout.
    */
   payBlockedReason: "role" | "not_configured" | null;
+  /**
+   * Онлайн-платежи аккаунта, новые сверху (только для admin/root — суммы и
+   * возвраты видит тот, кто платит). Пустой массив для member.
+   */
+  payments: {
+    orderId: string;
+    createdAt: string;
+    planTitle: string;
+    months: number;
+    amountKopecks: number;
+    refundedKopecks: number;
+    status: string;
+    activated: boolean;
+    accessUntil: string | null;
+  }[];
   users: {
     active: number;
     /** Plan.maxUsers; null — без ограничения. */
@@ -118,7 +136,7 @@ export async function getAccountSummary(
   if (!user) return null;
 
   const canManage = user.role === "root" || user.role === "admin";
-  const [seats, members, invitations, totals, recent, offers] = await Promise.all([
+  const [seats, members, invitations, totals, recent, offers, payments, allPlans] = await Promise.all([
     getSeatUsage(accountId),
     prisma.user.findMany({
       where: { accountId },
@@ -143,7 +161,18 @@ export async function getAccountSummary(
       where: { code: { notIn: ["unlimited", "trial"] }, priceKopecks: { gt: 0 } },
       orderBy: { priceKopecks: "asc" },
     }),
+    canManage
+      ? prisma.payment.findMany({
+          // Только платежи, которые банк принял: неудачные Init банку
+          // неизвестны и в истории только путали бы.
+          where: { accountId, status: { not: "INIT_FAILED" } },
+          orderBy: { id: "desc" },
+          take: PAYMENTS_LIMIT,
+        })
+      : Promise.resolve([]),
+    prisma.plan.findMany({ select: { code: true, title: true } }),
   ]);
+  const planTitles = new Map(allPlans.map((p) => [p.code, p.title]));
 
   return {
     user: { email: user.email, role: user.role },
@@ -186,6 +215,17 @@ export async function getAccountSummary(
       priceYearKopecks: p.priceYearKopecks,
     })),
     payBlockedReason: !canManage ? "role" : !tbankConfig() ? "not_configured" : null,
+    payments: payments.map((p) => ({
+      orderId: p.orderId,
+      createdAt: p.createdAt.toISOString(),
+      planTitle: planTitles.get(p.planCode) ?? p.planCode,
+      months: p.months,
+      amountKopecks: p.amountKopecks,
+      refundedKopecks: p.refundedKopecks,
+      status: p.status,
+      activated: p.activatedAt != null,
+      accessUntil: p.accessUntil?.toISOString() ?? null,
+    })),
     users: {
       active: seats?.activeUsers ?? 0,
       limit: state.account.plan.maxUsers,

@@ -95,8 +95,10 @@ export async function POST(req: NextRequest) {
       description: `Тариф «${plan.title}», ${period}`,
       itemName: `Доступ к сервису, тариф «${plan.title}», ${period}`,
       email: user.email,
-      successUrl: `${origin}/?payment=success`,
-      failUrl: `${origin}/?payment=fail`,
+      // Возврат на страницу результата (app/payment/result): она ждёт
+      // уведомления банка и через 5 секунд уводит в кабинет.
+      successUrl: `${origin}/payment/result?order=${orderId}`,
+      failUrl: `${origin}/payment/result?order=${orderId}&fail=1`,
       notificationUrl: `${origin}/api/billing/notify`,
     });
     if (!res.Success || !res.PaymentURL) {
@@ -120,6 +122,10 @@ export async function POST(req: NextRequest) {
         paymentUrl: res.PaymentURL,
       },
     });
+    console.log(
+      `[billing] платёж создан: заказ ${orderId}, платёж ${res.PaymentId}, аккаунт ${accountId}, ` +
+        `${plan.code} на ${months} мес., ${amountKopecks} коп.`,
+    );
     return NextResponse.json({ url: res.PaymentURL });
   } catch (e) {
     await prisma.payment.update({ where: { id: payment.id }, data: { status: "INIT_FAILED" } });
