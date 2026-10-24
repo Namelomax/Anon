@@ -1916,8 +1916,8 @@ export default function Home() {
                                 <th>Тариф</th>
                                 <th>Страниц в месяц</th>
                                 <th>Пользователей</th>
-                                <th>Оплата за месяц</th>
-                                <th>Оплата за год</th>
+                                <th style={{ textAlign: "center" }}>Оплата за месяц</th>
+                                <th style={{ textAlign: "center" }}>Оплата за год</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -1935,7 +1935,7 @@ export default function Home() {
                                     </td>
                                     <td>{o.pagesPerMonth?.toLocaleString("ru") ?? "∞"}</td>
                                     <td>{o.maxUsers ?? "без ограничения"}</td>
-                                    <td>
+                                    <td style={{ textAlign: "center" }}>
                                       <button
                                         className="ghost"
                                         style={{ padding: "4px 10px", fontSize: 13, minWidth: 130 }}
@@ -1947,7 +1947,7 @@ export default function Home() {
                                           : `${rubles(o.priceKopecks)} ₽ / мес.`}
                                       </button>
                                     </td>
-                                    <td>
+                                    <td style={{ textAlign: "center" }}>
                                       {o.priceYearKopecks != null ? (
                                         <>
                                           <button
@@ -1958,15 +1958,12 @@ export default function Home() {
                                           >
                                             {payKey === `${o.code}:12`
                                               ? "Открываю…"
-                                              : `${rubles(o.priceYearKopecks)} ₽ / год`}
+                                              : `${rubles(o.priceYearKopecks)} ₽ / год` +
+                                                (yearSaving > 0
+                                                  ? `; ${rubles(Math.round(o.priceYearKopecks / 12 / 100) * 100)} ₽ / мес. ` +
+                                                    `(скидка ${Math.round((yearSaving / (o.priceKopecks * 12)) * 100)}%)`
+                                                  : "")}
                                           </button>
-                                          {yearSaving > 0 && (
-                                            <div className="note" style={{ marginTop: 4, fontSize: 12 }}>
-                                              выгода {rubles(yearSaving)} ₽ (
-                                              {Math.round((yearSaving / (o.priceKopecks * 12)) * 100)}%) ·{" "}
-                                              ≈ {rubles(Math.round(o.priceYearKopecks / 12 / 100) * 100)} ₽/мес.
-                                            </div>
-                                          )}
                                         </>
                                       ) : (
                                         <span className="note">—</span>
