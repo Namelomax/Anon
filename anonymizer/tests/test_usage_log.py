@@ -1036,3 +1036,19 @@ def test_request_total_outcome_error_and_exception_propagates():
             raise AssertionError("исключение должно пробрасываться")
         lines = _read_lines(log_path)
     assert len(lines) == 1 and lines[0]["outcome"] == "error"
+
+
+def test_log_file_is_owner_only_and_existing_file_is_narrowed():
+    # У-15: журнал создаётся с 0600, а заранее существующий 0644 сужается
+    # до 0600 при первой записи. Права POSIX на Windows не проверяются.
+    if sys.platform.startswith("win"):
+        return
+    import os
+    import stat
+    with _temp_log_path() as log_path, _patched_calls_mode("all"):
+        usage_log.record_call("gliner", seconds=0.1)
+        assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+        usage_log._PRIVATE_CHECKED.discard(str(log_path))
+        os.chmod(log_path, 0o644)
+        usage_log.record_call("gliner", seconds=0.1)
+        assert stat.S_IMODE(log_path.stat().st_mode) == 0o600

@@ -271,13 +271,31 @@ def _filename_ext(filename: str) -> str:
     return PurePosixPath(filename).suffix.lower()
 
 
+_PRIVATE_CHECKED: set[str] = set()
+
+
+def _ensure_private(path: Path) -> None:
+    """Журнал — только для владельца (угроза У-15): файл создаётся сразу с
+    правами 0600, а уже существующий с более широкими правами сужается до 0600.
+    Проверка — один раз на путь за время жизни процесса."""
+    key = str(path)
+    if key in _PRIVATE_CHECKED:
+        return
+    if not path.exists():
+        os.close(os.open(key, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600))
+    if os.name == "posix" and path.stat().st_mode & 0o077:
+        os.chmod(key, 0o600)
+    _PRIVATE_CHECKED.add(key)
+
+
 def _append(record: dict) -> None:
     """Дописать одну JSON-строку в лог. Никогда не бросает исключение — см.
     правило модуля."""
     try:
-        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LOG_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         line = json.dumps(record, ensure_ascii=False)
         with _LOCK:
+            _ensure_private(LOG_PATH)
             with LOG_PATH.open("a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
     except Exception as exc:  # noqa: BLE001

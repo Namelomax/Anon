@@ -411,12 +411,16 @@ def _harden_process() -> None:
     в обход всех прикладных мер. Заявление «мы ничего не пишем на диск» без
     этого вызова недостоверно: при аварийном завершении ядро запишет всё.
 
+    На Linux дополнительно снимается признак «dumpable» (prctl
+    PR_SET_DUMPABLE = 0): к процессу нельзя подключиться отладчиком (ptrace)
+    и нельзя прочитать его память через /proc/<pid>/mem даже от имени того же
+    пользователя — только root. Это мера по угрозе У-4.
+
     Ограничение: в CPython строки неизменяемы и копируются сборщиком, поэтому
     гарантированное затирание значений в памяти средствами языка недостижимо.
-    Остаточный риск (чтение памяти процесса, попадание страниц в swap)
-    устраняется не здесь, а мерами уровня ОС — отдельный пользователь,
-    отключённый swap либо шифрование раздела подкачки, запрет ptrace — и
-    подлежит фиксации в модели угроз как принятый.
+    Остаточный риск (попадание страниц в swap, доступ root) устраняется не
+    здесь, а мерами уровня ОС — отключённый swap либо шифрование раздела
+    подкачки (MemorySwapMax=0 в юните) — и фиксируется в модели угроз.
     """
     try:
         import resource
@@ -424,6 +428,16 @@ def _harden_process() -> None:
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     except Exception as exc:  # noqa: BLE001 — платформа без resource (Windows)
         print(f"[server] не удалось отключить core dump: {exc}", file=sys.stderr)
+    if sys.platform.startswith("linux"):
+        try:
+            import ctypes
+
+            PR_SET_DUMPABLE = 4
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+                raise OSError(ctypes.get_errno(), "prctl(PR_SET_DUMPABLE) failed")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[server] не удалось запретить отладку процесса: {exc}", file=sys.stderr)
 
 
 def _sweep_jobs() -> None:
