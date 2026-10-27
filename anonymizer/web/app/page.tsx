@@ -29,6 +29,7 @@ import {
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { LEGAL_DOCS } from "@/lib/legal";
 
 type StageKey = "regex" | "corporate" | "ner" | "llm" | "review" | "subject";
 
@@ -1069,7 +1070,7 @@ export default function Home() {
           }),
         });
       } else {
-        if (!deFile) throw new Error("Загрузите обезличенный документ.");
+        if (!deFile) throw new Error("Загрузите маскированный документ.");
         if (!deMapFile) throw new Error("Загрузите файл маппинга (.json).");
         const mappingText = await deMapFile.text();
         try {
@@ -1419,6 +1420,12 @@ export default function Home() {
               </Link>
             </>
           ) : null}
+          {/* Подвала на главном экране нет — документы здесь, как в claude.ai. */}
+          <div className="sidebar-legal">
+            <Link href={LEGAL_DOCS.offer.href}>Соглашение</Link>
+            <Link href={LEGAL_DOCS.privacy.href}>Конфиденциальность</Link>
+            <Link href="/legal">Правовая информация</Link>
+          </div>
         </div>
       </aside>
 
@@ -1444,7 +1451,7 @@ export default function Home() {
               <ShieldCheck size={24} />
               Анонимизатор персональных данных
             </h1>
-            <p>Загрузите документ — получите обезличенную версию и ключ восстановления (mapping).</p>
+            <p>Загрузите документ — получите маскированную версию и ключ восстановления (mapping).</p>
           </header>
 
           {tab === "anon" && (
@@ -1502,7 +1509,7 @@ export default function Home() {
                   ) : (
                     <>
                       <Lock size={18} />
-                      Обезличить
+                      Замаскировать
                     </>
                   )}
                 </button>
@@ -1540,7 +1547,7 @@ export default function Home() {
                       <div className="error" style={{ marginBottom: 14 }}>
                         <TriangleAlert size={16} className="inline-icon" />В файле уже было{" "}
                         {result.preexisting_placeholders} плейсхолдеров вида
-                        [PERSON_1] — похоже, это уже обезличенный документ. Они защищены и не
+                        [PERSON_1] — похоже, это уже маскированный документ. Они защищены и не
                         трогались повторно, но проверьте, не загрузили ли вы .anon-файл по ошибке.
                       </div>
                     )}
@@ -1696,7 +1703,7 @@ export default function Home() {
                     )}
                     <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
                       <TriangleAlert size={16} className="inline-icon" />
-                      Mapping — ключ восстановления. Храните его отдельно от обезличенного документа.
+                      Mapping — ключ восстановления. Храните его отдельно от маскированного документа.
                     </p>
                     <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
                       <Info size={16} className="inline-icon" />
@@ -1727,7 +1734,7 @@ export default function Home() {
                   </div>
 
                   <div className="card">
-                    <h2>Обезличенный текст</h2>
+                    <h2>Маскированный текст</h2>
                     <pre className="preview">{previewText}</pre>
                   </div>
 
@@ -1735,7 +1742,7 @@ export default function Home() {
                     <h2>Mapping ({entityCount})</h2>
                     {kept.size > 0 && (
                       <p className="note" style={{ marginTop: 0 }}>
-                        Возвращено в текст вручную: {kept.size}. Эти значения НЕ обезличены — они
+                        Возвращено в текст вручную: {kept.size}. Эти значения НЕ замаскированы — они
                         исключены из ключа и подставлены в документ. Нажмите «Вернуть», чтобы снова
                         скрыть.
                       </p>
@@ -2460,7 +2467,7 @@ export default function Home() {
                   </label>
                 ) : (
                   <p className="note">
-                    Последнего документа нет — загрузите обезличенный файл и маппинг вручную.
+                    Последнего документа нет — загрузите маскированный файл и маппинг вручную.
                   </p>
                 )}
               </div>
@@ -2474,7 +2481,7 @@ export default function Home() {
                       style={{ flex: 1, minWidth: 220 }}
                       onClick={() => deFileRef.current?.click()}
                     >
-                      <strong>Обезличенный документ</strong>
+                      <strong>Маскированный документ</strong>
                       <div className="note">тот формат, в котором его выдал сервис</div>
                       {deFile && (
                         <div className="file-name">

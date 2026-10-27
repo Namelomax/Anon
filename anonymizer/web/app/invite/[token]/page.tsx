@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { signOut } from "next-auth/react";
+import { LegalAcceptText } from "@/app/_components/LegalAccept";
+import { SiteFooter } from "@/app/_components/SiteFooter";
 
 // Должно совпадать с MIN_LENGTH в lib/password.ts — это только подсказка и
 // браузерная проверка, решает всё равно сервер.
@@ -165,11 +167,7 @@ export default function InvitePage() {
                 checked={consent}
                 onChange={(e) => setConsent(e.target.checked)}
               />
-              <span>
-                Я даю согласие на обработку персональных данных (email, хеш пароля, IP-адрес) в
-                соответствии с Политикой обработки персональных данных сервиса и принимаю условия
-                оказания услуг.
-              </span>
+              <LegalAcceptText />
             </label>
 
             {error && (
@@ -188,6 +186,7 @@ export default function InvitePage() {
           Уже есть доступ? <Link href="/login">Войти</Link>
         </p>
       </div>
+      <SiteFooter />
     </div>
   );
 
@@ -197,6 +196,7 @@ export default function InvitePage() {
         <h1>{title}</h1>
       </header>
       <div className="card">{children}</div>
+      <SiteFooter />
     </div>
   );
 

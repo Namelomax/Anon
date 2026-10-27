@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { LEGAL_ACCEPT_REQUIRED, LegalAcceptText } from "@/app/_components/LegalAccept";
+import { SiteFooter } from "@/app/_components/SiteFooter";
 
 // Дублирует минимальное правило из lib/password.ts (длина >= 10) — только
 // чтобы не заставлять пользователя ждать round-trip на сервер ради самой
@@ -26,7 +28,7 @@ export default function RegisterPage() {
     setError(null);
 
     if (!consent) {
-      setError("Отметьте согласие на обработку персональных данных — без него регистрация невозможна.");
+      setError(LEGAL_ACCEPT_REQUIRED);
       return;
     }
     if (password.length < MIN_PASSWORD_LENGTH) {
@@ -121,11 +123,7 @@ export default function RegisterPage() {
                 checked={consent}
                 onChange={(e) => setConsent(e.target.checked)}
               />
-              <span>
-                Я даю согласие на обработку персональных данных (email, хеш пароля, IP-адрес) в
-                соответствии с Политикой обработки персональных данных сервиса и принимаю условия
-                оказания услуг.
-              </span>
+              <LegalAcceptText />
             </label>
 
             {error && (
@@ -144,6 +142,7 @@ export default function RegisterPage() {
           Уже есть учётная запись? <Link href="/login">Войти</Link>
         </p>
       </div>
+      <SiteFooter />
     </div>
   );
 }

@@ -3,6 +3,7 @@ import { hash } from "@node-rs/argon2";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { addMonthsClamped } from "@/lib/period";
+import { LEGAL_DOCS_VERSION } from "@/lib/legal";
 import { isValidEmail, validatePasswordStrength } from "@/lib/password";
 
 export const runtime = "nodejs";
@@ -18,16 +19,6 @@ const TRIAL_PLAN_CODE = "trial";
 // значение напрямую.
 const ARGON2ID = 2; // @node-rs/argon2 Algorithm.Argon2id
 
-// Версия юридических документов (Политика/Оферта), под которой фиксируется
-// согласие при регистрации — см. Consent.documentVersion в schema.prisma.
-// Дефолт "1.0" — на случай локальной разработки без .env; на проде переменная
-// ДОЛЖНА обновляться при каждой правке
-// ЮРИДИЧЕСКИЕ_ДОКУМЕНТЫ/ГОТОВЫЕ_ДОКУМЕНТЫ/1_Политика_обработки_ПДн.md (или
-// аналогичного документа о ПДн пользователей сервиса), иначе Consent-запись
-// будет врать о том, что именно принял пользователь (см. раздел 9, пункт 2
-// правовой фиксации).
-const LEGAL_DOCS_VERSION = process.env.LEGAL_DOCS_VERSION || "1.0";
-
 /** x-forwarded-for может содержать цепочку "клиент, прокси1, прокси2" — нужен первый адрес. */
 function getClientIp(req: NextRequest): string | null {
   const xff = req.headers.get("x-forwarded-for");
@@ -36,14 +27,17 @@ function getClientIp(req: NextRequest): string | null {
 }
 
 /**
- * POST /api/register — самостоятельная регистрация: email + пароль + галочка
- * согласия на обработку ПДн.
+ * POST /api/register — самостоятельная регистрация: email + пароль + отметка
+ * о принятии оферты и ознакомлении с Политикой (app/_components/LegalAccept).
+ * Данные самого Пользователя обрабатываются на основании договора (п. 5 ч. 1
+ * ст. 6 152-ФЗ), поэтому фиксируется акцепт оферты, а не согласие на ПДн.
  *
  * Создаёт ОДНОЙ транзакцией Account (тариф trial) + User (role=admin — сам
  * себя зарегистрировавший пользователь владеет своим аккаунтом и в будущем
- * сможет заводить под-пользователей) + Consent (доказательная запись факта
- * согласия). Транзакция нужна, чтобы не оставить в БД "аккаунт без
- * согласия" при сбое на любом из шагов.
+ * сможет заводить под-пользователей) + Consent kind="offer" (доказательная
+ * запись акцепта: дата, IP, редакции оферты и Политики — LEGAL_DOCS_VERSION).
+ * Транзакция нужна, чтобы не оставить в БД "аккаунт без акцепта" при сбое на
+ * любом из шагов.
  */
 export async function POST(req: NextRequest) {
   let body: { email?: unknown; password?: unknown; consent?: unknown };
@@ -66,7 +60,7 @@ export async function POST(req: NextRequest) {
   }
   if (!consent) {
     return NextResponse.json(
-      { error: "Регистрация невозможна без согласия на обработку персональных данных." },
+      { error: "Регистрация невозможна без принятия условий оферты." },
       { status: 400 },
     );
   }
@@ -118,7 +112,7 @@ export async function POST(req: NextRequest) {
       await tx.consent.create({
         data: {
           userId: user.id,
-          kind: "pd_processing",
+          kind: "offer",
           documentVersion: LEGAL_DOCS_VERSION,
           ip,
           granted: true,

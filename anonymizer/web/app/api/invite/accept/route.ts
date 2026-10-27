@@ -3,6 +3,7 @@ import { hash } from "@node-rs/argon2";
 import { prisma } from "@/lib/db";
 import { validatePasswordStrength } from "@/lib/password";
 import { hashInviteToken } from "@/lib/invitations";
+import { LEGAL_DOCS_VERSION } from "@/lib/legal";
 
 export const runtime = "nodejs";
 
@@ -10,10 +11,6 @@ export const runtime = "nodejs";
 // (обязателен для Next.js) его нельзя импортировать типобезопасно, поэтому
 // числовое значение напрямую (тот же приём, что в /api/register и seed.ts).
 const ARGON2ID = 2; // Algorithm.Argon2id
-
-// Та же переменная, что в /api/register: редакция документов, под которой
-// фиксируется согласие (см. Consent.documentVersion в schema.prisma).
-const LEGAL_DOCS_VERSION = process.env.LEGAL_DOCS_VERSION || "1.0";
 
 function getClientIp(req: NextRequest): string | null {
   const xff = req.headers.get("x-forwarded-for");
@@ -23,10 +20,10 @@ function getClientIp(req: NextRequest): string | null {
 
 /**
  * POST /api/invite/accept — активация приглашения: приглашённый задаёт пароль
- * и САМ отмечает согласие на обработку ПДн.
+ * и САМ отмечает принятие оферты (как при регистрации, см. /api/register).
  *
- * Пользователь и запись согласия создаются здесь, а не в момент выписки
- * приглашения, и это принципиально: согласие даёт субъект, а не админ за
+ * Пользователь и запись акцепта создаются здесь, а не в момент выписки
+ * приглашения, и это принципиально: акцепт даёт сам пользователь, а не админ за
  * него (ЮРИДИЧЕСКИЕ_ДОКУМЕНТЫ/10_Авторизация_биллинг_и_учётные_данные.md,
  * раздел 2 — «форма принятия при активации приглашения»). Поэтому маршрут
  * открытый: у активирующего ещё нет учётной записи, войти ему нечем.
@@ -52,7 +49,7 @@ export async function POST(req: NextRequest) {
   }
   if (!consent) {
     return NextResponse.json(
-      { error: "Активация невозможна без согласия на обработку персональных данных." },
+      { error: "Активация невозможна без принятия условий оферты." },
       { status: 400 },
     );
   }
@@ -108,7 +105,7 @@ export async function POST(req: NextRequest) {
       await tx.consent.create({
         data: {
           userId: user.id,
-          kind: "pd_processing",
+          kind: "offer",
           documentVersion: LEGAL_DOCS_VERSION,
           ip,
           granted: true,

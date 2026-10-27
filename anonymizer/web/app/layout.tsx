@@ -4,7 +4,7 @@ import { Providers } from "./providers";
 
 export const metadata: Metadata = {
   title: "Анонимизатор ПДн",
-  description: "Загрузите документ — получите обезличенную версию и ключ восстановления.",
+  description: "Загрузите документ — получите маскированную версию и ключ восстановления.",
 };
 
 export default function RootLayout({

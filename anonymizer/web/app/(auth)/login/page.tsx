@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
+import { SiteFooter } from "@/app/_components/SiteFooter";
 
 function LoginForm() {
   const searchParams = useSearchParams();
@@ -98,6 +99,7 @@ export default function LoginPage() {
           Нет учётной записи? <Link href="/register">Зарегистрироваться</Link>
         </p>
       </div>
+      <SiteFooter />
     </div>
   );
 }

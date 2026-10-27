@@ -2,6 +2,7 @@
 
 import { CircleCheckBig, CircleX, LoaderCircle, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
+import { SiteFooter } from "@/app/_components/SiteFooter";
 
 /**
  * Возврат с платёжной формы Т-Банка (SuccessURL/FailURL из
@@ -160,6 +161,7 @@ export default function PaymentResultPage() {
           </p>
         )}
       </div>
+      <SiteFooter />
     </div>
   );
 }
