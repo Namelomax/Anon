@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ShieldCheck } from "lucide-react";
+import { ArrowLeft, ShieldCheck } from "lucide-react";
 import { SiteFooter } from "@/app/_components/SiteFooter";
 
 // Каркас раздела документов: узкая колонка для чтения, ссылка на сервис
@@ -12,9 +12,15 @@ export default function LegalLayout({ children }: { children: React.ReactNode })
           <ShieldCheck size={20} />
           Анонимизатор
         </Link>
-        <Link href="/legal" className="legal-top-link">
-          Правовая информация
-        </Link>
+        <nav className="legal-top-nav">
+          <Link href="/legal" className="legal-top-link">
+            Правовая информация
+          </Link>
+          <Link href="/" className="legal-top-link legal-top-home">
+            <ArrowLeft size={14} />
+            На главную
+          </Link>
+        </nav>
       </div>
       <main className="legal-main">{children}</main>
       <SiteFooter />

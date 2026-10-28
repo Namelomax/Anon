@@ -763,6 +763,20 @@ table.map code {
   font-size: 13px;
 }
 
+.legal-top-nav {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px 16px;
+}
+
+.legal-top-home {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .legal-title {
   margin: 0 0 20px;
   font-size: 26px;

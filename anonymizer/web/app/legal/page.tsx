@@ -5,7 +5,10 @@ import { LEGAL_DOCS, LICENSOR } from "@/lib/legal";
 
 export const dynamic = "force-static";
 
-export const metadata: Metadata = { title: "Правовая информация — Анонимизатор" };
+export const metadata: Metadata = {
+  title: "Правовая информация",
+  alternates: { canonical: "/legal" },
+};
 
 const DOCS = [
   {
