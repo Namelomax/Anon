@@ -10,9 +10,11 @@ import { RUSSIAN_TRUSTED_ROOT_CA } from "./tbank-ca";
  *
  * Поток: POST /api/billing/checkout заводит Payment и вызывает Init → браузер
  * уходит на PaymentURL → банк шлёт уведомление на NotificationURL
- * (/api/billing/notify) → на CONFIRMED тариф включается. SuccessURL — только
- * возврат человека в кабинет: тариф по нему НЕ включается, его может открыть
- * кто угодно.
+ * (/api/billing/notify) → на CONFIRMED тариф включается.
+ *
+ * SuccessURL/FailURL не передаём: результат оплаты покупатель видит на
+ * экране самой формы банка. Если адреса заданы в настройках терминала (ЛК →
+ * Магазины → Терминалы), банк возьмёт их оттуда.
  *
  * Тест: терминал с суффиксом DEMO работает на боевом адресе
  * securepay.tinkoff.ru и принимает только тестовые карты, например
@@ -117,8 +119,6 @@ export type InitArgs = {
   description: string;
   email: string;
   itemName: string;
-  successUrl: string;
-  failUrl: string;
   notificationUrl: string;
 };
 
@@ -145,8 +145,6 @@ export async function initPayment(cfg: TbankConfig, a: InitArgs): Promise<InitRe
     // Прием оплаты → «После оплаты заказа»): тариф включается по CONFIRMED,
     // а при двухстадийной оплате деньги лишь холдируются (AUTHORIZED).
     Language: "ru",
-    SuccessURL: a.successUrl,
-    FailURL: a.failUrl,
     NotificationURL: a.notificationUrl,
     DATA: { OperationInitiatorType: "0", Email: a.email },
   };

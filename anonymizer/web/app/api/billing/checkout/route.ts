@@ -95,10 +95,6 @@ export async function POST(req: NextRequest) {
       description: `Тариф «${plan.title}», ${period}`,
       itemName: `Доступ к сервису, тариф «${plan.title}», ${period}`,
       email: user.email,
-      // Возврат на страницу результата (app/payment/result): она ждёт
-      // уведомления банка и через 5 секунд уводит в кабинет.
-      successUrl: `${origin}/payment/result?order=${orderId}`,
-      failUrl: `${origin}/payment/result?order=${orderId}&fail=1`,
       notificationUrl: `${origin}/api/billing/notify`,
     });
     if (!res.Success || !res.PaymentURL) {

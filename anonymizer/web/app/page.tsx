@@ -630,10 +630,9 @@ export default function Home() {
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [inviteCopied, setInviteCopied] = useState(false);
   // Онлайн-оплата (Т-Банк, lib/tbank.ts). payKey — какая кнопка ждёт ответа
-  // checkout ("plan:months"); payReturn — человек вернулся с платёжной формы.
+  // checkout ("plan:months").
   const [payKey, setPayKey] = useState<string | null>(null);
   const [payError, setPayError] = useState<string | null>(null);
-  const [payReturn, setPayReturn] = useState<"success" | "fail" | null>(null);
   // Словарь терминов аккаунта («Мои термины»): список, формы добавления и
   // массового импорта. Значения терминов конфиденциальны — только в UI.
   const [glTerms, setGlTerms] = useState<GlossaryRow[]>([]);
@@ -754,23 +753,6 @@ export default function Home() {
   useEffect(() => {
     if (sessionStatus === "authenticated") void loadSummary();
   }, [sessionStatus, loadSummary]);
-
-  // Возврат с платёжной формы банка (SuccessURL/FailURL из checkout). Сам
-  // возврат тариф не включает — это делает уведомление банка, которое может
-  // прийти на секунды позже, поэтому сводку перечитываем ещё пару раз.
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const p = params.get("payment");
-    if (p !== "success" && p !== "fail") return;
-    setPayReturn(p);
-    setTab("account");
-    params.delete("payment");
-    const rest = params.toString();
-    window.history.replaceState(null, "", window.location.pathname + (rest ? `?${rest}` : ""));
-    if (p !== "success") return;
-    const timers = [3000, 8000, 15000].map((ms) => window.setTimeout(() => void loadSummary(), ms));
-    return () => timers.forEach((t) => window.clearTimeout(t));
-  }, [loadSummary]);
 
   // Cancel the in-flight job when the tab is closed, reloaded, or navigated
   // away from. `pagehide` (not `beforeunload`) is used because it also fires
@@ -1380,6 +1362,8 @@ export default function Home() {
               <Gauge size={16} />
               {summary.quota.unlimited ? (
                 <span>Квота: безлимит</span>
+              ) : summary.quota.expired ? (
+                <span>Срок тарифа истёк</span>
               ) : (
                 <span>
                   Осталось {pages(summary.quota.remainingTenths ?? 0)} из{" "}
@@ -1895,19 +1879,6 @@ export default function Home() {
                           тарифа, а не складывается с ним.
                         </p>
                       )}
-                    {payReturn === "success" && (
-                      <p className="note" style={{ marginBottom: 0 }}>
-                        <CircleCheckBig size={16} className="inline-icon" />
-                        Оплата прошла, тариф включён. Если цифры ниже ещё старые — страница
-                        обновится сама в течение нескольких секунд.
-                      </p>
-                    )}
-                    {payReturn === "fail" && (
-                      <div className="error" style={{ marginTop: 12 }}>
-                        Оплата не прошла или была отменена. Деньги не списаны — можно
-                        попробовать ещё раз.
-                      </div>
-                    )}
                     {summary.offers.length > 0 && (
                       <>
                         <h3 style={{ marginBottom: 8 }}>
@@ -2067,6 +2038,13 @@ export default function Home() {
                       <p className="note" style={{ marginTop: 0 }}>
                         Лимит не установлен. Израсходовано за период:{" "}
                         {pages(summary.quota.usedTenths)} стр.
+                      </p>
+                    ) : summary.quota.expired ? (
+                      // Страниц по истёкшему сроку нет — не показываем лимит,
+                      // который всё равно нельзя потратить.
+                      <p className="note" style={{ marginTop: 0 }}>
+                        Доступных страниц нет: срок тарифа закончился. Израсходовано за
+                        последний период: {pages(summary.quota.usedTenths)} стр.
                       </p>
                     ) : (
                       <>

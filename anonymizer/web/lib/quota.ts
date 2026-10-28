@@ -130,8 +130,14 @@ export async function getQuotaState(accountId: number): Promise<QuotaState | nul
     limitTenths,
     grantsTenths,
     allowanceTenths,
+    // Истёкший срок — остатка нет, сколько бы страниц ни было не израсходовано:
+    // загрузка всё равно закрыта (checkQuota), и кабинет не должен обещать обратное.
     remainingTenths:
-      allowanceTenths == null ? null : Math.max(0, allowanceTenths - counter.pagesUsedTenths),
+      allowanceTenths == null
+        ? null
+        : expired
+          ? 0
+          : Math.max(0, allowanceTenths - counter.pagesUsedTenths),
     exhausted: allowanceTenths != null && counter.pagesUsedTenths >= allowanceTenths,
   };
 }
