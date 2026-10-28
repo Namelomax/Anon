@@ -1114,7 +1114,27 @@ export default function Home() {
     }
   };
 
+  // Смена тарифа при действующем сроке открывает новый срок с даты оплаты,
+  // а остаток текущего (страницы и дни) сгорает — см. lib/plan-activation.ts.
+  // Тот же тариф продлевается, предупреждать не о чем.
+  const burnOnSwitch =
+    summary && !summary.quota.expired && summary.quota.paidUntil
+      ? { pagesTenths: summary.quota.remainingTenths ?? 0, until: summary.quota.paidUntil }
+      : null;
+
   const startPayment = async (plan: string, months: 1 | 12) => {
+    if (
+      burnOnSwitch &&
+      burnOnSwitch.pagesTenths > 0 &&
+      plan !== summary?.plan.code &&
+      !window.confirm(
+        `При смене тарифа сгорят оставшиеся ${pages(burnOnSwitch.pagesTenths)} стр. и остаток ` +
+          `текущего срока (до ${dateRu(burnOnSwitch.until)}). Новый тариф начнёт действовать ` +
+          "с даты оплаты.\n\nПродолжить?",
+      )
+    ) {
+      return;
+    }
     setPayKey(`${plan}:${months}`);
     setPayError(null);
     try {
@@ -1966,10 +1986,22 @@ export default function Home() {
                             в поддержку сервиса.
                           </div>
                         )}
+                        {burnOnSwitch && burnOnSwitch.pagesTenths > 0 && (
+                          <div className="card warn-card" style={{ marginTop: 12, marginBottom: 0 }}>
+                            <p className="note" style={{ margin: 0 }}>
+                              <TriangleAlert size={16} className="inline-icon" />
+                              При смене тарифа сгорят оставшиеся{" "}
+                              {pages(burnOnSwitch.pagesTenths)} стр. и остаток текущего срока
+                              (до {dateRu(burnOnSwitch.until)}): новый тариф начнёт действовать с
+                              даты оплаты.
+                            </p>
+                          </div>
+                        )}
                         <p className="note" style={{ marginBottom: 0 }}>
-                          Оплата картой или через СБП на защищённой странице Т-Банка — данные
-                          карты сервису не передаются. Новый срок начинается с даты оплаты;
-                          неиспользованный остаток текущего срока не переносится.
+                          Повторная оплата текущего тарифа продлевает срок на оплаченные месяцы:
+                          текущий месяц дорабатывается с остатком страниц, лимит обновляется в
+                          начале каждого следующего месяца. Оплата картой или через СБП на
+                          защищённой странице Т-Банка — данные карты сервису не передаются.
                         </p>
                         {payError && (
                           <div className="error" style={{ marginTop: 12 }}>
@@ -2012,9 +2044,10 @@ export default function Home() {
                           </table>
                         </div>
                         <p className="note" style={{ marginBottom: 0 }}>
-                          Полный возврат закрывает доступ по этому платежу сразу; при частичном
-                          возврате доступ сохраняется до конца срока. «Доступ до» — срок, который
-                          открыл платёж; действующий срок аккаунта — в карточке «Квота».
+                          Полный возврат сокращает срок на оплаченные этим платежом месяцы (если
+                          срок был один месяц — доступ закрывается сразу); при частичном возврате
+                          срок не меняется. «Доступ до» — срок на момент платежа; действующий срок
+                          аккаунта — в карточке «Квота».
                         </p>
                       </>
                     )}

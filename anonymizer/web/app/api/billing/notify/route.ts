@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { activatePlan } from "@/lib/plan-activation";
+import { activatePlan, monthsFromAnchor } from "@/lib/plan-activation";
+import { addMonthsClamped } from "@/lib/period";
 import { callMethod, tbankConfig, verifyToken } from "@/lib/tbank";
 
 export const runtime = "nodejs";
@@ -21,9 +22,9 @@ export const runtime = "nodejs";
  * уведомления или два одновременных не включат тариф дважды.
  *
  * Возврат: сумму берём из GetState (цена минус остаток), а не из статуса —
- * у СБП и частичный возврат приходит как REFUNDED. Полный возврат закрывает
- * доступ сразу, если срок этого платежа ещё действует; частичный доступ не
- * трогает, сумма лишь видна в кабинете.
+ * у СБП и частичный возврат приходит как REFUNDED. Полный возврат сокращает
+ * действующий срок на месяцы этого платежа (оплачен был один месяц — срок
+ * закрывается сразу); частичный срок не трогает, сумма лишь видна в кабинете.
  */
 
 /** Статусы, которые не должны перетирать уже подтверждённый платёж (уведомления приходят не по порядку). */
@@ -168,10 +169,14 @@ async function activate(paymentId: number, orderId: string, tbankPaymentId: stri
   }
   await prisma.payment.update({
     where: { id: payment.id },
-    data: { accessUntil: activated.paidUntil },
+    data: {
+      accessUntil: activated.paidUntil,
+      anchorAt: activated.periodAnchorAt,
+    },
   });
   console.log(
     `[billing/notify] аккаунт ${payment.accountId}: тариф ${plan.code} на ${payment.months} мес. ` +
+      (activated.mode === "extend" ? "(продление) " : "") +
       `до ${activated.paidUntil.toISOString()} (заказ ${orderId})` +
       (activated.lostDays > 0 ? `, сгорело ${activated.lostDays} дн. прежнего срока` : ""),
   );
@@ -203,33 +208,52 @@ async function applyRefund(paymentId: number, orderId: string) {
     `[billing/notify] заказ ${orderId}: возвращено ${refunded} из ${payment.amountKopecks} коп.` +
       (full ? " (полный возврат)" : " (частичный возврат, доступ не меняется)"),
   );
-  if (!full || !payment.activatedAt || !payment.accessUntil) return;
+  if (!full || !payment.activatedAt) return;
 
-  // Полный возврат закрывает доступ, только если срок аккаунта всё ещё тот,
-  // что открыл этот платёж: после новой оплаты чужой срок не трогаем.
+  // Полный возврат сокращает срок на месяцы этого платежа — неважно, первый
+  // он в цепочке продлений или последний: срок «от якоря» = сумма оплаченных
+  // месяцев. Трогаем только срок, в который платёж вошёл (тот же якорь): после
+  // смены тарифа срок уже другой, и старый платёж к нему отношения не имеет.
   const account = await prisma.account.findUniqueOrThrow({ where: { id: payment.accountId } });
   const now = new Date();
+  // Платежи, включённые до появления anchorAt, узнаём по совпадению конца срока.
+  const anchor =
+    payment.anchorAt ??
+    (payment.accessUntil && account.paidUntil?.getTime() === payment.accessUntil.getTime()
+      ? account.periodAnchorAt
+      : null);
+  const paidMonths =
+    anchor && account.paidUntil ? monthsFromAnchor(anchor, account.paidUntil) : null;
   if (
-    account.paidUntil &&
-    account.paidUntil.getTime() === payment.accessUntil.getTime() &&
-    account.paidUntil.getTime() > now.getTime()
+    anchor &&
+    paidMonths != null &&
+    account.periodAnchorAt?.getTime() === anchor.getTime() &&
+    account.paidUntil!.getTime() > now.getTime()
   ) {
+    const left = paidMonths - payment.months;
+    const shortened = left > 0 ? addMonthsClamped(anchor, left) : null;
+    const rollbackTo = shortened && shortened.getTime() > now.getTime() ? shortened : now;
+    const what =
+      rollbackTo === now
+        ? "доступ закрыт"
+        : `срок сокращён на ${payment.months} мес., до ${rollbackTo.toISOString()}`;
     await prisma.$transaction([
-      prisma.account.update({ where: { id: account.id }, data: { paidUntil: now } }),
+      prisma.account.update({ where: { id: account.id }, data: { paidUntil: rollbackTo } }),
       prisma.quotaGrant.create({
         data: {
           accountId: account.id,
           period: null,
           pagesTenths: 0,
-          reason: `Возврат: заказ ${orderId}, ${refunded} коп. — доступ закрыт`,
+          reason: `Возврат: заказ ${orderId}, ${refunded} коп. — ${what}`,
           externalPaymentId: payment.tbankPaymentId,
         },
       }),
     ]);
-    console.log(`[billing/notify] аккаунт ${account.id}: полный возврат по заказу ${orderId}, доступ закрыт`);
+    console.log(`[billing/notify] аккаунт ${account.id}: полный возврат по заказу ${orderId}, ${what}`);
   } else {
     console.warn(
-      `[billing/notify] заказ ${orderId}: полный возврат, но срок аккаунта ${account.id} уже другой — не трогаю`,
+      `[billing/notify] заказ ${orderId}: полный возврат, но срок аккаунта ${account.id} уже другой ` +
+        "(смена тарифа или срок истёк) — не трогаю",
     );
   }
 }

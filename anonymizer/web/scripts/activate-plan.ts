@@ -10,20 +10,20 @@
  * читает .env.local сам, а без DATABASE_URL Prisma не знает, какую БД
  * открывать (так же устроен deploy/update.sh).
  *
- * Что делает: planId = план, periodAnchorAt = сейчас, paidUntil = сейчас +
- * months календарных месяцев; добавляет аудиторскую строку QuotaGrant (pagesTenths=0,
- * reason «Оплата: …»), чтобы платежи были прослеживаемы. Та же функция
- * (lib/plan-activation.ts) включает тариф при онлайн-оплате через Т-Банк.
+ * Что делает — то же, что онлайн-оплата через Т-Банк (lib/plan-activation.ts):
+ * тот же тариф с действующим сроком ПРОДЛЕВАЕТСЯ (paidUntil + months, якорь
+ * квоты прежний); иначе открывается новый срок: periodAnchorAt = сейчас,
+ * paidUntil = сейчас + months. Плюс аудиторская строка QuotaGrant
+ * (pagesTenths=0, reason «Оплата: …»), чтобы платежи были прослеживаемы.
  *
  * «Год» = 12 календарных месяцев = та же дата через год; срок укладывается в
  * целое число окон квоты (см. lib/period.ts). В оферте должно быть то же самое
  * («один календарный месяц с даты оплаты»). Если дня нет в целевом месяце
  * (31-е), берётся последний день месяца, счёт всегда от даты оплаты.
  *
- * Если у аккаунта срок ещё не истёк, новый срок начинается СЕЙЧАС, а не
- * дописывается к старому: окна квоты привязаны к дате оплаты, и оплата —
- * это новая точка отсчёта (счётчик нового окна — с нуля). Остаток старого
- * срока при этом сгорает; скрипт печатает предупреждение с числом дней.
+ * При смене тарифа с неистёкшим сроком новый срок начинается СЕЙЧАС, а
+ * остаток старого срока и его страницы сгорают; скрипт печатает
+ * предупреждение с числом дней.
  */
 import { PrismaClient } from "@prisma/client";
 import { activatePlan } from "../lib/plan-activation";
@@ -82,7 +82,7 @@ async function main() {
         : `[activate-plan] цена по тарифу за ${months} мес.: ${(priceKopecks / 100).toLocaleString("ru-RU")} ₽`,
     );
 
-    const { periodAnchorAt: now, paidUntil, lostDays } = await activatePlan(prisma, {
+    const { mode, periodAnchorAt: anchor, paidUntil, lostDays } = await activatePlan(prisma, {
       accountId: account.id,
       planId: plan.id,
       planCode: plan.code,
@@ -92,13 +92,14 @@ async function main() {
     if (lostDays > 0) {
       console.warn(
         `[activate-plan] ВНИМАНИЕ: у аккаунта ${account.id} срок ещё не истёк ` +
-          `(оставалось ${lostDays} дн.). Новый срок начался сейчас, остаток старого сгорел.`,
+          `(оставалось ${lostDays} дн.). Тариф сменён: новый срок начался сейчас, остаток старого сгорел.`,
       );
     }
 
     console.log(
       `[activate-plan] аккаунт ${account.id} (${account.name}): план ${plan.code}, ` +
-        `срок ${now.toISOString()} .. ${paidUntil.toISOString()} (${months} мес.)`,
+        `${mode === "extend" ? "продлён, " : ""}срок ${anchor.toISOString()} .. ${paidUntil.toISOString()} ` +
+        `(+${months} мес.)`,
     );
   } finally {
     await prisma.$disconnect();

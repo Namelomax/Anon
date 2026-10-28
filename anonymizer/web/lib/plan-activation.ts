@@ -5,30 +5,52 @@ import { addMonthsClamped } from "./period";
  * Включение оплаченного тарифа — общее для ручной фиксации оплаты
  * (scripts/activate-plan.ts) и онлайн-оплаты (app/api/billing/notify).
  *
- * planId = план, periodAnchorAt = `now`, paidUntil = `now` + months календарных
- * месяцев; плюс аудиторская строка QuotaGrant (pagesTenths=0, reason «Оплата: …»),
- * чтобы платежи были прослеживаемы.
+ * Два режима:
  *
- * Если у аккаунта срок ещё не истёк, новый срок начинается СЕЙЧАС, а не
- * дописывается к старому: окна квоты привязаны к дате оплаты (lib/period.ts),
- * и оплата — это новая точка отсчёта. Остаток старого срока сгорает — число
- * сгоревших дней возвращается, чтобы вызывающий мог о нём сказать.
+ *  - ПРОДЛЕНИЕ — оплачен тот же тариф, что у аккаунта, и срок ещё идёт:
+ *    paidUntil сдвигается на `months` месяцев, periodAnchorAt НЕ меняется.
+ *    Окна квоты считаются от якоря (lib/period.ts), поэтому текущий месяц
+ *    дорабатывается со своим остатком, а лимит обновляется в начале каждого
+ *    следующего месяца — в том числе месяцев, добавленных продлением.
+ *
+ *  - НОВЫЙ СРОК — другой тариф, срок истёк или его не было:
+ *    periodAnchorAt = `now`, paidUntil = `now` + months. Остаток прежнего
+ *    срока и его неизрасходованные страницы сгорают (кабинет предупреждает
+ *    об этом перед оплатой); число сгоревших дней возвращается.
+ *
+ * Плюс аудиторская строка QuotaGrant (pagesTenths=0, reason «Оплата: …»),
+ * чтобы платежи были прослеживаемы.
  *
  * Обе записи — ПАКЕТНОЙ транзакцией ($transaction([...])), а не интерактивной:
  * у SQLite одна блокировка записи на всю базу, и интерактивная транзакция,
  * ждущая её за параллельной записью (банк шлёт AUTHORIZED и CONFIRMED
  * одновременно), упиралась в 5-секундный таймаут Prisma и откатывалась.
- * Пакет уходит в движок целиком и не держит транзакцию открытой между
- * запросами.
  */
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export type ActivationResult = {
+  mode: "extend" | "new";
   periodAnchorAt: Date;
   paidUntil: Date;
-  /** Сколько дней прежнего срока сгорело; 0 — срок уже истёк или его не было. */
+  /** Сколько дней прежнего срока сгорело; 0 — продление, срок истёк или его не было. */
   lostDays: number;
 };
+
+/**
+ * Сколько целых месяцев от якоря до `until`, если `until` ровно на границе
+ * окна (addMonthsClamped(anchor, n) === until); иначе null. Срок, обрезанный
+ * не по границе (например, полным возвратом), продлевать или сокращать «от
+ * якоря» нельзя. Нужна и возврату (app/api/billing/notify).
+ */
+export function monthsFromAnchor(anchor: Date, until: Date): number | null {
+  const n =
+    (until.getUTCFullYear() - anchor.getUTCFullYear()) * 12 +
+    (until.getUTCMonth() - anchor.getUTCMonth());
+  for (const k of [n, n - 1, n + 1]) {
+    if (k > 0 && addMonthsClamped(anchor, k).getTime() === until.getTime()) return k;
+  }
+  return null;
+}
 
 export async function activatePlan(
   db: PrismaClient,
@@ -44,26 +66,50 @@ export async function activatePlan(
 ): Promise<ActivationResult> {
   const now = args.now ?? new Date();
   const account = await db.account.findUniqueOrThrow({ where: { id: args.accountId } });
-  const lostDays =
-    account.paidUntil && account.paidUntil.getTime() > now.getTime()
-      ? Math.ceil((account.paidUntil.getTime() - now.getTime()) / DAY_MS)
-      : 0;
+  const active = account.paidUntil != null && account.paidUntil.getTime() > now.getTime();
 
-  const paidUntil = addMonthsClamped(now, args.months);
+  // Продление считаем от ЯКОРЯ (anchor + n + months), а не от paidUntil:
+  // цепочка от paidUntil накапливала бы сдвиг дня из-за клампа 31-го числа.
+  const paidMonths =
+    active && account.planId === args.planId && account.periodAnchorAt
+      ? monthsFromAnchor(account.periodAnchorAt, account.paidUntil!)
+      : null;
+
+  let result: ActivationResult;
+  if (paidMonths != null) {
+    const anchor = account.periodAnchorAt!;
+    result = {
+      mode: "extend",
+      periodAnchorAt: anchor,
+      paidUntil: addMonthsClamped(anchor, paidMonths + args.months),
+      lostDays: 0,
+    };
+  } else {
+    result = {
+      mode: "new",
+      periodAnchorAt: now,
+      paidUntil: addMonthsClamped(now, args.months),
+      lostDays: active ? Math.ceil((account.paidUntil!.getTime() - now.getTime()) / DAY_MS) : 0,
+    };
+  }
+
   await db.$transaction([
     db.account.update({
       where: { id: args.accountId },
-      data: { planId: args.planId, periodAnchorAt: now, paidUntil },
+      data: { planId: args.planId, periodAnchorAt: result.periodAnchorAt, paidUntil: result.paidUntil },
     }),
     db.quotaGrant.create({
       data: {
         accountId: args.accountId,
         period: null,
         pagesTenths: 0,
-        reason: `Оплата: ${args.planCode} на ${args.months} мес. ${args.note ?? ""}`.trim(),
+        reason:
+          `Оплата: ${args.planCode} на ${args.months} мес.` +
+          (result.mode === "extend" ? " (продление)" : "") +
+          ` ${args.note ?? ""}`.trimEnd(),
         externalPaymentId: args.externalPaymentId ?? null,
       },
     }),
   ]);
-  return { periodAnchorAt: now, paidUntil, lostDays };
+  return result;
 }
