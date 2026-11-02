@@ -6,6 +6,10 @@
 !/deploy/
 !/requirements.txt
 !/.gitignore
+!/AGENTS.md
+!/.codex/
+/.codex/*
+!/.codex/config.toml
 
 # Drop caches/outputs even inside tracked dirs.
 __pycache__/

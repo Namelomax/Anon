@@ -51,7 +51,7 @@ export async function POST(req: NextRequest) {
   const planCode = typeof body.plan === "string" ? body.plan : "";
   const months = body.months === 12 ? 12 : body.months === 1 ? 1 : null;
   if (!months) {
-    return NextResponse.json({ error: "Срок оплаты — 1 или 12 месяцев." }, { status: 400 });
+    return NextResponse.json({ error: "Срок оплаты - 1 или 12 месяцев." }, { status: 400 });
   }
 
   const plan = await prisma.plan.findUnique({ where: { code: planCode } });

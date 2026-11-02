@@ -37,12 +37,12 @@ export function parseTermInput(aliasesRaw: unknown, canonicalRaw?: unknown): Par
   if (aliases.some((a) => a.length < GLOSSARY_MIN_ALIAS || a.length > GLOSSARY_MAX_ALIAS)) {
     return {
       ok: false,
-      reason: `Каждый вариант — от ${GLOSSARY_MIN_ALIAS} до ${GLOSSARY_MAX_ALIAS} символов.`,
+      reason: `Каждый вариант - от ${GLOSSARY_MIN_ALIAS} до ${GLOSSARY_MAX_ALIAS} символов.`,
     };
   }
   const canonical = canonicalIn || aliases[0];
   if (canonical.length > GLOSSARY_MAX_CANONICAL) {
-    return { ok: false, reason: `Название в карте замен — не длиннее ${GLOSSARY_MAX_CANONICAL} символов.` };
+    return { ok: false, reason: `Название в карте замен - не длиннее ${GLOSSARY_MAX_CANONICAL} символов.` };
   }
   return { ok: true, term: { aliases, canonical } };
 }

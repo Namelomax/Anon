@@ -70,7 +70,7 @@ async function refreshUsage(): Promise<void> {
     await importUsageLog();
   } catch (err) {
     console.error(
-      "[quota] импорт биллингового лога не удался — использую то, что уже в счётчике:",
+      "[quota] импорт биллингового лога не удался - использую то, что уже в счётчике:",
       err,
     );
   }

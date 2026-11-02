@@ -1,0 +1,14 @@
+.card .glossary-textarea {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  color: var(--text);
+  font: inherit;
+}
+.card .glossary-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.payment-current { background: var(--panel-2); }
+.entity-summary { margin-top: 14px; }

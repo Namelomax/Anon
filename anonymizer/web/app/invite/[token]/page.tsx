@@ -125,7 +125,7 @@ export default function InvitePage() {
     <div className="wrap" style={{ maxWidth: 440 }}>
       <header>
         <h1>Активация приглашения</h1>
-        <p>Задайте пароль — и учётная запись в аккаунте будет создана.</p>
+        <p>Задайте пароль - и учётная запись в аккаунте будет создана.</p>
       </header>
 
       <div className="card">

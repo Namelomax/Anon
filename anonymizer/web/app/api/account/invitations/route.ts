@@ -128,7 +128,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json(
           {
             error:
-              `На тарифе «${created.planTitle}» работает один пользователь — приглашения недоступны. ` +
+              `На тарифе «${created.planTitle}» работает один пользователь - приглашения недоступны. ` +
               "Чтобы подключить сотрудников, перейдите на тариф «Бизнес» или «Корпоратив».",
           },
           { status: 402 },

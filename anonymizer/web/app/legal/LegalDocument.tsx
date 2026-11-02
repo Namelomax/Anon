@@ -15,7 +15,7 @@ export function LegalDocument({ file, pdf }: { file: string; pdf: string }) {
           Скачать PDF
         </a>
       </p>
-      <div dangerouslySetInnerHTML={{ __html: html }} />
+      <div dangerouslySetInnerHTML={{ __html: html.replaceAll("—", "-") }} />
     </article>
   );
 }

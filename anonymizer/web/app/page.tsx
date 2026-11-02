@@ -30,13 +30,15 @@ import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LEGAL_DOCS } from "@/lib/legal";
+import Landing from "./landing";
+import "./interface-tweaks.css";
 
 type StageKey = "regex" | "corporate" | "ner" | "llm" | "review" | "subject";
 
 type Tab = "anon" | "deanon" | "account";
 
 // Зеркало lib/account-summary.ts: страницы везде в ДЕСЯТЫХ долях (как в БД,
-// см. шапку prisma/schema.prisma — страницы и деньги только целыми).
+// см. шапку prisma/schema.prisma - страницы и деньги только целыми).
 type AccountSummary = {
   user: { email: string; role: string };
   account: { id: number; name: string; isActive: boolean };
@@ -135,9 +137,9 @@ type AnonResult = {
   document_base64: string;
   document_name: string;
   document_mime: string;
-  // Откуда взялся отдаваемый документ (см. server.py): "original" — из самого
-  // загруженного .docx, "converted" — .doc поднят до .docx через LibreOffice
-  // (разметка перенесена), "text" — документ собран заново из текста.
+  // Откуда взялся отдаваемый документ (см. server.py): "original" - из самого
+  // загруженного .docx, "converted" - .doc поднят до .docx через LibreOffice
+  // (разметка перенесена), "text" - документ собран заново из текста.
   document_source?: "original" | "converted" | "text";
 };
 
@@ -160,7 +162,7 @@ const STAGE_LABELS: Record<StageKey, string> = {
 };
 
 // Best-effort cancel of a background job. Used both from the `pagehide`
-// handler (with keepalive:true, so the request survives the page going away —
+// handler (with keepalive:true, so the request survives the page going away -
 // the browser's beacon API can't be used here since it only supports POST,
 // not DELETE) and when a new job replaces one still in flight. Fire-and-
 // forget: the caller doesn't need to wait for the backend to acknowledge.
@@ -173,19 +175,19 @@ function cancelJob(jobId: string, keepalive = false) {
 
 // Срок жизни результата во вкладке и окно, в которое задачу ещё можно забрать с
 // сервера. ОБЯЗАН совпадать с _JOB_TTL_SECONDS в anonymizer/server.py (10 минут):
-// короче — потеряем результат, который сервер ещё держит; длиннее — будем
+// короче - потеряем результат, который сервер ещё держит; длиннее - будем
 // ходить за задачей, которой там уже нет.
 const JOB_TTL_MS = 10 * 60 * 1000;
 
 // Пережить перезагрузку страницы. ТОЛЬКО sessionStorage (живёт, пока открыта
-// вкладка): ни localStorage, ни IndexedDB — результат содержит ключ
+// вкладка): ни localStorage, ни IndexedDB - результат содержит ключ
 // деанонимизации и не должен переживать вкладку. Содержимое результата не
 // логируется.
 // В обеих записях лежит userId сессии: запись чужого пользователя (или без
-// сессии) игнорируется и стирается — результат содержит ключ деанонимизации.
+// сессии) игнорируется и стирается - результат содержит ключ деанонимизации.
 const JOB_KEY = "anon.job.v1"; // {userId, jobId, fileName, startedAt}
 const RESULT_KEY = "anon.result.v1"; // {userId, savedAt, expiresAt, fileName, result}
-// Больше — не кэшируем (квота sessionStorage ~5 МБ на origin, а строка UTF-16).
+// Больше - не кэшируем (квота sessionStorage ~5 МБ на origin, а строка UTF-16).
 // Тогда после перезагрузки результат забирается опросом по jobId в окне TTL.
 const RESULT_CACHE_MAX_CHARS = 2_000_000;
 
@@ -194,7 +196,7 @@ const GONE_MESSAGE =
 
 type SavedJob = { userId: string; jobId: string; fileName: string; startedAt: number };
 
-// Любой доступ к хранилищу — в try/catch: в приватном режиме/при запрете
+// Любой доступ к хранилищу - в try/catch: в приватном режиме/при запрете
 // cookies sessionStorage бросает, и страница должна работать и без него.
 function readJob(userId: string | null): SavedJob | null {
   try {
@@ -264,13 +266,13 @@ function readCachedResult(
       return { fileName: typeof c.fileName === "string" ? c.fileName : "", result: c.result };
     }
   } catch {
-    /* битая запись — удалим ниже */
+    /* битая запись - удалим ниже */
   }
   clearCachedResult();
   return null;
 }
 
-// true — результат сохранён. Не влезло/квота/приватный режим — просто false.
+// true - результат сохранён. Не влезло/квота/приватный режим - просто false.
 function writeCachedResult(
   userId: string | null,
   fileName: string,
@@ -289,10 +291,10 @@ function writeCachedResult(
   }
 }
 
-// Бэкенд не знает задачу (истёк TTL, перезапуск, либо она чужая — для чужой
+// Бэкенд не знает задачу (истёк TTL, перезапуск, либо она чужая - для чужой
 // бэкенд намеренно отвечает так же).
 class JobGoneError extends Error {}
-// Связь пропала, но задача могла остаться жива — запись о ней не стираем.
+// Связь пропала, но задача могла остаться жива - запись о ней не стираем.
 class JobConnectionError extends Error {}
 
 function base64ToBuffer(b64: string): ArrayBuffer {
@@ -307,7 +309,7 @@ function base64ToBuffer(b64: string): ArrayBuffer {
  * {done:true}.
  *
  * Потолка по времени здесь СОЗНАТЕЛЬНО нет. Ждёт браузер, а он ничем не
- * ограничен — задача считается ровно столько, сколько нужно. Единичный сбой
+ * ограничен - задача считается ровно столько, сколько нужно. Единичный сбой
  * сети не хоронит задачу: она живёт на бэкенде независимо от того, доехал ли
  * конкретный GET, поэтому сдаёмся только после серии неудач подряд.
  */
@@ -342,11 +344,11 @@ async function pollJob(
     try {
       data = raw ? JSON.parse(raw) : null;
     } catch {
-      continue; // прокси вклинился HTML-заглушкой — спросим ещё раз
+      continue; // прокси вклинился HTML-заглушкой - спросим ещё раз
     }
     if (resp.status === 404) throw new JobGoneError(GONE_MESSAGE);
     if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-    // A cancelled job is not an error — someone (this tab on unload, or a new
+    // A cancelled job is not an error - someone (this tab on unload, or a new
     // job replacing it) asked the backend to stop it. Stop polling quietly.
     if (data?.cancelled) return { cancelled: true };
     if (data?.done) return data;
@@ -368,16 +370,16 @@ function labelOf(placeholder: string): string {
   return placeholder.replace(/^\[|\]$/g, "").replace(/_[^_]*$/, "");
 }
 
-// Человекочитаемые подписи для result.warnings[].kind — и для найденных, но
+// Человекочитаемые подписи для result.warnings[].kind - и для найденных, но
 // не скрытых значений (verify.py), и для сбоев отдельных слоёв проверки
 // (engine.py/gliner_remote.py/llm.py). Незнакомый (будущий) kind просто
-// показывается как есть — см. warningLabel.
+// показывается как есть - см. warningLabel.
 const WARNING_KIND_LABELS: Record<string, string> = {
   DIGITS: "Длинный номер",
   EMAIL: "Адрес эл. почты",
   // Вид называет СЛОЙ, который не отработал, а не «фрагмент не проверен»:
   // остальные слои этот же текст разобрали, и маскирование в нём чаще всего
-  // выполнено полностью — общая формулировка пугала там, где всё скрыто.
+  // выполнено полностью - общая формулировка пугала там, где всё скрыто.
   gliner_chunk_failed: "Фрагмент не проверен слоем GLiNER",
   llm_chunk_failed: "Фрагмент не проверен слоем LLM",
   recheck_chunk_failed: "Перепроверка фрагмента не завершена",
@@ -395,7 +397,7 @@ function warningLabel(kind: string): string {
 
 // Сбой ДОПОЛНИТЕЛЬНОЙ перепроверки (engine.py, recheck_chunk_failed): второй
 // проход по уже замаскированному тексту. Основные слои этот фрагмент
-// разобрали, маскирование выполнено — ниже обычного была только вероятность
+// разобрали, маскирование выполнено - ниже обычного была только вероятность
 // поймать пропущенное. Поэтому такие сообщения идут отдельной спокойной
 // карточкой, а не в жёлтой «проверена не полностью».
 const SOFT_WARNING_KINDS = new Set(["recheck_chunk_failed"]);
@@ -408,7 +410,7 @@ type FailedWarning = {
 };
 
 // Текст режется на куски по несколько тысяч символов, и при обрыве связи
-// подряд не отвечают сразу несколько — пять строк «символы X–Y» об одном и
+// подряд не отвечают сразу несколько - пять строк «символы X–Y» об одном и
 // том же сбое читать невозможно. Соприкасающиеся диапазоны одного вида
 // сливаем в один пункт, считая, сколько кусков в него вошло. Записи без
 // диапазона (сбой целого слоя, а не куска) не сливаются никогда.
@@ -437,7 +439,7 @@ function mergeChunkWarnings(items: FailedWarning[]): (FailedWarning & { count: n
   return out;
 }
 
-// «символы 12 400–13 200» — офсет/длина есть только у чанковых сбоев
+// «символы 12 400–13 200» - офсет/длина есть только у чанковых сбоев
 // (gliner_chunk_failed/llm_chunk_failed/recheck_chunk_failed), чтобы
 // показать, ГДЕ смотреть. Смещения всегда в координатах ИСХОДНОГО текста:
 // для второго прохода их переводит engine._interim_offset_translator.
@@ -448,7 +450,7 @@ function warningRange(offset?: number, chars?: number): string | null {
   return `символы ${start}–${end}`;
 }
 
-// Список сбоев слоёв — одинаковый в обеих карточках (жёсткой и мягкой),
+// Список сбоев слоёв - одинаковый в обеих карточках (жёсткой и мягкой),
 // различаются только заголовок и пояснение вокруг него.
 function WarningList({ items }: { items: (FailedWarning & { count: number })[] }) {
   return (
@@ -477,7 +479,7 @@ function WarningList({ items }: { items: (FailedWarning & { count: number })[] }
 
 // Полный список форматов живёт в меню, а не в зоне загрузки: там он занимал
 // три строки и забивал собой главное действие. Сгруппирован по тому, что
-// пользователь получит на выходе (политика — documents.prepare_document).
+// пользователь получит на выходе (политика - documents.prepare_document).
 const FORMAT_GROUPS: { title: string; items: string }[] = [
   {
     title: "Возвращаются в своём формате",
@@ -498,6 +500,38 @@ const ROLE_LABELS: Record<string, string> = {
   admin: "Администратор аккаунта",
   member: "Пользователь",
 };
+
+const ENTITY_LABELS: Record<string, string> = {
+  PERSON: "ФИО", FIRST_NAME: "Имя", LAST_NAME: "Фамилия", MIDDLE_NAME: "Отчество",
+  PHONE: "Телефон", EMAIL: "Электронная почта", ADDRESS: "Адрес", LOCATION: "Местоположение",
+  CITY: "Город", REGION: "Регион", COUNTRY: "Страна", STREET: "Улица", HOUSE: "Дом",
+  DATE: "Дата", PASSPORT: "Паспорт", ZAGRANPASSPORT: "Загранпаспорт", SNILS: "СНИЛС",
+  INN: "ИНН", OMS: "Полис ОМС", DRIVER_LICENSE: "Водительское удостоверение",
+  BIRTH_CERTIFICATE: "Свидетельство о рождении", MILITARY_ID: "Военный билет",
+  ORG: "Организация", BANK: "Банк", BANK_ACCOUNT: "Банковский счёт", ACCOUNT: "Счёт",
+  BIK: "БИК", KPP: "КПП", OGRN: "ОГРН", CREDIT_CARD: "Банковская карта",
+  IP_ADDRESS: "IP-адрес", URL: "Ссылка", POSTAL_CODE: "Почтовый индекс",
+  CADASTRE: "Кадастровый номер", CONTRACT: "Договор", AMOUNT: "Сумма",
+  VIN: "VIN", PLATE: "Номер автомобиля", MEDICAL: "Медицинские данные",
+  BIOMETRIC: "Биометрические данные", CUSTOM_TERM: "Термин пользователя",
+  STAFF_ID: "Табельный номер", ADMIN_CODE: "Служебный код",
+  CRIMINAL_RECORD: "Сведения о судимости", ETHNICITY: "Национальность",
+  FILE: "Файл", INTIMATE: "Сведения об интимной жизни", POLITICAL: "Политические взгляды",
+  RELIGION: "Религиозные убеждения", SUBJECT: "Субъект", OKATO: "ОКАТО", OKPO: "ОКПО",
+  OKTMO: "ОКТМО", OKVED: "ОКВЭД",
+};
+
+function paymentStatusLabel(p: AccountSummary["payments"][number]): string {
+  if (p.refundedKopecks > 0) {
+    return p.refundedKopecks >= p.amountKopecks ? "Возвращён полностью" : "Частичный возврат";
+  }
+  if (p.activated) return "Оплачен";
+  if (p.status === "CONFIRMED") return "Оплачен, тариф включается";
+  if (p.status === "AMOUNT_MISMATCH") return "Сумма не совпала - обратитесь в поддержку";
+  if (["REJECTED", "AUTH_FAIL", "DEADLINE_EXPIRED", "CANCELED", "ATTEMPTS_EXPIRED"].includes(p.status)) return "Отклонён";
+  if (["REFUNDED", "PARTIAL_REFUNDED", "REVERSED", "PARTIAL_REVERSED"].includes(p.status)) return "Возвращён";
+  return "Не завершён";
+}
 
 /** Десятые доли страницы -> «12,4». */
 function pages(tenths: number): string {
@@ -531,7 +565,7 @@ function dateRu(iso: string): string {
   });
 }
 
-/** Подпись периода квоты: «период дд.мм.гггг–дд.мм.гггг», у аккаунта без срока — месяц. */
+/** Подпись периода квоты: «период дд.мм.гггг–дд.мм.гггг», у аккаунта без срока - месяц. */
 function quotaPeriodLabel(q: {
   period: string;
   periodStart: string;
@@ -541,24 +575,7 @@ function quotaPeriodLabel(q: {
   return `период ${dateRu(q.periodStart)}–${dateRu(q.periodEnd)}`;
 }
 
-/** Человекочитаемое состояние онлайн-платежа (статусы Т-Банка, см. app/api/billing/notify). */
-function paymentStatusLabel(p: AccountSummary["payments"][number]): string {
-  if (p.refundedKopecks > 0) {
-    return p.refundedKopecks >= p.amountKopecks ? "Возвращён полностью" : "Частичный возврат";
-  }
-  if (p.activated) return "Оплачен";
-  if (p.status === "CONFIRMED") return "Оплачен, тариф включается";
-  if (p.status === "AMOUNT_MISMATCH") return "Сумма не совпала — обратитесь в поддержку";
-  if (["REJECTED", "AUTH_FAIL", "DEADLINE_EXPIRED", "CANCELED", "ATTEMPTS_EXPIRED"].includes(p.status)) {
-    return "Отклонён";
-  }
-  if (["REFUNDED", "PARTIAL_REFUNDED", "REVERSED", "PARTIAL_REVERSED"].includes(p.status)) {
-    return "Возвращён";
-  }
-  return "Не завершён";
-}
-
-/** Сообщение об истёкшем сроке — тот же текст, что отдаёт checkQuota (lib/quota.ts). */
+/** Сообщение об истёкшем сроке - тот же текст, что отдаёт checkQuota (lib/quota.ts). */
 function expiredMessage(planCode: string, paidUntil: string): string {
   return planCode === "trial"
     ? `Пробный период закончился ${dateRu(paidUntil)}. Чтобы продолжить, оплатите тариф.`
@@ -575,7 +592,7 @@ const PLAIN_EXT = new Set([".txt", ".csv", ".md", ".log", ".json"]);
 
 // Что сказать про формат результата. Молчим, когда говорить нечего: формат
 // тот же и разметка на месте. Смена расширения без пояснения выглядит как
-// ошибка, а потерянная разметка — тем более, поэтому оба случая называются
+// ошибка, а потерянная разметка - тем более, поэтому оба случая называются
 // вслух (document_source приходит с сервера, см. server._run_anonymize_file).
 function formatNote(result: AnonResult): string | null {
   const from = extOf(result.filename);
@@ -585,7 +602,7 @@ function formatNote(result: AnonResult): string | null {
   if (to === ".txt") {
     return `Из ${from} можно отдать только текст: переписать такой файл, не развалив вёрстку, нечем. Результат сохранён как .txt.`;
   }
-  const head = from === to ? "" : `Исходный ${from} сохранён как ${to} — записать ${from} обратно нечем. `;
+  const head = from === to ? "" : `Исходный ${from} сохранён как ${to} - записать ${from} обратно нечем. `;
   return layoutLost
     ? `${head}Разметку перенести не удалось: на сервере нет конвертера LibreOffice, поэтому в документе только текст по абзацам.`
     : `${head}Разметка документа перенесена.`;
@@ -603,23 +620,24 @@ function deanonClient(text: string, m: Record<string, string>): string {
 type GlossaryRow = { id: number; aliases: string; canonical: string };
 
 export default function Home() {
-  // Только отображение личности/выход — проверка прав и квоты в этой задаче
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  // Только отображение личности/выход - проверка прав и квоты в этой задаче
   // сознательно не делается (см. спеку: "не строить проверки квоты в этой
   // задаче"), поэтому статус сессии здесь ни на что не влияет, кроме шапки.
   const { data: session, status: sessionStatus } = useSession();
-  // Id пользователя сессии — привязка sessionStorage-кэша к человеку. В ref,
+  // Id пользователя сессии - привязка sessionStorage-кэша к человеку. В ref,
   // чтобы колбэки ниже читали актуальное значение без пересоздания.
   const userId = session?.user?.id ?? null;
   const userIdRef = useRef<string | null>(userId);
   userIdRef.current = userId;
   const [tab, setTab] = useState<Tab>("anon");
   // Сводка кабинета: тариф, остаток квоты, история. Нужна не только самому
-  // кабинету — по ней в меню показывается остаток, а исчерпанная квота
+  // кабинету - по ней в меню показывается остаток, а исчерпанная квота
   // гасит кнопку «Обезличить» ДО загрузки файла (бэкенд всё равно откажет,
   // см. lib/quota.ts, но узнать об этом лучше заранее).
   const [summary, setSummary] = useState<AccountSummary | null>(null);
   const [summaryError, setSummaryError] = useState<string | null>(null);
-  // Управление составом аккаунта. inviteUrl — ссылка последнего выписанного
+  // Управление составом аккаунта. inviteUrl - ссылка последнего выписанного
   // приглашения: она существует в открытом виде ровно один раз (в БД только
   // хеш, см. lib/invitations.ts), поэтому держим её на экране, пока админ её
   // не скопировал.
@@ -629,12 +647,12 @@ export default function Home() {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [inviteCopied, setInviteCopied] = useState(false);
-  // Онлайн-оплата (Т-Банк, lib/tbank.ts). payKey — какая кнопка ждёт ответа
+  // Онлайн-оплата (Т-Банк, lib/tbank.ts). payKey - какая кнопка ждёт ответа
   // checkout ("plan:months").
   const [payKey, setPayKey] = useState<string | null>(null);
   const [payError, setPayError] = useState<string | null>(null);
   // Словарь терминов аккаунта («Мои термины»): список, формы добавления и
-  // массового импорта. Значения терминов конфиденциальны — только в UI.
+  // массового импорта. Значения терминов конфиденциальны - только в UI.
   const [glTerms, setGlTerms] = useState<GlossaryRow[]>([]);
   const [glMax, setGlMax] = useState(500);
   const [glAliases, setGlAliases] = useState("");
@@ -657,16 +675,16 @@ export default function Home() {
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Секунды с момента постановки задачи — чтобы минуты ожидания не выглядели
+  // Секунды с момента постановки задачи - чтобы минуты ожидания не выглядели
   // зависанием.
   const [elapsed, setElapsed] = useState(0);
   const [result, setResult] = useState<AnonResult | null>(null);
-  // Set when the currently displayed job was cancelled rather than errored —
+  // Set when the currently displayed job was cancelled rather than errored -
   // rendered as a neutral note, never in the red error style.
   const [cancelled, setCancelled] = useState(false);
   // Нейтральное сообщение (не ошибка): результат пропал с сервера.
   const [notice, setNotice] = useState<string | null>(null);
-  // Имя документа в работе — показывается в «обрабатываю», в том числе после
+  // Имя документа в работе - показывается в «обрабатываю», в том числе после
   // перезагрузки, когда объекта File уже нет.
   const [jobName, setJobName] = useState<string | null>(null);
   // Лежит ли показанный результат в sessionStorage (от этого зависит текст
@@ -688,9 +706,9 @@ export default function Home() {
   // cancelled) so a finished job is never cancelled by a later unload/new
   // submit.
   const activeJobIdRef = useRef<string | null>(null);
-  // Записан ли jobId в sessionStorage. Если да — pagehide задачу НЕ отменяет:
+  // Записан ли jobId в sessionStorage. Если да - pagehide задачу НЕ отменяет:
   // перезагрузка страницы обязана её пережить (вкладку от перезагрузки на
-  // pagehide не отличить). Если хранилища нет — возобновлять нечем, и
+  // pagehide не отличить). Если хранилища нет - возобновлять нечем, и
   // отмена на выгрузке остаётся, как раньше.
   const jobPersistedRef = useRef(false);
   // Защита от двойного запуска восстановления: в dev-режиме StrictMode монтирует
@@ -720,7 +738,7 @@ export default function Home() {
   useEffect(() => {
     // Ширина нужна только чтобы знать, лежит ли меню ПОВЕРХ содержимого: на
     // узком экране выбор пункта его закрывает, иначе результат остаётся
-    // спрятанным. Само меню ширина не открывает и не закрывает — оно открыто
+    // спрятанным. Само меню ширина не открывает и не закрывает - оно открыто
     // по умолчанию, дальше решает пользователь. Порог тот же, что в
     // globals.css. matchMedia, а не resize: событие приходит только при
     // пересечении границы.
@@ -735,7 +753,7 @@ export default function Home() {
     try {
       const resp = await fetch("/api/account", { cache: "no-store" });
       if (resp.status === 401 || resp.status === 404) {
-        // Не вошёл или работает в режиме без авторизации — кабинета просто
+        // Не вошёл или работает в режиме без авторизации - кабинета просто
         // нет, и это не ошибка, о которой нужно кричать.
         setSummary(null);
         setSummaryError(null);
@@ -771,7 +789,7 @@ export default function Home() {
   const onPick = (f: File | null | undefined) => {
     if (!f) return;
     if (!/\.(docx?|pdf|xlsx?|xlsm|xml|rtf|odt|txt|csv|md|json)$/i.test(f.name)) {
-      setError("Этот формат не поддерживается — полный список в меню слева (презентации не принимаются)");
+      setError("Этот формат не поддерживается - полный список в меню слева (презентации не принимаются)");
       return;
     }
     setError(null);
@@ -779,7 +797,7 @@ export default function Home() {
     setCancelled(false);
     setNotice(null);
     setResultCached(false);
-    // Новый документ — прежний результат и запись о задаче больше не нужны.
+    // Новый документ - прежний результат и запись о задаче больше не нужны.
     clearCachedResult();
     clearJob();
     setFile(f);
@@ -789,7 +807,7 @@ export default function Home() {
 
   // Показать готовый результат и попытаться пережить им перезагрузку.
   // Если результат лёг в sessionStorage, запись о задаче больше не нужна; если
-  // нет (велик/квота/приватный режим) — запись остаётся, и перезагрузка
+  // нет (велик/квота/приватный режим) - запись остаётся, и перезагрузка
   // добирает результат опросом по jobId, пока сервер его держит.
   const showResult = useCallback(
     (res: AnonResult, fileName: string, startedAt: number) => {
@@ -800,7 +818,7 @@ export default function Home() {
       const cached = writeCachedResult(userIdRef.current, fileName, startedAt, res);
       setResultCached(cached);
       if (cached) clearJob();
-      // Документ списан — остаток в меню и кабинете должен это показать
+      // Документ списан - остаток в меню и кабинете должен это показать
       // сразу, а не после следующей загрузки.
       void loadSummary();
     },
@@ -808,15 +826,15 @@ export default function Home() {
   );
 
   // Опрос уже поставленной задачи + разбор исхода. Общий для свежего запуска и
-  // для возобновления после перезагрузки. «Задача пропала» — нейтральное
-  // notice, остальные сбои — красная ошибка.
+  // для возобновления после перезагрузки. «Задача пропала» - нейтральное
+  // notice, остальные сбои - красная ошибка.
   const trackJob = useCallback(
     async (jobId: string, fileName: string, startedAt: number) => {
       activeJobIdRef.current = jobId;
       jobPersistedRef.current = writeJob({ jobId, fileName, startedAt }, userIdRef.current);
       try {
         const final = await pollJob(jobId, setElapsed, startedAt);
-        // Terminal state reached (done or cancelled) — clear the ref so a
+        // Terminal state reached (done or cancelled) - clear the ref so a
         // later unload/new submit never sends a cancel for this job again.
         activeJobIdRef.current = null;
         if (final?.cancelled) {
@@ -834,7 +852,7 @@ export default function Home() {
           // Запись оставляем: после перезагрузки опрос можно продолжить.
           setError(e.message);
         } else {
-          clearJob(); // задача завершилась ошибкой — возобновлять нечего
+          clearJob(); // задача завершилась ошибкой - возобновлять нечего
           setError(e instanceof Error ? e.message : String(e));
         }
       }
@@ -844,17 +862,17 @@ export default function Home() {
 
   // Восстановление после перезагрузки (один раз, как только известна сессия:
   // до этого не понять, чей кэш лежит в хранилище). Порядок:
-  // 1) кэш результата — показываем сразу, без сети; 2) иначе запись о задаче —
-  // возобновляем опрос, если окно TTL ещё не прошло. Хранилища нет — всё это
+  // 1) кэш результата - показываем сразу, без сети; 2) иначе запись о задаче -
+  // возобновляем опрос, если окно TTL ещё не прошло. Хранилища нет - всё это
   // молча пропускается.
   useEffect(() => {
     if (restoredRef.current || sessionStatus === "loading") return;
     restoredRef.current = true;
 
-    // Нет сессии — userId=null: чужие/ничьи записи стираются, не показываются.
+    // Нет сессии - userId=null: чужие/ничьи записи стираются, не показываются.
     const cached = readCachedResult(userId);
     if (cached) {
-      clearJob(); // результат на экране и сохранён — задача не нужна
+      clearJob(); // результат на экране и сохранён - задача не нужна
       setResult(cached.result);
       setResultCached(true);
       return;
@@ -877,7 +895,7 @@ export default function Home() {
 
   const run = useCallback(async () => {
     if (!file) return;
-    // A previous job may still be in flight — either genuinely still running,
+    // A previous job may still be in flight - either genuinely still running,
     // or orphaned client-side after `pollJob` gave up on a flaky connection.
     // Cancel it before starting a new one instead of leaving it to burn
     // shared model capacity for a result nobody will read.
@@ -923,7 +941,7 @@ export default function Home() {
       }
       if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
 
-      // POST только ПОСТАВИЛ задачу — досматриваем её опросом отсюда, из
+      // POST только ПОСТАВИЛ задачу - досматриваем её опросом отсюда, из
       // браузера. Раньше ожидание сидело внутри серверной функции, и её предел
       // становился пределом анонимизации; на Hobby это ещё и ломало деплой
       // («invalid maxDuration for plan»). Браузер же не ограничен ничем.
@@ -977,7 +995,7 @@ export default function Home() {
   const buildEffectiveDoc = useCallback(async (): Promise<Blob> => {
     if (!result) throw new Error("нет результата");
     if (!result.is_docx) {
-      // Простой текст (.txt/.csv/.md/.json) — документ и есть его текст,
+      // Простой текст (.txt/.csv/.md/.json) - документ и есть его текст,
       // собираем прямо здесь; тип берём тот, что назвал сервер.
       const txt = deanonClient(result.anonymized_text, keptMapping);
       return new Blob([txt], { type: `${result.document_mime};charset=utf-8` });
@@ -1030,7 +1048,7 @@ export default function Home() {
   };
 
   // --- Deanonymize action ---
-  // forceLast — «восстановить последний обезличенный документ», не глядя на
+  // forceLast - «восстановить последний обезличенный документ», не глядя на
   // галочку: так работает кнопка обратной подстановки сразу после
   // обезличивания (см. restoreLast).
   const runDeanon = useCallback(async (forceLast = false) => {
@@ -1085,7 +1103,7 @@ export default function Home() {
 
   const entityCount = result ? Object.keys(result.mapping).length : 0;
   // Только явно исчерпанная квота или истёкший срок: пока сводки нет (не
-  // вошёл, режим без авторизации, сеть) — не мешаем работать, решение всё
+  // вошёл, режим без авторизации, сеть) - не мешаем работать, решение всё
   // равно за бэкендом.
   const quotaExpired = summary?.quota.expired === true;
   const quotaExhausted = summary?.quota.exhausted === true || quotaExpired;
@@ -1115,7 +1133,7 @@ export default function Home() {
   };
 
   // Смена тарифа при действующем сроке открывает новый срок с даты оплаты,
-  // а остаток текущего (страницы и дни) сгорает — см. lib/plan-activation.ts.
+  // а остаток текущего (страницы и дни) сгорает - см. lib/plan-activation.ts.
   // Тот же тариф продлевается, предупреждать не о чем.
   const burnOnSwitch =
     summary && !summary.quota.expired && summary.quota.paidUntil
@@ -1190,7 +1208,7 @@ export default function Home() {
       setGlTerms(Array.isArray(data?.terms) ? (data.terms as GlossaryRow[]) : []);
       if (typeof data?.max === "number") setGlMax(data.max);
     } catch {
-      /* словарь — вспомогательная карточка, не мешаем остальному кабинету */
+      /* словарь - вспомогательная карточка, не мешаем остальному кабинету */
     }
   }, []);
 
@@ -1218,7 +1236,7 @@ export default function Home() {
         setGlNote(
           `Добавлено: ${data.added}. Пропущено: ${skipped.length}` +
             (skipped.length
-              ? " — " +
+              ? " - " +
                 skipped
                   .slice(0, 5)
                   .map((s) => (s.line ? `строка ${s.line}: ${s.reason}` : s.reason))
@@ -1267,6 +1285,10 @@ export default function Home() {
     void runDeanon(true);
   };
 
+  if (sessionStatus === "unauthenticated" && !workspaceOpen) {
+    return <Landing onStart={() => setWorkspaceOpen(true)} />;
+  }
+
   return (
     <div className={`shell${menuOpen ? "" : " menu-closed"}`}>
       <aside className="sidebar">
@@ -1309,6 +1331,7 @@ export default function Home() {
             <CircleUser size={16} />
             Личный кабинет
           </button>
+          <Link className="nav-item" href="/welcome"><Info size={16} />О сервисе</Link>
         </nav>
 
         <div className="sidebar-section">
@@ -1334,13 +1357,13 @@ export default function Home() {
                 </label>
               ))}
               <p className="note" style={{ margin: "10px 2px 0" }}>
-                Можно отключить любой слой — например, оставить только GLiNER.
+                Можно отключить любой слой - например, оставить только GLiNER.
                 LLM-проверка идёт последней: пересматривает найденное и снимает
                 маскирование с очевидных ошибок (обычные слова, названия
                 продуктов); работает, только если бэкенд запущен с --review.
               </p>
               <p className="note" style={{ margin: "8px 2px 0" }}>
-                Предмет договора — наименования товаров, работ и услуг (модели,
+                Предмет договора - наименования товаров, работ и услуг (модели,
                 марки, номенклатура), чтобы по ним нельзя было восстановить
                 отрасль. Идёт в тот же LLM-вызов, времени не добавляет; требует
                 включённого слоя LLM.
@@ -1367,7 +1390,7 @@ export default function Home() {
                 </div>
               ))}
               <p className="note" style={{ margin: "2px 8px 0" }}>
-                .rtf возвращается как .rtf, если на сервере есть LibreOffice; без неё — как
+                .rtf возвращается как .rtf, если на сервере есть LibreOffice; без неё - как
                 .docx. Презентации (.ppt, .pptx) не принимаются.
               </p>
             </>
@@ -1377,7 +1400,7 @@ export default function Home() {
         <div className="sidebar-foot">
           {summary && (
             // Остаток на виду всегда: узнавать об исчерпанной квоте в момент
-            // загрузки документа — поздно.
+            // загрузки документа - поздно.
             <button className="nav-item quota-mini" onClick={() => pickTab("account")}>
               <Gauge size={16} />
               {summary.quota.unlimited ? (
@@ -1424,7 +1447,7 @@ export default function Home() {
               </Link>
             </>
           ) : null}
-          {/* Подвала на главном экране нет — документы здесь, как в claude.ai. */}
+          {/* Подвала на главном экране нет - документы здесь, как в claude.ai. */}
           <div className="sidebar-legal">
             <Link href={LEGAL_DOCS.offer.href}>Соглашение</Link>
             <Link href={LEGAL_DOCS.privacy.href}>Конфиденциальность</Link>
@@ -1433,7 +1456,7 @@ export default function Home() {
         </div>
       </aside>
 
-      {/* Затемнение под меню — только на узком экране, где меню лежит поверх
+      {/* Затемнение под меню - только на узком экране, где меню лежит поверх
           содержимого (см. globals.css). */}
       <div className="backdrop" onClick={() => setMenuOpen(false)} />
 
@@ -1455,7 +1478,7 @@ export default function Home() {
               <ShieldCheck size={24} />
               Анонимизатор персональных данных
             </h1>
-            <p>Загрузите документ — получите маскированную версию и ключ восстановления (mapping).</p>
+            <p>Загрузите документ - получите маскированную версию и ключ восстановления (mapping).</p>
           </header>
 
           {tab === "anon" && (
@@ -1478,8 +1501,8 @@ export default function Home() {
                 >
                   <strong>Перетащите файл сюда</strong> или нажмите, чтобы выбрать
                   <div className="note">
-                    Word, Excel, OpenDocument, PDF, текст — результат в том же формате.
-                    Полный список — в меню слева.
+                    Word, Excel, OpenDocument, PDF, текст - результат в том же формате.
+                    Полный список - в меню слева.
                   </div>
                   {file && (
                     <div className="file-name">
@@ -1520,8 +1543,8 @@ export default function Home() {
                 {loading && (
                   <span className="note" style={{ textAlign: "center" }}>
                     {jobName ? `Документ «${jobName}»: ` : ""}запрос идёт на бэкенд (GLiNER + LLM)
-                    {elapsed > 0 ? `, ${elapsed} с` : ""}. Это может занять несколько минут —
-                    вкладку можно свернуть, а страницу — перезагрузить.
+                    {elapsed > 0 ? `, ${elapsed} с` : ""}. Это может занять несколько минут -
+                    вкладку можно свернуть, а страницу - перезагрузить.
                   </span>
                 )}
                 {quotaExpired && (
@@ -1551,7 +1574,7 @@ export default function Home() {
                       <div className="error" style={{ marginBottom: 14 }}>
                         <TriangleAlert size={16} className="inline-icon" />В файле уже было{" "}
                         {result.preexisting_placeholders} плейсхолдеров вида
-                        [PERSON_1] — похоже, это уже маскированный документ. Они защищены и не
+                        [PERSON_1] - похоже, это уже маскированный документ. Они защищены и не
                         трогались повторно, но проверьте, не загрузили ли вы .anon-файл по ошибке.
                       </div>
                     )}
@@ -1569,38 +1592,33 @@ export default function Home() {
                         <div className="k">Формат</div>
                       </div>
                     </div>
-                    {(Object.keys(result.summary).length > 0 || result.elapsed_seconds != null) && (
+                    {Object.keys(result.summary).length > 0 && (
+                      <table className="map entity-summary">
+                        <thead><tr><th>Тип</th><th>Количество</th></tr></thead>
+                        <tbody>{Object.entries(result.summary).map(([type, count]) => (
+                          <tr key={type}><td>{ENTITY_LABELS[type] ?? "Другие данные"}</td><td>{count}</td></tr>
+                        ))}</tbody>
+                      </table>
+                    )}
+                    {result.elapsed_seconds != null && (
                       <p className="note" style={{ marginTop: 14, marginBottom: 0 }}>
-                        {Object.keys(result.summary).length > 0 && (
-                          <>
-                            По типам:{" "}
-                            {Object.entries(result.summary)
-                              .map(([k, v]) => `${k}: ${v}`)
-                              .join(" · ")}
-                          </>
-                        )}
-                        {result.elapsed_seconds != null && (
-                          <>
-                            {Object.keys(result.summary).length > 0 ? " · " : ""}
-                            Время обработки: {result.elapsed_seconds.toFixed(1)} с
-                          </>
-                        )}
+                        Время обработки: {result.elapsed_seconds.toFixed(1)} с
                       </p>
                     )}
                   </div>
 
                   {result.warnings && result.warnings.length > 0 && (() => {
-                    // result.warnings — объединение двух разных форм (см.
+                    // result.warnings - объединение двух разных форм (см.
                     // engine.py): найденные-но-не-скрытые значения (verify.py,
                     // есть value) и сбои отдельных слоёв проверки (есть message).
-                    // Делим по наличию поля, а не по конкретным kind — так
+                    // Делим по наличию поля, а не по конкретным kind - так
                     // незнакомый в будущем kind всё равно попадёт в нужную карточку.
                     const residual = result.warnings!.filter((w) => w.value !== undefined);
                     const failed = mergeChunkWarnings(
                       result.warnings!.filter((w) => w.value === undefined),
                     );
-                    // Жёсткие — слой не отработал по тексту, который больше никто
-                    // так не смотрел; мягкие — не завершилась лишь перепроверка
+                    // Жёсткие - слой не отработал по тексту, который больше никто
+                    // так не смотрел; мягкие - не завершилась лишь перепроверка
                     // (см. SOFT_WARNING_KINDS).
                     const failedHard = failed.filter((w) => !SOFT_WARNING_KINDS.has(w.kind));
                     const failedSoft = failed.filter((w) => SOFT_WARNING_KINDS.has(w.kind));
@@ -1610,12 +1628,12 @@ export default function Home() {
                           <div className="card warn-card">
                             <h2 style={{ marginTop: 0 }}>
                               <TriangleAlert size={18} />
-                              Проверьте вручную — возможно, не скрыто
+                              Проверьте вручную - возможно, не скрыто
                             </h2>
                             <p className="note" style={{ marginTop: 0 }}>
                               Автопроверка нашла в результате фрагменты, похожие на неанонимизированные
-                              данные (длинные числа — счета/ОГРН/ИНН/телефоны, адреса эл. почты). Если это
-                              действительно ПДн — фрагмент пропустили детекторы; сообщите, какой это тип, или
+                              данные (длинные числа - счета/ОГРН/ИНН/телефоны, адреса эл. почты). Если это
+                              действительно ПДн - фрагмент пропустили детекторы; сообщите, какой это тип, или
                               отредактируйте документ вручную.
                             </p>
                             <div className="scroll-tbl">
@@ -1654,7 +1672,7 @@ export default function Home() {
                             <p className="note" style={{ marginTop: 0 }}>
                               Один из проверочных слоёв не смог завершить работу на этих местах.
                               Остальные слои их разобрали, и маскирование чаще всего выполнено
-                              полностью — но шанс пропуска здесь выше обычного, поэтому места стоит
+                              полностью - но шанс пропуска здесь выше обычного, поэтому места стоит
                               просмотреть вручную.
                             </p>
                             <WarningList items={failedHard} />
@@ -1707,13 +1725,13 @@ export default function Home() {
                     )}
                     <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
                       <TriangleAlert size={16} className="inline-icon" />
-                      Mapping — ключ восстановления. Храните его отдельно от маскированного документа.
+                      Mapping - ключ восстановления. Храните его отдельно от маскированного документа.
                     </p>
                     <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
                       <Info size={16} className="inline-icon" />
                       {resultCached
-                        ? "Результат сохранён в этой вкладке до её закрытия (не дольше 10 минут). Скачайте файл и карту соответствий — после закрытия вкладки получить их повторно нельзя."
-                        : "Результат доступен на сервере не дольше 10 минут с момента загрузки документа. Скачайте файл и карту соответствий — потом получить их повторно нельзя."}
+                        ? "Результат сохранён в этой вкладке до её закрытия (не дольше 10 минут). Скачайте файл и карту соответствий - после закрытия вкладки получить их повторно не получится."
+                        : "Результат доступен на сервере не дольше 10 минут с момента загрузки документа. Скачайте файл и карту соответствий - потом получить их повторно не получится."}
                     </p>
                   </div>
 
@@ -1727,13 +1745,13 @@ export default function Home() {
                       ) : (
                         <>
                           <Undo2 size={18} />
-                          Обратная подстановка
+                          Вернуть исходные данные
                         </>
                       )}
                     </button>
                     <span className="note" style={{ textAlign: "center" }}>
                       Вернёт исходные значения в этот документ и покажет результат в режиме
-                      «Деанонимизация». Ключ уже здесь — загружать mapping не нужно.
+                      «Деанонимизация».
                     </span>
                   </div>
 
@@ -1746,7 +1764,7 @@ export default function Home() {
                     <h2>Mapping ({entityCount})</h2>
                     {kept.size > 0 && (
                       <p className="note" style={{ marginTop: 0 }}>
-                        Возвращено в текст вручную: {kept.size}. Эти значения НЕ замаскированы — они
+                        Возвращено в текст вручную: {kept.size}. Эти значения НЕ замаскированы - они
                         исключены из ключа и подставлены в документ. Нажмите «Вернуть», чтобы снова
                         скрыть.
                       </p>
@@ -1871,7 +1889,6 @@ export default function Home() {
                     <div className="metrics">
                       <div className="metric">
                         <div className="v">{summary.plan.title}</div>
-                        <div className="k">План</div>
                       </div>
                       <div className="metric">
                         <div className="v">
@@ -1895,7 +1912,7 @@ export default function Home() {
                       summary.quota.limitTenths !== summary.plan.pagesPerMonth * 10 && (
                         <p className="note" style={{ marginBottom: 0 }}>
                           Для аккаунта задан индивидуальный лимит{" "}
-                          {pages(summary.quota.limitTenths)} стр. — он замещает лимит
+                          {pages(summary.quota.limitTenths)} стр. - он замещает лимит
                           тарифа, а не складывается с ним.
                         </p>
                       )}
@@ -1904,9 +1921,6 @@ export default function Home() {
                         <h3 style={{ marginBottom: 8 }}>
                           {summary.plan.priceKopecks > 0 ? "Продлить или сменить тариф" : "Оплатить тариф"}
                         </h3>
-                        <p className="note" style={{ marginTop: 0 }}>
-                          Оплата сразу за год дешевле, чем 12 месяцев по отдельности.
-                        </p>
                         <div className="scroll-tbl">
                           <table className="map">
                             <thead>
@@ -1914,8 +1928,8 @@ export default function Home() {
                                 <th>Тариф</th>
                                 <th>Страниц в месяц</th>
                                 <th>Пользователей</th>
-                                <th style={{ textAlign: "center" }}>Оплата за месяц</th>
-                                <th style={{ textAlign: "center" }}>Оплата за год</th>
+                                <th style={{ textAlign: "center" }}>Абонемент на месяц</th>
+                                <th style={{ textAlign: "center" }}>Абонемент на год</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -1966,7 +1980,7 @@ export default function Home() {
                                           )}
                                         </>
                                       ) : (
-                                        <span className="note">—</span>
+                                        <span className="note">-</span>
                                       )}
                                     </td>
                                   </tr>
@@ -2001,7 +2015,7 @@ export default function Home() {
                           Повторная оплата текущего тарифа продлевает срок на оплаченные месяцы:
                           текущий месяц дорабатывается с остатком страниц, лимит обновляется в
                           начале каждого следующего месяца. Оплата картой или через СБП на
-                          защищённой странице Т-Банка — данные карты сервису не передаются.
+                          защищённой странице Т-Банка.
                         </p>
                         {payError && (
                           <div className="error" style={{ marginTop: 12 }}>
@@ -2010,7 +2024,7 @@ export default function Home() {
                         )}
                       </>
                     )}
-                    {summary.payments.length > 0 && (
+                    {summary.payments.some((p) => paymentStatusLabel(p) !== "Не завершён") && (
                       <>
                         <h3 style={{ marginBottom: 8 }}>Платежи</h3>
                         <div className="scroll-tbl">
@@ -2020,34 +2034,35 @@ export default function Home() {
                                 <th>Дата</th>
                                 <th>Тариф</th>
                                 <th>Сумма</th>
-                                <th>Возвращено</th>
-                                <th>Состояние</th>
                                 <th>Доступ до</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {summary.payments.map((p) => (
-                                <tr key={p.orderId}>
+                              {summary.payments.filter((p) => paymentStatusLabel(p) !== "Не завершён").map((p) => {
+                                const current = p.activated && p.refundedKopecks < p.amountKopecks &&
+                                  p.accessUntil != null && p.accessUntil === summary.quota.paidUntil &&
+                                  p.planTitle === summary.plan.title && !summary.quota.expired;
+                                return (
+                                <tr key={p.orderId} className={current ? "payment-current" : undefined} title={paymentStatusLabel(p)}>
                                   <td>{new Date(p.createdAt).toLocaleString("ru")}</td>
                                   <td>
                                     {p.planTitle}, {p.months === 12 ? "12 мес." : "1 мес."}
+                                    {current && <span className="tag" style={{ marginLeft: 8 }}>Текущий</span>}
                                   </td>
                                   <td>{rubles(p.amountKopecks)} ₽</td>
-                                  <td>{p.refundedKopecks > 0 ? `${rubles(p.refundedKopecks)} ₽` : "—"}</td>
-                                  <td>{paymentStatusLabel(p)}</td>
                                   <td>
-                                    {p.accessUntil && p.activated ? dateRu(p.accessUntil) : "—"}
+                                    {p.accessUntil && p.activated ? dateRu(p.accessUntil) : "-"}
                                   </td>
                                 </tr>
-                              ))}
+                              ); })}
                             </tbody>
                           </table>
                         </div>
                         <p className="note" style={{ marginBottom: 0 }}>
                           Полный возврат сокращает срок на оплаченные этим платежом месяцы (если
-                          срок был один месяц — доступ закрывается сразу); при частичном возврате
-                          срок не меняется. «Доступ до» — срок на момент платежа; действующий срок
-                          аккаунта — в карточке «Квота».
+                          срок был один месяц - доступ закрывается сразу); при частичном возврате
+                          срок не меняется. «Доступ до» - срок на момент платежа; действующий срок
+                          аккаунта - в карточке «Квота».
                         </p>
                       </>
                     )}
@@ -2058,7 +2073,7 @@ export default function Home() {
                   >
                     <h2>
                       <Gauge size={18} />
-                      Квота — {quotaPeriodLabel(summary.quota)}
+                      Квота - {quotaPeriodLabel(summary.quota)}
                     </h2>
                     {summary.quota.paidUntil && (
                       <p className="note" style={{ marginTop: 0 }}>
@@ -2073,7 +2088,7 @@ export default function Home() {
                         {pages(summary.quota.usedTenths)} стр.
                       </p>
                     ) : summary.quota.expired ? (
-                      // Страниц по истёкшему сроку нет — не показываем лимит,
+                      // Страниц по истёкшему сроку нет - не показываем лимит,
                       // который всё равно нельзя потратить.
                       <p className="note" style={{ marginTop: 0 }}>
                         Доступных страниц нет: срок тарифа закончился. Израсходовано за
@@ -2117,16 +2132,16 @@ export default function Home() {
                         {summary.quota.exhausted && (
                           <p className="note" style={{ marginBottom: 0, marginTop: 12 }}>
                             Новые документы не принимаются до следующего периода или
-                            увеличения лимита. Уже начатая обработка не прерывается —
+                            увеличения лимита. Уже начатая обработка не прерывается -
                             отказ получает только следующий запрос.
                           </p>
                         )}
                       </>
                     )}
                     <p className="note" style={{ marginBottom: 0, marginTop: 12 }}>
-                      Единица учёта — страница, 1800 символов. Лимит действует один календарный
-                      месяц с даты оплаты (для пробного тарифа — с даты регистрации); пробный
-                      период не продлевается. Границы периода — по UTC. За{" "}
+                      Единица учёта - страница, 1800 символов. Лимит действует один календарный
+                      месяц с даты оплаты (для пробного тарифа - с даты регистрации); пробный
+                      период не продлевается. Границы периода - по UTC. За{" "}
                       {quotaPeriodLabel(summary.quota)} обработано документов: {summary.periodTotals.documents}, символов:{" "}
                       {summary.periodTotals.chars.toLocaleString("ru")}.
                     </p>
@@ -2140,7 +2155,7 @@ export default function Home() {
                     <p className="note" style={{ marginTop: 0 }}>
                       {summary.users.limit === 1 ? (
                         <>
-                          На тарифе «{summary.plan.title}» работает один пользователь — приглашения
+                          На тарифе «{summary.plan.title}» работает один пользователь - приглашения
                           недоступны. Чтобы подключить сотрудников, перейдите на тариф «Бизнес»
                           или «Корпоратив».
                         </>
@@ -2154,7 +2169,7 @@ export default function Home() {
                       ) : (
                         <>
                           Пользователей и приглашений: {summary.users.taken}. Число
-                          пользователей не ограничено; все они расходуют общий лимит страниц.
+                          пользователей не ограничено; лимит страниц общий для всех пользователей.
                         </>
                       )}
                     </p>
@@ -2181,7 +2196,7 @@ export default function Home() {
                               {summary.canManage && (
                                 <td>
                                   {u.isSelf || u.role === "root" ? (
-                                    <span className="note">—</span>
+                                    <span className="note">-</span>
                                   ) : (
                                     <button
                                       className="ghost"
@@ -2265,7 +2280,7 @@ export default function Home() {
                           <div className="card warn-card" style={{ marginTop: 14, marginBottom: 0 }}>
                             <p className="note" style={{ marginTop: 0 }}>
                               <TriangleAlert size={16} className="inline-icon" />
-                              Ссылка активации показывается ОДИН раз — в базе хранится только её
+                              Ссылка активации показывается ОДИН раз - в базе хранится только её
                               хеш. Передайте её приглашённому; если потеряете, приглашение
                               придётся отозвать и выписать заново. Пароль и согласие на обработку
                               данных задаёт сам приглашённый.
@@ -2294,7 +2309,7 @@ export default function Home() {
                       Словарь терминов
                     </h2>
                     <p className="note" style={{ marginTop: 0 }}>
-                      Эти слова и названия всегда маскируются в документах вашего аккаунта —
+                      Эти слова и названия всегда маскируются в документах вашего аккаунта -
                       например, названия месторождений, объектов, шифры проектов. Падежи
                       учитываются автоматически. Термины видны только пользователям вашего
                       аккаунта.
@@ -2348,6 +2363,7 @@ export default function Home() {
                           }}
                         >
                           <input
+                            type="text"
                             required
                             placeholder="Варианты написания через запятую"
                             value={glAliases}
@@ -2355,6 +2371,7 @@ export default function Home() {
                             style={{ flex: 2, minWidth: 220 }}
                           />
                           <input
+                            type="text"
                             placeholder="Как называть в карте замен (необязательно)"
                             value={glCanonical}
                             onChange={(e) => setGlCanonical(e.target.value)}
@@ -2385,6 +2402,7 @@ export default function Home() {
                               Часть после «=» необязательна; всё после «#» в строке игнорируется.
                             </p>
                             <textarea
+                              className="glossary-textarea"
                               rows={6}
                               value={glBulk}
                               onChange={(e) => setGlBulk(e.target.value)}
@@ -2438,14 +2456,14 @@ export default function Home() {
                             {summary.recent.map((r) => (
                               <tr key={r.id}>
                                 <td>{new Date(r.createdAt).toLocaleString("ru")}</td>
-                                <td>{r.userEmail ?? "—"}</td>
+                                <td>{r.userEmail ?? "-"}</td>
                                 <td>{r.chars.toLocaleString("ru")}</td>
                                 <td>{pages(r.billablePagesTenths)}</td>
                                 <td>{r.seconds.toFixed(1)} с</td>
                                 <td>
-                                  {/* Не-ok запись (отмена/ошибка) в БД не различает причину — отдельной
+                                  {/* Не-ok запись (отмена/ошибка) в БД не различает причину - отдельной
                                       колонки нет; главное для клиента, что страницы не списаны. */}
-                                  <span className="tag">{r.ok ? "успешно" : "отменено или ошибка — не списано"}</span>
+                                  <span className="tag">{r.ok ? "успешно" : "отменено или ошибка - не списано"}</span>
                                 </td>
                               </tr>
                             ))}
@@ -2455,7 +2473,7 @@ export default function Home() {
                     )}
                     <p className="note" style={{ marginBottom: 0, marginTop: 12 }}>
                       Показаны последние 20 документов аккаунта. Имена файлов не
-                      сохраняются — в журнале только объём и время обработки.
+                      сохраняются - в журнале только объём и время обработки.
                     </p>
                   </div>
                 </>
@@ -2478,7 +2496,7 @@ export default function Home() {
                   </label>
                 ) : (
                   <p className="note">
-                    Последнего документа нет — загрузите маскированный файл и маппинг вручную.
+                    Последнего документа нет - загрузите маскированный файл и маппинг вручную.
                   </p>
                 )}
               </div>

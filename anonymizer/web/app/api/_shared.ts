@@ -187,10 +187,10 @@ export function describeError(e: unknown, backendUrl: string): string {
 
   const code = codes[0] || "";
   const HINTS: Record<string, string> = {
-    ENOTFOUND: "DNS не резолвится — проверьте домен в ANONYMIZER_BACKEND_URL.",
-    ECONNREFUSED: "Соединение отклонено — бэкенд не слушает этот адрес/порт снаружи.",
-    ETIMEDOUT: "Таймаут — хост, вероятно, недоступен из среды размещения фронтенда (firewall).",
-    UND_ERR_CONNECT_TIMEOUT: "Таймаут соединения — хост недоступен из среды размещения фронтенда.",
+    ENOTFOUND: "DNS не резолвится - проверьте домен в ANONYMIZER_BACKEND_URL.",
+    ECONNREFUSED: "Соединение отклонено - бэкенд не слушает этот адрес/порт снаружи.",
+    ETIMEDOUT: "Таймаут - хост, вероятно, недоступен из среды размещения фронтенда (firewall).",
+    UND_ERR_CONNECT_TIMEOUT: "Таймаут соединения - хост недоступен из среды размещения фронтенда.",
     ECONNRESET: "Соединение сброшено сервером/прокси во время запроса.",
     CERT_HAS_EXPIRED: "Просрочен TLS-сертификат бэкенда.",
   };
@@ -199,7 +199,7 @@ export function describeError(e: unknown, backendUrl: string): string {
   return [
     top,
     code ? `[${code}]` : "",
-    detail && detail !== top ? `— ${detail}` : "",
+    detail && detail !== top ? `- ${detail}` : "",
     hint ? `\n${hint}` : "",
     `\nBACKEND_URL=${backendUrl}`,
   ]

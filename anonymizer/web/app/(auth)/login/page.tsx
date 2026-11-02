@@ -89,7 +89,7 @@ export default function LoginPage() {
 
       <div className="card">
         {/* useSearchParams требует Suspense-границу при статической части
-            страницы — подставляем email из query (?email=... после
+            страницы - подставляем email из query (?email=... после
             регистрации) без падения билда на "missing Suspense boundary". */}
         <Suspense fallback={null}>
           <LoginForm />

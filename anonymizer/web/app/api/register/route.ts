@@ -76,7 +76,7 @@ export async function POST(req: NextRequest) {
   if (!plan) {
     // Означает, что сид (prisma/seed.ts) ещё не запускался на этой БД —
     // конфигурационная ошибка окружения, а не ошибка пользователя.
-    console.error(`[/api/register] план "${TRIAL_PLAN_CODE}" не найден — сид не запускался?`);
+    console.error(`[/api/register] план "${TRIAL_PLAN_CODE}" не найден - сид не запускался?`);
     return NextResponse.json({ error: "Регистрация временно недоступна." }, { status: 500 });
   }
 
