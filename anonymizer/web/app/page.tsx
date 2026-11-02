@@ -6,13 +6,12 @@ import {
   ChevronDown,
   CircleUser,
   CircleCheckBig,
+  Code2,
   Download,
   Eye,
   FileText,
   FileType,
   Info,
-  LogIn,
-  LogOut,
   KeyRound,
   LoaderCircle,
   Lock,
@@ -27,10 +26,13 @@ import {
   UserPlus,
 } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { loginUrl } from "@/lib/auth-navigation";
 import { signOut, useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LEGAL_DOCS } from "@/lib/legal";
 import Landing from "./landing";
+import AccountMenu from "./_components/AccountMenu";
 import "./interface-tweaks.css";
 
 type StageKey = "regex" | "corporate" | "ner" | "llm" | "review" | "subject";
@@ -521,17 +523,7 @@ const ENTITY_LABELS: Record<string, string> = {
   OKTMO: "ОКТМО", OKVED: "ОКВЭД",
 };
 
-function paymentStatusLabel(p: AccountSummary["payments"][number]): string {
-  if (p.refundedKopecks > 0) {
-    return p.refundedKopecks >= p.amountKopecks ? "Возвращён полностью" : "Частичный возврат";
-  }
-  if (p.activated) return "Оплачен";
-  if (p.status === "CONFIRMED") return "Оплачен, тариф включается";
-  if (p.status === "AMOUNT_MISMATCH") return "Сумма не совпала - обратитесь в поддержку";
-  if (["REJECTED", "AUTH_FAIL", "DEADLINE_EXPIRED", "CANCELED", "ATTEMPTS_EXPIRED"].includes(p.status)) return "Отклонён";
-  if (["REFUNDED", "PARTIAL_REFUNDED", "REVERSED", "PARTIAL_REVERSED"].includes(p.status)) return "Возвращён";
-  return "Не завершён";
-}
+
 
 /** Десятые доли страницы -> «12,4». */
 function pages(tenths: number): string {
@@ -539,11 +531,6 @@ function pages(tenths: number): string {
     minimumFractionDigits: 1,
     maximumFractionDigits: 1,
   });
-}
-
-/** Копейки -> «990» (рублей). */
-function rubles(kopecks: number): string {
-  return (kopecks / 100).toLocaleString("ru", { maximumFractionDigits: 2 });
 }
 
 /** 'YYYY-MM' -> «сентябрь 2026». Период биллинга считается в UTC (lib/period.ts). */
@@ -620,10 +607,7 @@ function deanonClient(text: string, m: Record<string, string>): string {
 type GlossaryRow = { id: number; aliases: string; canonical: string };
 
 export default function Home() {
-  const [workspaceOpen, setWorkspaceOpen] = useState(false);
-  // Только отображение личности/выход - проверка прав и квоты в этой задаче
-  // сознательно не делается (см. спеку: "не строить проверки квоты в этой
-  // задаче"), поэтому статус сессии здесь ни на что не влияет, кроме шапки.
+  const router = useRouter();
   const { data: session, status: sessionStatus } = useSession();
   // Id пользователя сессии - привязка sessionStorage-кэша к человеку. В ref,
   // чтобы колбэки ниже читали актуальное значение без пересоздания.
@@ -631,6 +615,19 @@ export default function Home() {
   const userIdRef = useRef<string | null>(userId);
   userIdRef.current = userId;
   const [tab, setTab] = useState<Tab>("anon");
+  useEffect(() => {
+    if (sessionStatus !== "unauthenticated") return;
+    const query = new URLSearchParams(window.location.search);
+    if (query.get("tab") === "account" || tab === "account") {
+      query.set("tab", "account");
+      router.replace(loginUrl(`/?${query}${window.location.hash}`));
+    } else {
+      router.replace("/welcome");
+    }
+  }, [router, sessionStatus, tab]);
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("tab") === "account") setTab("account");
+  }, []);
   // Сводка кабинета: тариф, остаток квоты, история. Нужна не только самому
   // кабинету - по ней в меню показывается остаток, а исчерпанная квота
   // гасит кнопку «Обезличить» ДО загрузки файла (бэкенд всё равно откажет,
@@ -647,10 +644,6 @@ export default function Home() {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [inviteCopied, setInviteCopied] = useState(false);
-  // Онлайн-оплата (Т-Банк, lib/tbank.ts). payKey - какая кнопка ждёт ответа
-  // checkout ("plan:months").
-  const [payKey, setPayKey] = useState<string | null>(null);
-  const [payError, setPayError] = useState<string | null>(null);
   // Словарь терминов аккаунта («Мои термины»): список, формы добавления и
   // массового импорта. Значения терминов конфиденциальны - только в UI.
   const [glTerms, setGlTerms] = useState<GlossaryRow[]>([]);
@@ -694,6 +687,9 @@ export default function Home() {
   // Боковое меню открыто по умолчанию на любой ширине; на узком экране оно
   // выезжает поверх содержимого и закрывается по выбору пункта.
   const [menuOpen, setMenuOpen] = useState(true);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const menuOpenRef = useRef<HTMLButtonElement>(null);
+  const returnMenuFocus = useRef(false);
   const [narrow, setNarrow] = useState(false);
   // Экспериментальные настройки скрыты, пока их не раскроют: в обычной работе
   // слои не трогают, а список галочек забивает меню.
@@ -734,6 +730,13 @@ export default function Home() {
     () => (result ? result.filename.replace(/\.[^.]+$/, "") : "document"),
     [result],
   );
+
+  useEffect(() => {
+    if (!menuOpen && returnMenuFocus.current) {
+      menuOpenRef.current?.focus();
+      returnMenuFocus.current = false;
+    }
+  }, [menuOpen]);
 
   useEffect(() => {
     // Ширина нужна только чтобы знать, лежит ли меню ПОВЕРХ содержимого: на
@@ -1132,46 +1135,6 @@ export default function Home() {
     }
   };
 
-  // Смена тарифа при действующем сроке открывает новый срок с даты оплаты,
-  // а остаток текущего (страницы и дни) сгорает - см. lib/plan-activation.ts.
-  // Тот же тариф продлевается, предупреждать не о чем.
-  const burnOnSwitch =
-    summary && !summary.quota.expired && summary.quota.paidUntil
-      ? { pagesTenths: summary.quota.remainingTenths ?? 0, until: summary.quota.paidUntil }
-      : null;
-
-  const startPayment = async (plan: string, months: 1 | 12) => {
-    if (
-      burnOnSwitch &&
-      burnOnSwitch.pagesTenths > 0 &&
-      plan !== summary?.plan.code &&
-      !window.confirm(
-        `При смене тарифа сгорят оставшиеся ${pages(burnOnSwitch.pagesTenths)} стр. и остаток ` +
-          `текущего срока (до ${dateRu(burnOnSwitch.until)}). Новый тариф начнёт действовать ` +
-          "с даты оплаты.\n\nПродолжить?",
-      )
-    ) {
-      return;
-    }
-    setPayKey(`${plan}:${months}`);
-    setPayError(null);
-    try {
-      const resp = await fetch("/api/billing/checkout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plan, months }),
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok || typeof data?.url !== "string") {
-        throw new Error(data?.error || `HTTP ${resp.status}`);
-      }
-      window.location.href = data.url;
-    } catch (e: unknown) {
-      setPayError(e instanceof Error ? e.message : String(e));
-      setPayKey(null);
-    }
-  };
-
   const revokeInvite = async (id: number) => {
     setInviteError(null);
     try {
@@ -1271,9 +1234,14 @@ export default function Home() {
 
   // Выбор пункта меню на узком экране закрывает его: меню там лежит поверх
   // содержимого, и оставлять его открытым значит прятать результат.
+  const closeMenu = () => {
+    returnMenuFocus.current = sidebarRef.current?.contains(document.activeElement) ?? false;
+    setMenuOpen(false);
+  };
+
   const pickTab = (next: Tab) => {
     setTab(next);
-    if (narrow) setMenuOpen(false);
+    if (narrow) closeMenu();
   };
 
   // Обратная подстановка сразу после обезличивания: переключает режим и тут
@@ -1285,19 +1253,18 @@ export default function Home() {
     void runDeanon(true);
   };
 
-  if (sessionStatus === "unauthenticated" && !workspaceOpen) {
-    return <Landing onStart={() => setWorkspaceOpen(true)} />;
-  }
+  if (sessionStatus === "loading") return <p className="wrap" role="status">Загрузка…</p>;
+  if (sessionStatus === "unauthenticated") return <Landing />;
 
   return (
     <div className={`shell${menuOpen ? "" : " menu-closed"}`}>
-      <aside className="sidebar">
+      <aside ref={sidebarRef} className="sidebar" inert={!menuOpen}>
         <div className="sidebar-head">
           <ShieldCheck size={20} />
           <span className="sidebar-title">Анонимизатор</span>
           <button
             className="icon-btn"
-            onClick={() => setMenuOpen(false)}
+            onClick={closeMenu}
             aria-label="Скрыть меню"
             title="Скрыть меню"
           >
@@ -1324,14 +1291,8 @@ export default function Home() {
                 подстановка перестаёт быть спрятанной за незнакомым словом. */}
             {result && <span className="nav-dot" title="Есть документ для восстановления" />}
           </button>
-          <button
-            className={`nav-item${tab === "account" ? " active" : ""}`}
-            onClick={() => pickTab("account")}
-          >
-            <CircleUser size={16} />
-            Личный кабинет
-          </button>
           <Link className="nav-item" href="/welcome"><Info size={16} />О сервисе</Link>
+          <Link className="nav-item" href="/developers"><Code2 size={16} />API</Link>
         </nav>
 
         <div className="sidebar-section">
@@ -1401,7 +1362,7 @@ export default function Home() {
           {summary && (
             // Остаток на виду всегда: узнавать об исчерпанной квоте в момент
             // загрузки документа - поздно.
-            <button className="nav-item quota-mini" onClick={() => pickTab("account")}>
+            <Link className="nav-item quota-mini" href="/account/subscription">
               <Gauge size={16} />
               {summary.quota.unlimited ? (
                 <span>Квота: безлимит</span>
@@ -1413,41 +1374,23 @@ export default function Home() {
                   {pages(summary.quota.allowanceTenths ?? 0)} стр.
                 </span>
               )}
-            </button>
+            </Link>
           )}
-          {sessionStatus === "authenticated" && session?.user?.email ? (
-            <>
-              <div className="note sidebar-user">{session.user.email}</div>
-              <button
-                className="nav-item"
-                onClick={() => {
-                  // Результат предыдущего пользователя не должен всплыть у
-                  // следующего в этой же вкладке.
-                  clearCachedResult();
-                  clearJob();
-                  // Без серверного редиректа: за nginx Auth.js строит его из
-                  // внутреннего адреса (https://localhost:8010), если не задан
-                  // AUTH_URL. Относительный путь браузер разрешит сам.
-                  void signOut({ redirect: false }).then(() => window.location.assign("/"));
-                }}
-              >
-                <LogOut size={16} />
-                Выйти
-              </button>
-            </>
-          ) : sessionStatus !== "loading" ? (
-            <>
-              <Link className="nav-item" href="/login">
-                <LogIn size={16} />
-                Войти
-              </Link>
-              <Link className="nav-item" href="/register">
-                <UserPlus size={16} />
-                Регистрация
-              </Link>
-            </>
-          ) : null}
           {/* Подвала на главном экране нет - документы здесь, как в claude.ai. */}
+          {sessionStatus === "authenticated" && session?.user?.email && (
+            <AccountMenu
+              email={session.user.email}
+              planTitle={summary?.plan.title}
+              canManage={summary?.canManage === true}
+              renewalLabel={summary?.plan.priceKopecks ? "Продлить" : "Тарифы"}
+              onSettings={() => pickTab("account")}
+              onSignOut={() => {
+                clearCachedResult();
+                clearJob();
+                void signOut({ redirect: false }).then(() => window.location.assign("/"));
+              }}
+            />
+          )}
           <div className="sidebar-legal">
             <Link href={LEGAL_DOCS.offer.href}>Соглашение</Link>
             <Link href={LEGAL_DOCS.privacy.href}>Конфиденциальность</Link>
@@ -1458,11 +1401,12 @@ export default function Home() {
 
       {/* Затемнение под меню - только на узком экране, где меню лежит поверх
           содержимого (см. globals.css). */}
-      <div className="backdrop" onClick={() => setMenuOpen(false)} />
+      <div className="backdrop" onClick={closeMenu} />
 
       {/* Кнопка живёт в углу окна, а не рядом с заголовком: заголовок
           центрируется вместе с колонкой и уезжает от края. */}
       <button
+        ref={menuOpenRef}
         className="icon-btn menu-open-btn"
         onClick={() => setMenuOpen(true)}
         aria-label="Показать меню"
@@ -1499,7 +1443,7 @@ export default function Home() {
                     onPick(e.dataTransfer.files?.[0]);
                   }}
                 >
-                  <strong>Перетащите файл сюда</strong> или нажмите, чтобы выбрать
+                  <strong>Перетащите файл сюда</strong> или <button type="button" className="drop-select" onClick={(event) => { event.stopPropagation(); inputRef.current?.click(); }}>выберите файл</button>
                   <div className="note">
                     Word, Excel, OpenDocument, PDF, текст - результат в том же формате.
                     Полный список - в меню слева.
@@ -1882,190 +1826,8 @@ export default function Home() {
                   </div>
 
                   <div className="card">
-                    <h2>
-                      <Package size={18} />
-                      Тарифный план
-                    </h2>
-                    <div className="metrics">
-                      <div className="metric">
-                        <div className="v">{summary.plan.title}</div>
-                      </div>
-                      <div className="metric">
-                        <div className="v">
-                          {summary.plan.pagesPerMonth != null
-                            ? summary.plan.pagesPerMonth.toLocaleString("ru")
-                            : "∞"}
-                        </div>
-                        <div className="k">Страниц в месяц</div>
-                      </div>
-                      <div className="metric">
-                        <div className="v">
-                          {summary.plan.priceKopecks > 0
-                            ? `${rubles(summary.plan.priceKopecks)} ₽`
-                            : "Бесплатно"}
-                        </div>
-                        <div className="k">Стоимость</div>
-                      </div>
-                    </div>
-                    {summary.quota.limitTenths != null &&
-                      summary.plan.pagesPerMonth != null &&
-                      summary.quota.limitTenths !== summary.plan.pagesPerMonth * 10 && (
-                        <p className="note" style={{ marginBottom: 0 }}>
-                          Для аккаунта задан индивидуальный лимит{" "}
-                          {pages(summary.quota.limitTenths)} стр. - он замещает лимит
-                          тарифа, а не складывается с ним.
-                        </p>
-                      )}
-                    {summary.offers.length > 0 && (
-                      <>
-                        <h3 style={{ marginBottom: 8 }}>
-                          {summary.plan.priceKopecks > 0 ? "Продлить или сменить тариф" : "Оплатить тариф"}
-                        </h3>
-                        <div className="scroll-tbl">
-                          <table className="map">
-                            <thead>
-                              <tr>
-                                <th>Тариф</th>
-                                <th>Страниц в месяц</th>
-                                <th>Пользователей</th>
-                                <th style={{ textAlign: "center" }}>Абонемент на месяц</th>
-                                <th style={{ textAlign: "center" }}>Абонемент на год</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {summary.offers.map((o) => {
-                                // Выгода годовой оплаты против 12 месяцев по отдельности.
-                                const yearSaving =
-                                  o.priceYearKopecks != null ? o.priceKopecks * 12 - o.priceYearKopecks : 0;
-                                return (
-                                  <tr key={o.code}>
-                                    <td>
-                                      {o.title}
-                                      {o.code === summary.plan.code && (
-                                        <span className="tag" style={{ marginLeft: 8 }}>текущий</span>
-                                      )}
-                                    </td>
-                                    <td>{o.pagesPerMonth?.toLocaleString("ru") ?? "∞"}</td>
-                                    <td>{o.maxUsers ?? "без ограничения"}</td>
-                                    <td style={{ textAlign: "center" }}>
-                                      <button
-                                        className="ghost"
-                                        style={{ padding: "4px 10px", fontSize: 13, minWidth: 130, justifyContent: "center" }}
-                                        disabled={payKey !== null || summary.payBlockedReason !== null}
-                                        onClick={() => startPayment(o.code, 1)}
-                                      >
-                                        {payKey === `${o.code}:1`
-                                          ? "Открываю…"
-                                          : `${rubles(o.priceKopecks)} ₽ / мес.`}
-                                      </button>
-                                    </td>
-                                    <td style={{ textAlign: "center" }}>
-                                      {o.priceYearKopecks != null ? (
-                                        <>
-                                          <button
-                                            className="ghost"
-                                            style={{ padding: "4px 10px", fontSize: 13, minWidth: 130, justifyContent: "center" }}
-                                            disabled={payKey !== null || summary.payBlockedReason !== null}
-                                            onClick={() => startPayment(o.code, 12)}
-                                          >
-                                            {payKey === `${o.code}:12`
-                                              ? "Открываю…"
-                                              : `${rubles(o.priceYearKopecks)} ₽ / год`}
-                                          </button>
-                                          {yearSaving > 0 && (
-                                            <div className="note" style={{ marginTop: 4, fontSize: 12 }}>
-                                              {rubles(Math.round(o.priceYearKopecks / 12 / 100) * 100)} ₽ / мес.
-                                              (скидка {Math.round((yearSaving / (o.priceKopecks * 12)) * 100)}%)
-                                            </div>
-                                          )}
-                                        </>
-                                      ) : (
-                                        <span className="note">-</span>
-                                      )}
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
-                        {summary.payBlockedReason === "role" && (
-                          <p className="note" style={{ marginBottom: 0 }}>
-                            Оплатить или сменить тариф может администратор аккаунта.
-                          </p>
-                        )}
-                        {summary.payBlockedReason === "not_configured" && (
-                          <div className="error" style={{ marginTop: 12 }}>
-                            Онлайн-оплата пока не подключена. Чтобы оплатить тариф, обратитесь
-                            в поддержку сервиса.
-                          </div>
-                        )}
-                        {burnOnSwitch && burnOnSwitch.pagesTenths > 0 && (
-                          <div className="card warn-card" style={{ marginTop: 12, marginBottom: 0 }}>
-                            <p className="note" style={{ margin: 0 }}>
-                              <TriangleAlert size={16} className="inline-icon" />
-                              При смене тарифа сгорят оставшиеся{" "}
-                              {pages(burnOnSwitch.pagesTenths)} стр. и остаток текущего срока
-                              (до {dateRu(burnOnSwitch.until)}): новый тариф начнёт действовать с
-                              даты оплаты.
-                            </p>
-                          </div>
-                        )}
-                        <p className="note" style={{ marginBottom: 0 }}>
-                          Повторная оплата текущего тарифа продлевает срок на оплаченные месяцы:
-                          текущий месяц дорабатывается с остатком страниц, лимит обновляется в
-                          начале каждого следующего месяца. Оплата картой или через СБП на
-                          защищённой странице Т-Банка.
-                        </p>
-                        {payError && (
-                          <div className="error" style={{ marginTop: 12 }}>
-                            {payError}
-                          </div>
-                        )}
-                      </>
-                    )}
-                    {summary.payments.some((p) => paymentStatusLabel(p) !== "Не завершён") && (
-                      <>
-                        <h3 style={{ marginBottom: 8 }}>Платежи</h3>
-                        <div className="scroll-tbl">
-                          <table className="map">
-                            <thead>
-                              <tr>
-                                <th>Дата</th>
-                                <th>Тариф</th>
-                                <th>Сумма</th>
-                                <th>Доступ до</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {summary.payments.filter((p) => paymentStatusLabel(p) !== "Не завершён").map((p) => {
-                                const current = p.activated && p.refundedKopecks < p.amountKopecks &&
-                                  p.accessUntil != null && p.accessUntil === summary.quota.paidUntil &&
-                                  p.planTitle === summary.plan.title && !summary.quota.expired;
-                                return (
-                                <tr key={p.orderId} className={current ? "payment-current" : undefined} title={paymentStatusLabel(p)}>
-                                  <td>{new Date(p.createdAt).toLocaleString("ru")}</td>
-                                  <td>
-                                    {p.planTitle}, {p.months === 12 ? "12 мес." : "1 мес."}
-                                    {current && <span className="tag" style={{ marginLeft: 8 }}>Текущий</span>}
-                                  </td>
-                                  <td>{rubles(p.amountKopecks)} ₽</td>
-                                  <td>
-                                    {p.accessUntil && p.activated ? dateRu(p.accessUntil) : "-"}
-                                  </td>
-                                </tr>
-                              ); })}
-                            </tbody>
-                          </table>
-                        </div>
-                        <p className="note" style={{ marginBottom: 0 }}>
-                          Полный возврат сокращает срок на оплаченные этим платежом месяцы (если
-                          срок был один месяц - доступ закрывается сразу); при частичном возврате
-                          срок не меняется. «Доступ до» - срок на момент платежа; действующий срок
-                          аккаунта - в карточке «Квота».
-                        </p>
-                      </>
-                    )}
+                    <h2><Package size={18} />{summary.plan.title}</h2>
+                    <Link className="billing-link" href="/account/subscription">Управлять подпиской</Link>
                   </div>
 
                   <div
@@ -2243,6 +2005,7 @@ export default function Home() {
                         <form className="row" style={{ marginTop: 16 }} onSubmit={createInvite}>
                           <input
                             type="email"
+                            aria-label="Адрес приглашаемого"
                             required
                             placeholder="адрес приглашаемого"
                             value={inviteEmail}
@@ -2250,6 +2013,7 @@ export default function Home() {
                             style={{ flex: 1, minWidth: 220 }}
                           />
                           <select
+                            aria-label="Роль приглашаемого"
                             value={inviteRole}
                             onChange={(e) => setInviteRole(e.target.value as "member" | "admin")}
                           >
@@ -2364,6 +2128,7 @@ export default function Home() {
                         >
                           <input
                             type="text"
+                            aria-label="Варианты написания через запятую"
                             required
                             placeholder="Варианты написания через запятую"
                             value={glAliases}
@@ -2372,6 +2137,7 @@ export default function Home() {
                           />
                           <input
                             type="text"
+                            aria-label="Название в карте замен"
                             placeholder="Как называть в карте замен (необязательно)"
                             value={glCanonical}
                             onChange={(e) => setGlCanonical(e.target.value)}
@@ -2403,6 +2169,7 @@ export default function Home() {
                             </p>
                             <textarea
                               className="glossary-textarea"
+                              aria-label="Термины для массового ввода"
                               rows={6}
                               value={glBulk}
                               onChange={(e) => setGlBulk(e.target.value)}
@@ -2505,34 +2272,36 @@ export default function Home() {
                 <div className="card">
                   <h2>Файлы</h2>
                   <div className="row" style={{ alignItems: "stretch" }}>
-                    <div
+                    <button
+                      type="button"
                       className="drop"
                       style={{ flex: 1, minWidth: 220 }}
                       onClick={() => deFileRef.current?.click()}
                     >
                       <strong>Маскированный документ</strong>
-                      <div className="note">тот формат, в котором его выдал сервис</div>
+                      <span className="note drop-detail">тот формат, в котором его выдал сервис</span>
                       {deFile && (
-                        <div className="file-name">
+                        <span className="file-name">
                           <FileText size={16} />
                           {deFile.name}
-                        </div>
+                        </span>
                       )}
-                    </div>
-                    <div
+                    </button>
+                    <button
+                      type="button"
                       className="drop"
                       style={{ flex: 1, minWidth: 220 }}
                       onClick={() => deMapRef.current?.click()}
                     >
                       <strong>Маппинг</strong>
-                      <div className="note">.json</div>
+                      <span className="note drop-detail">.json</span>
                       {deMapFile && (
-                        <div className="file-name">
+                        <span className="file-name">
                           <KeyRound size={16} />
                           {deMapFile.name}
-                        </div>
+                        </span>
                       )}
-                    </div>
+                    </button>
                   </div>
                   <input
                     ref={deFileRef}

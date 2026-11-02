@@ -259,11 +259,6 @@ body {
   gap: 2px;
 }
 
-.sidebar-user {
-  padding: 0 10px 6px;
-  word-break: break-all;
-}
-
 /* Затемнение видно только на узком экране (см. медиазапрос ниже). */
 .backdrop {
   display: none;

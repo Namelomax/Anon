@@ -137,6 +137,7 @@ export default function InvitePage() {
               <label htmlFor="password">Пароль</label>
               <input
                 id="password"
+                aria-describedby="password-hint"
                 type="password"
                 autoComplete="new-password"
                 required
@@ -156,7 +157,7 @@ export default function InvitePage() {
                 onChange={(e) => setConfirm(e.target.value)}
               />
             </div>
-            <p className="note" style={{ marginTop: -8, marginBottom: 16 }}>
+            <p id="password-hint" className="note" style={{ marginTop: -8, marginBottom: 16 }}>
               Не короче {MIN_PASSWORD_LENGTH} символов и минимум двух разных типов символов
               (буквы, цифры, спецсимволы).
             </p>
@@ -171,7 +172,7 @@ export default function InvitePage() {
             </label>
 
             {error && (
-              <div className="error" style={{ marginBottom: 16 }}>
+              <div className="error" role="alert" style={{ marginBottom: 16 }}>
                 {error}
               </div>
             )}
@@ -201,12 +202,12 @@ export default function InvitePage() {
   );
 
   if (info === undefined) {
-    return shell("Приглашение", <p className="note">Загружаем…</p>);
+    return shell("Приглашение", <p className="note" role="status">Загружаем…</p>);
   }
   if (info === null) {
     return shell(
       "Приглашение",
-      <div className="error">{infoError || "Ссылка приглашения недействительна или истекла."}</div>,
+      <div className="error" role="alert">{infoError || "Ссылка приглашения недействительна или истекла."}</div>,
     );
   }
   if (!info.existingUser) return activation;
@@ -230,7 +231,7 @@ export default function InvitePage() {
     return shell(
       "Вступление в аккаунт",
       <>
-        <div className="error" style={{ marginBottom: 16 }}>
+        <div className="error" role="alert" style={{ marginBottom: 16 }}>
           {jc.reason}
         </div>
         <button className="ghost" type="button" onClick={() =>
@@ -269,7 +270,7 @@ export default function InvitePage() {
           <span>Понимаю, что мой текущий аккаунт будет закрыт</span>
         </label>
         {error && (
-          <div className="error" style={{ marginBottom: 16 }}>
+          <div className="error" role="alert" style={{ marginBottom: 16 }}>
             {error}
           </div>
         )}

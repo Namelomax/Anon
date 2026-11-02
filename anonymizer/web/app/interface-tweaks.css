@@ -10,5 +10,11 @@
   outline: none;
   border-color: var(--accent);
 }
-.payment-current { background: var(--panel-2); }
+.drop-select { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
+.drop-select:focus-visible, button.drop:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+button.drop { background: transparent; font: inherit; }
+.drop-detail { display: block; }
 .entity-summary { margin-top: 14px; }
+.billing-link { display: inline-flex; align-items: center; min-height: 40px; padding: 8px 16px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); text-decoration: none; }
+.billing-link:hover { background: var(--panel-2); }
+.billing-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }

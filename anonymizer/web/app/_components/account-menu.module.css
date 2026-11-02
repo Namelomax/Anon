@@ -1,0 +1,18 @@
+.account { position: relative; display: flex; align-items: center; gap: 4px; margin-top: 8px; width: 100%; color: #ededed; }
+.details { flex: 1; min-width: 0; }
+.trigger { display: flex; align-items: center; gap: 8px; padding: 8px 4px; min-height: 52px; cursor: pointer; list-style: none; border-radius: 8px; }
+.trigger::-webkit-details-marker { display: none; }
+.trigger:hover { background: #ffffff0a; }
+.avatar { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; border-radius: 50%; background: #484848; color: #f5f5f5; font-size: 14px; font-weight: 500; }
+.identity { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.plan { font-size: 12px; color: #a6a6a6; }
+.details[open] .trigger { background: #ffffff0a; }
+.renew { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; min-height: 32px; padding: 4px 12px; border-radius: 20px; border: 1px solid #505050; color: #ededed; text-decoration: none; font-size: 12px; font-weight: 500; background: #282828; }
+.renew:hover { background: #383838; }
+.menu { position: absolute; bottom: calc(100% + 8px); left: 0; width: 100%; min-width: 224px; max-width: calc(100vw - 32px); padding: 8px; background: #242424; border: 1px solid #424242; border-radius: 12px; box-shadow: 0 8px 24px #0004; display: grid; gap: 4px; z-index: 2; }
+.menu a, .menu button { display: flex; align-items: center; gap: 8px; text-align: left; min-height: 40px; padding: 8px 12px; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: 14px; text-decoration: none; cursor: pointer; }
+.menu a:hover, .menu button:hover { background: #383838; }
+.menu svg { color: #b0b0b0; }
+.account :focus-visible { outline: 2px solid #ededed; outline-offset: 2px; }
+@media (pointer: coarse) { .renew { min-height: 44px; } }

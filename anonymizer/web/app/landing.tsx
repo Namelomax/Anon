@@ -1,19 +1,42 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import Link from "next/link";
-import { ArrowDown, ArrowRight, FileText, LockKeyhole, ShieldCheck, Sparkles } from "lucide-react";
+import { ArrowRight, FileText, LockKeyhole, ShieldCheck, Sparkles } from "lucide-react";
 import { LEGAL_DOCS } from "../lib/legal";
 import styles from "./landing.module.css";
 
-export default function Landing({ onStart }: { onStart?: () => void }) {
+function FaqItem({ question, children }: { question: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const answerId = useId();
+
+  return (
+    <div className={styles.question}>
+      <button
+        className={styles.questionButton}
+        type="button"
+        aria-expanded={open}
+        aria-controls={answerId}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {question}
+        <span className={styles.questionIndicator} aria-hidden="true">+</span>
+      </button>
+      <div className={styles.answer} data-open={open} id={answerId} inert={!open}>
+        <div className={styles.answerInner}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+export default function Landing() {
   const [paused, setPaused] = useState(false);
 
   return (
     <div className={styles.landing}>
       <header className={styles.header}>
         <a className={styles.brand} href="#top" aria-label="Anon - на главную"><span className={styles.brandMark}>a<span>.</span></span> anon</a>
-        <nav className={styles.nav} aria-label="Навигация"><a href="#how">Как это работает</a><a href="#security">О данных</a><a href="#faq">Вопросы</a></nav>
+        <nav className={styles.nav} aria-label="Навигация"><a href="#how">Как это работает</a><a href="#security">О данных</a><a href="/developers">API</a><a href="#faq">FAQ</a></nav>
         <div className={styles.headerActions}><Link href="/login">Войти</Link><Link className={styles.headerButton} href="/register">Регистрация <ArrowRight size={15} /></Link></div>
       </header>
 
@@ -23,7 +46,7 @@ export default function Landing({ onStart }: { onStart?: () => void }) {
             <div className={styles.eyebrow}><span /> СЕРВИС МАСКИРОВАНИЯ ДОКУМЕНТОВ</div>
             <h1>Делитесь текстом.<br /><em>Не личным.</em></h1>
             <p className={styles.lead}>Anon помогает скрыть персональные данные в документах и вернуть их обратно, когда это нужно.</p>
-            <div className={styles.actions}><Link className={styles.primary} href="/register">Начать работу <ArrowRight size={18} /></Link>{onStart && <button className={styles.secondary} type="button" onClick={onStart}>Открыть интерфейс</button>}</div>
+            <div className={styles.actions}><Link className={styles.primary} href="/register">Начать работу <ArrowRight size={18} /></Link></div>
             <div className={styles.heroNote}><ShieldCheck size={17} /> Обратимое маскирование с ключом восстановления</div>
           </div>
           <div className={styles.demoWrap}>
@@ -38,11 +61,10 @@ export default function Landing({ onStart }: { onStart?: () => void }) {
                 <div className={styles.fakeLine} /><div className={`${styles.fakeLine} ${styles.shortLine}`} />
               </div>
               <p className={styles.srOnly}>Демонстрация: вымышленные имя, телефон и email заменяются плейсхолдерами PERSON_1, PHONE_1 и EMAIL_1.</p>
-              <div className={styles.demoBottom}><span><span className={styles.statusDot} /> Пример маскирования</span><button type="button" onClick={() => setPaused(!paused)}>{paused ? "Продолжить" : "Пауза"}</button></div>
+              <div className={styles.demoBottom}><span><span className={styles.statusDot} /> Пример маскирования</span><button type="button" aria-pressed={paused} aria-label="Приостановить демонстрацию" onClick={() => setPaused((value) => !value)}>{paused ? "Продолжить" : "Пауза"}</button></div>
             </div>
             <div className={styles.floating}><LockKeyhole size={17} /><span>Ключ восстановления<small>Сохраните отдельно</small></span></div>
           </div>
-          <a className={styles.scrollHint} href="#how"><ArrowDown size={15} /> Узнать больше</a>
         </section>
 
         <section className={styles.intro} id="how"><div><div className={styles.kicker}>ПОНЯТНЫЙ ПРОЦЕСС</div><h2>От документа к результату<br /><em>за три шага</em></h2></div><p>Работайте с содержанием документа, скрывая прямые идентификаторы. При необходимости исходные значения можно восстановить.</p></section>
@@ -56,7 +78,7 @@ export default function Landing({ onStart }: { onStart?: () => void }) {
 
         <section className={styles.security} id="security"><div className={styles.securityIcon}><ShieldCheck size={30} /></div><div><div className={styles.kicker}>ОБРАЩЕНИЕ С ДАННЫМИ</div><h2>Контроль начинается<br /><em>с понимания</em></h2><p>Маскирование обратимо: mapping связывает плейсхолдеры с исходными значениями. Храните ключ отдельно от обработанного файла и ограничивайте доступ к нему.</p><p>Фронтенд и бэкенд размещаются в России, на инфраструктуре в Иркутске. Результат с сохранённым ключом остаётся персональными данными.</p></div></section>
 
-        <section className={styles.faq} id="faq"><div><div className={styles.kicker}>ВОПРОСЫ И ОТВЕТЫ</div><h2>Полезно знать<br /><em>перед началом</em></h2></div><div className={styles.questions}><details><summary>Что такое mapping?</summary><p>Это таблица соответствий между плейсхолдерами и исходными значениями. Она нужна для восстановления документа.</p></details><details><summary>Можно ли восстановить исходный документ?</summary><p>Да, с помощью маскированного файла и его mapping. Восстановление выполняется без ИИ.</p></details><details><summary>Нужно ли проверять результат?</summary><p>Да. Перед передачей или использованием документа человек должен проверить, что нужные данные скрыты корректно.</p></details><details><summary>Это необратимое обезличивание?</summary><p>Нет. Пока существует mapping, данные можно восстановить. Это обратимое маскирование, или псевдонимизация.</p></details></div></section>
+        <section className={styles.faq} id="faq"><div><div className={styles.kicker}>ВОПРОСЫ И ОТВЕТЫ</div><h2>Полезно знать<br /><em>перед началом</em></h2></div><div className={styles.questions}><FaqItem question="Что такое mapping?"><p>Это таблица соответствий между плейсхолдерами и исходными значениями. Она нужна для восстановления документа.</p></FaqItem><FaqItem question="Можно ли восстановить исходный документ?"><p>Да, с помощью маскированного файла и его mapping. Восстановление выполняется без ИИ.</p></FaqItem><FaqItem question="Нужно ли проверять результат?"><p>Да. Перед передачей или использованием документа человек должен проверить, что нужные данные скрыты корректно.</p></FaqItem><FaqItem question="Это необратимое обезличивание?"><p>Нет. Пока существует mapping, данные можно восстановить. Это обратимое маскирование, или псевдонимизация.</p></FaqItem></div></section>
 
         <section className={styles.cta}><div><div className={styles.kicker}>НАЧНИТЕ РАБОТУ С ANON</div><h2>Меньше личного.<br /><em>Больше свободы в работе.</em></h2><p>Подготовьте документ к работе с помощью обратимого маскирования.</p></div><Link className={styles.primary} href="/register">Создать аккаунт <ArrowRight size={18} /></Link></section>
       </main>

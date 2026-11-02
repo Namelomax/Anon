@@ -1,12 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
-import { Suspense, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useSession } from "next-auth/react";
+import { safeReturnPath } from "@/lib/auth-navigation";
+import { Suspense, useEffect, useState } from "react";
 import { SiteFooter } from "@/app/_components/SiteFooter";
 
 function LoginForm() {
   const searchParams = useSearchParams();
+  const router = useRouter();
+  const { status } = useSession();
+  const next = safeReturnPath(searchParams.get("next"));
+  useEffect(() => {
+    if (status === "authenticated") router.replace(next);
+  }, [status, router, next]);
   const [email, setEmail] = useState(searchParams.get("email") || "");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -28,18 +36,15 @@ function LoginForm() {
       // cookie сессии Auth.js (см. app/api/login/route.ts), и
       // SessionProvider (app/providers.tsx) подхватит её при монтировании
       // на новой странице — проще и надёжнее, чем вручную дёргать update().
-      // ?next=... — возврат на страницу приглашения после входа. Только
-      // путь внутри сайта: "//host" и "/\host" браузер понял бы как чужой
-      // адрес (открытый редирект).
-      const next = searchParams.get("next") || "";
-      const safeNext = /^\/(?![/\\])/.test(next) ? next : "/";
-      window.location.href = safeNext;
+      window.location.href = next;
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
   };
+
+  if (status !== "unauthenticated") return <p role="status">Загрузка…</p>;
 
   return (
     <form onSubmit={onSubmit}>
@@ -67,7 +72,7 @@ function LoginForm() {
       </div>
 
       {error && (
-        <div className="error" style={{ marginBottom: 16 }}>
+        <div className="error" role="alert" style={{ marginBottom: 16 }}>
           {error}
         </div>
       )}
