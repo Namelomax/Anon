@@ -2,7 +2,6 @@
 
 import JSZip from "jszip";
 import {
-  Braces,
   ChevronDown,
   CircleUser,
   CircleCheckBig,
@@ -1071,12 +1070,12 @@ export default function Home() {
         });
       } else {
         if (!deFile) throw new Error("Загрузите маскированный документ.");
-        if (!deMapFile) throw new Error("Загрузите файл маппинга (.json).");
+        if (!deMapFile) throw new Error("Загрузите ключ восстановления (.json).");
         const mappingText = await deMapFile.text();
         try {
           JSON.parse(mappingText);
         } catch {
-          throw new Error("Маппинг не является корректным JSON.");
+          throw new Error("Ключ восстановления должен содержать корректный JSON.");
         }
         const fd = new FormData();
         fd.append("file", deFile);
@@ -1478,7 +1477,7 @@ export default function Home() {
               <ShieldCheck size={24} />
               Анонимизатор персональных данных
             </h1>
-            <p>Загрузите документ - получите маскированную версию и ключ восстановления (mapping).</p>
+            <p>Загрузите документ - получите маскированную версию и ключ восстановления.</p>
           </header>
 
           {tab === "anon" && (
@@ -1705,15 +1704,15 @@ export default function Home() {
                     <div className="row">
                       <button className="ghost" onClick={downloadZip} disabled={docBusy}>
                         <Download size={16} />
-                        ZIP (документ + mapping)
+                        ZIP (документ + ключ)
                       </button>
                       <button className="ghost" onClick={downloadDoc} disabled={docBusy}>
                         <Download size={16} />
                         {result.document_name}
                       </button>
-                      <button className="ghost" onClick={downloadMapping}>
-                        <Braces size={16} />
-                        {stem}.map.json
+                      <button className="ghost recovery-key-download" onClick={downloadMapping}>
+                        <KeyRound size={18} />
+                        Скачать ключ восстановления
                       </button>
                       {docBusy && <span className="note">Собираю документ…</span>}
                     </div>
@@ -1723,18 +1722,31 @@ export default function Home() {
                         {formatNote(result)}
                       </p>
                     )}
-                    <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
+                    <p className="note recovery-key-note" style={{ marginTop: 12, marginBottom: 0 }}>
                       <TriangleAlert size={16} className="inline-icon" />
-                      Mapping - ключ восстановления. Храните его отдельно от маскированного документа.
+                      Ключ восстановления содержит исходные данные. Храните его отдельно от маскированного документа.
                     </p>
                     <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>
                       <Info size={16} className="inline-icon" />
                       {resultCached
-                        ? "Результат сохранён в этой вкладке до её закрытия (не дольше 10 минут). Скачайте файл и карту соответствий - после закрытия вкладки получить их повторно не получится."
-                        : "Результат доступен на сервере не дольше 10 минут с момента загрузки документа. Скачайте файл и карту соответствий - потом получить их повторно не получится."}
+                        ? "Результат сохранён в этой вкладке до её закрытия (не дольше 10 минут). Скачайте документ и ключ восстановления - после закрытия вкладки получить их повторно не получится."
+                        : "Результат доступен на сервере не дольше 10 минут с момента загрузки документа. Скачайте документ и ключ восстановления - потом получить их повторно не получится."}
                     </p>
                   </div>
 
+                  <section className="card recovery-notice" aria-labelledby="recovery-notice-title">
+                    <h2 id="recovery-notice-title">
+                      <KeyRound size={22} />
+                      Данные можно восстановить
+                    </h2>
+                    <p>
+                      Маскирование обратимо. Ключ восстановления связывает маски с исходными
+                      значениями и позволяет вернуть их в документ без ИИ.
+                    </p>
+                    <p className="note">
+                      Скачайте ключ и храните его отдельно. Передавайте маскированный документ
+                      без ключа, чтобы не раскрыть скрытые значения.
+                    </p>
                   <div className="run">
                     <button className="ghost big" onClick={restoreLast} disabled={deLoading}>
                       {deLoading ? (
@@ -1754,14 +1766,15 @@ export default function Home() {
                       «Деанонимизация».
                     </span>
                   </div>
+                  </section>
 
                   <div className="card">
                     <h2>Маскированный текст</h2>
                     <pre className="preview">{previewText}</pre>
                   </div>
 
-                  <div className="card">
-                    <h2>Mapping ({entityCount})</h2>
+                  <div className="card recovery-key-card">
+                    <h2><KeyRound size={22} />Ключ восстановления ({entityCount})</h2>
                     {kept.size > 0 && (
                       <p className="note" style={{ marginTop: 0 }}>
                         Возвращено в текст вручную: {kept.size}. Эти значения НЕ замаскированы - они
@@ -1791,7 +1804,7 @@ export default function Home() {
                                     <code>{ph}</code>
                                   </td>
                                   <td>
-                                    <span className="tag">{labelOf(ph)}</span>
+                                    <span className="tag">{ENTITY_LABELS[labelOf(ph)] ?? "Другие данные"}</span>
                                   </td>
                                   <td style={isKept ? { textDecoration: "line-through" } : undefined}>
                                     {orig}
@@ -1962,9 +1975,14 @@ export default function Home() {
                                     <td style={{ textAlign: "center" }}>
                                       {o.priceYearKopecks != null ? (
                                         <>
+                                          {yearSaving > 0 && (
+                                            <div className="year-comparison">
+                                              <span>При оплате помесячно за 12 месяцев</span>
+                                              <del>{rubles(o.priceKopecks * 12)} ₽</del>
+                                            </div>
+                                          )}
                                           <button
-                                            className="ghost"
-                                            style={{ padding: "4px 10px", fontSize: 13, minWidth: 130, justifyContent: "center" }}
+                                            className="ghost year-price"
                                             disabled={payKey !== null || summary.payBlockedReason !== null}
                                             onClick={() => startPayment(o.code, 12)}
                                           >
@@ -1973,9 +1991,8 @@ export default function Home() {
                                               : `${rubles(o.priceYearKopecks)} ₽ / год`}
                                           </button>
                                           {yearSaving > 0 && (
-                                            <div className="note" style={{ marginTop: 4, fontSize: 12 }}>
-                                              {rubles(Math.round(o.priceYearKopecks / 12 / 100) * 100)} ₽ / мес.
-                                              (скидка {Math.round((yearSaving / (o.priceKopecks * 12)) * 100)}%)
+                                            <div className="year-saving">
+                                              Экономия {rubles(yearSaving)} ₽ ({Math.round((yearSaving / (o.priceKopecks * 12)) * 100)}%)
                                             </div>
                                           )}
                                         </>
@@ -2067,6 +2084,13 @@ export default function Home() {
                       </>
                     )}
                   </div>
+
+                  <section className="card api-pricing">
+                    <h2>API</h2>
+                    <p className="api-price">2 ₽ / страница</p>
+                    <p>API оплачивается отдельно и не входит в подписку.</p>
+                    <p className="note">1 страница = 1800 символов.</p>
+                  </section>
 
                   <div
                     className={`card${summary.quota.exhausted || summary.quota.expired ? " warn-card" : ""}`}
@@ -2484,7 +2508,7 @@ export default function Home() {
           {tab === "deanon" && (
             <>
               <div className="card">
-                <h2>Восстановление по маппингу (без ИИ)</h2>
+                <h2>Восстановление по ключу (без ИИ)</h2>
                 {result ? (
                   <label className="stage" style={{ borderRadius: 10 }}>
                     <input
@@ -2496,7 +2520,7 @@ export default function Home() {
                   </label>
                 ) : (
                   <p className="note">
-                    Последнего документа нет - загрузите маскированный файл и маппинг вручную.
+                    Последнего документа нет - загрузите маскированный файл и ключ восстановления.
                   </p>
                 )}
               </div>
@@ -2524,7 +2548,7 @@ export default function Home() {
                       style={{ flex: 1, minWidth: 220 }}
                       onClick={() => deMapRef.current?.click()}
                     >
-                      <strong>Маппинг</strong>
+                      <strong>Ключ восстановления</strong>
                       <div className="note">.json</div>
                       {deMapFile && (
                         <div className="file-name">
@@ -2587,7 +2611,7 @@ export default function Home() {
                     </div>
                     {deResult.leftover.length > 0 ? (
                       <div className="error" style={{ marginTop: 12 }}>
-                        Плейсхолдеры без значения в маппинге: {deResult.leftover.join(", ")}
+                        Маски без значения в ключе восстановления: {deResult.leftover.join(", ")}
                       </div>
                     ) : (
                       <p className="note" style={{ marginTop: 12, marginBottom: 0 }}>

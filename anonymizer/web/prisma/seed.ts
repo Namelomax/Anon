@@ -47,9 +47,9 @@ async function main() {
   // живой базе правятся миграцией/вручную, повторный сид их не перетирает.
   // Деньги — целые копейки; maxUsers: null = без ограничения числа пользователей.
   const paidPlans = [
-    { code: "test", title: "Тест", pagesPerMonth: 500, maxUsers: 1, priceKopecks: 50_000, priceYearKopecks: 550_000 },
-    { code: "business", title: "Бизнес", pagesPerMonth: 5000, maxUsers: null, priceKopecks: 450_000, priceYearKopecks: 5_200_000 },
-    { code: "corporate", title: "Корпоратив", pagesPerMonth: 10000, maxUsers: null, priceKopecks: 800_000, priceYearKopecks: 9_200_000 },
+    { code: "test", title: "Тест", pagesPerMonth: 500, maxUsers: 1, priceKopecks: 75_000, priceYearKopecks: 825_000 },
+    { code: "business", title: "Бизнес", pagesPerMonth: 5000, maxUsers: null, priceKopecks: 675_000, priceYearKopecks: 7_800_000 },
+    { code: "corporate", title: "Корпоратив", pagesPerMonth: 10000, maxUsers: null, priceKopecks: 1_200_000, priceYearKopecks: 13_800_000 },
   ];
   for (const p of paidPlans) {
     await prisma.plan.upsert({ where: { code: p.code }, update: {}, create: p });

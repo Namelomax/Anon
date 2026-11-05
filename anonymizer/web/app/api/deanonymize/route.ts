@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
         try {
           mapping = JSON.parse(rawMap);
         } catch {
-          return NextResponse.json({ error: "Некорректный JSON маппинга" }, { status: 400 });
+          return NextResponse.json({ error: "Некорректный JSON ключа восстановления" }, { status: 400 });
         }
       }
       const buf = Buffer.from(await file.arrayBuffer());

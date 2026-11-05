@@ -12,3 +12,83 @@
 }
 .payment-current { background: var(--panel-2); }
 .entity-summary { margin-top: 14px; }
+
+/* Ключ восстановления выделен как отдельное действие после обработки. */
+.card.recovery-notice {
+  background: #1b1b1b;
+  border-color: #606060;
+}
+.card.recovery-key-card {
+  background: #222;
+  border-color: #858585;
+}
+.card.recovery-key-card h2 {
+  color: #fff;
+}
+.recovery-key-download.ghost {
+  background: #f1f1f1;
+  border-color: #f1f1f1;
+  color: #111;
+  font-weight: 700;
+}
+.recovery-key-download.ghost:hover {
+  background: #fff;
+  border-color: #fff;
+}
+.recovery-key-note {
+  color: #dedede;
+}
+.api-price {
+  font-size: 24px;
+  font-weight: 700;
+  margin: 0 0 8px;
+}
+.year-comparison {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+  color: #c5c5c5;
+  font-size: 12px;
+}
+.year-price.ghost {
+  padding: 6px 10px;
+  min-width: 130px;
+  justify-content: center;
+  background: #f1f1f1;
+  border-color: #f1f1f1;
+  color: #111;
+  font-size: 13px;
+  font-weight: 700;
+}
+.year-price.ghost:hover:not(:disabled) {
+  background: #fff;
+  border-color: #fff;
+}
+.year-saving {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 3px 7px;
+  border: 1px solid #aaa;
+  border-radius: 6px;
+  background: #303030;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.api-pricing table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.api-pricing th,
+.api-pricing td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.api-pricing th {
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: 700;
+}
