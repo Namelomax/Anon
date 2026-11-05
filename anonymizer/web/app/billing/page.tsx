@@ -28,7 +28,7 @@ export default function BillingPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [retry, setRetry] = useState(0);
-  const [mode, setMode] = useState<"online" | "invoice">("online");
+  const [mode, setMode] = useState<"online" | "invoice" | "api">("online");
   const [months, setMonths] = useState<1 | 12>(1);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [busy, setBusy] = useState(false);
@@ -125,9 +125,10 @@ export default function BillingPage() {
       <div className={styles.intro}>
         <h1>Выберите тариф для работы с документами</h1>
         <p>Маскируйте данные, сохраняйте ключ и восстанавливайте исходный текст</p>
-        <div className={styles.toggle} role="group" aria-label="Способ оплаты">
+        <div className={styles.toggle} role="group" aria-label="Подписки и API">
           <button type="button" aria-pressed={mode === "online"} onClick={() => setMode("online")}>Онлайн-оплата</button>
           <button type="button" aria-pressed={mode === "invoice"} onClick={() => setMode("invoice")}>Для организаций</button>
+          <button type="button" aria-pressed={mode === "api"} onClick={() => setMode("api")}>API</button>
         </div>
       </div>
       {(loading || status === "loading") && <p
@@ -141,7 +142,15 @@ export default function BillingPage() {
           onClick={() => setRetry((value) => value + 1)}>Повторить</button></div>}
       {status === "authenticated" && summary && <>
         <p className={styles.current}>Текущий тариф: {summary.plan.title} · <Link href="/account/subscription">Управление подпиской</Link></p>
-        <section
+        {mode === "api" ? <section className={`${styles.section} ${styles.apiPanel}`} aria-labelledby="api-title">
+          <h2 id="api-title">API для разработчиков</h2>
+          <p className={styles.apiPrice}>2 ₽ <span>за страницу</span></p>
+          <p>Одна страница - 1 800 символов. API оплачивается отдельно и не входит в подписку.</p>
+          <div className={styles.apiLinks}>
+            <Link className={styles.primary} href="/account/developers">Управление API-ключами</Link>
+            <Link className={styles.secondary} href="/developers">Документация API</Link>
+          </div>
+        </section> : <section
           className={styles.section}
           aria-labelledby="plans-title"><div className={styles.sectionHead}>
             <div>
@@ -165,7 +174,11 @@ export default function BillingPage() {
           </p>}
           <div className={styles.plans}>
             {summary.offers.map((offer) => {
-              const price = amount(offer, months); const saving = offer.priceYearKopecks != null && offer.priceKopecks > 0 ? Math.round((1 - offer.priceYearKopecks / (offer.priceKopecks * 12)) * 100) : 0; return <article
+              const price = amount(offer, months);
+              const fullYearPrice = offer.priceKopecks * 12;
+              const savings = months === 12 && price != null ? fullYearPrice - price : 0;
+              const savingPercent = savings > 0 && fullYearPrice > 0 ? Math.round(savings / fullYearPrice * 100) : 0;
+              return <article
 
                 key={offer.code}
                 className={styles.plan}>
@@ -175,13 +188,17 @@ export default function BillingPage() {
                   </h3>
                   {offer.code === summary.plan.code && <span className={styles.badge}>Текущий</span>}
                 </div>
-                <div className={styles.price}>
-                  {price == null ? "Недоступно" : money(price)}
+                <div className={styles.priceComparison}>
+                  {savings > 0 && <div className={styles.oldPrice}><span>Без скидки</span><del>{money(fullYearPrice)}</del></div>}
+                  <div>
+                    {savings > 0 && <span className={styles.priceLabel}>Со скидкой</span>}
+                    <div className={styles.price}>{price == null ? "Недоступно" : money(price)}</div>
+                  </div>
                 </div>
                 <p className={styles.priceNote}>
                   {price == null ? "На этот период" : months === 12 ? "за 12 месяцев" : "за месяц"}
                 </p>
-                {months === 12 && price != null && saving > 0 && <p className={styles.saving}>Скидка {saving}% · {money(price / 12)} в месяц</p>}
+                {savings > 0 && <p className={styles.saving}>Экономия {money(savings)} · {savingPercent}%</p>}
                 {mode === "invoice" ? (price != null && summary.canManage ? <Link
                   className={styles.primary}
                   href={`/account/payments?plan=${encodeURIComponent(offer.code)}&months=${months}#transfer`}
@@ -205,7 +222,7 @@ export default function BillingPage() {
             })}
           </div>
           {summary.offers.length === 0 && <p className={styles.notice}>Сейчас нет доступных тарифов.</p>}
-        </section>
+        </section>}
       </>}
     </main>
     <dialog
