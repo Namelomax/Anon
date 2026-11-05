@@ -10,7 +10,7 @@ export default function LegalLayout({ children }: { children: React.ReactNode })
       <div className="legal-top">
         <Link href="/" className="legal-brand">
           <ShieldCheck size={20} />
-          Анонимизатор
+          Anon
         </Link>
         <nav className="legal-top-nav">
           <Link href="/legal" className="legal-top-link">

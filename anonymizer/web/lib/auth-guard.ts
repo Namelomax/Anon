@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
+import { bearerApiKey, identifyApiKey } from "@/lib/api-keys";
 
 /**
  * Требовать ли сессию Auth.js на маршрутах анонимизации/деанонимизации.
@@ -22,8 +23,8 @@ export type ResolveIdentityResult =
   | { identity?: undefined; error: NextResponse };
 
 /**
- * Достаёт личность вызывающего из сессии Auth.js для маршрутов anonymize/
- * deanonymize.
+ * Достаёт личность из явного Bearer-ключа или сессии Auth.js для маршрутов
+ * anonymize/deanonymize. Управление аккаунтом по-прежнему требует сессию.
  *
  * - Сессия есть → identity заполнен (accountId/userId для передачи бэкенду
  *   и для проверки квоты).
@@ -34,12 +35,27 @@ export type ResolveIdentityResult =
  *   привязки (как клиент, предшествующий системе аутентификации, см.
  *   докстринг usage_log.request_context).
  */
-export async function resolveIdentity(): Promise<ResolveIdentityResult> {
+export async function resolveIdentity(request?: Request): Promise<ResolveIdentityResult> {
+  // Явные учётные данные проверяются строго: неверный ключ не заменяется
+  // cookie-сессией или анонимным режимом разработки.
+  if (request?.headers.has("authorization")) {
+    try {
+      const key = bearerApiKey(request);
+      const identity = key ? await identifyApiKey(key) : null;
+      if (identity) return { identity };
+      return { error: NextResponse.json({ error: "API-ключ недействителен или отозван." },
+        { status: 401, headers: { "Cache-Control": "no-store", "WWW-Authenticate": "Bearer" } }) };
+    } catch {
+      return { error: NextResponse.json({ error: "Не удалось проверить API-ключ. Повторите запрос позже." },
+        { status: 503, headers: { "Cache-Control": "no-store" } }) };
+    }
+  }
   const session = await auth();
   const userId = session?.user?.id ? Number(session.user.id) : null;
   const accountId = typeof session?.accountId === "number" ? session.accountId : null;
 
-  if (userId != null && accountId != null && Number.isFinite(userId)) {
+  if (userId != null && accountId != null && Number.isSafeInteger(userId) && userId > 0 &&
+      Number.isSafeInteger(accountId) && accountId > 0) {
     return { identity: { accountId, userId } };
   }
 

@@ -68,7 +68,7 @@ function ownerQuery(identity: { accountId: number; userId: number } | null | und
  * расход списывается отдельно, импортом биллингового лога.
  */
 export async function POST(req: NextRequest) {
-  const { identity, error: authError } = await resolveIdentity();
+  const { identity, error: authError } = await resolveIdentity(req);
   if (authError) return authError;
 
   if (identity) {
@@ -166,7 +166,7 @@ export async function POST(req: NextRequest) {
  * браузер должен остановить опрос и показать нейтральное сообщение.
  */
 export async function GET(req: NextRequest) {
-  const { identity, error: authError } = await resolveIdentity();
+  const { identity, error: authError } = await resolveIdentity(req);
   if (authError) return authError;
 
   const jobId = new URL(req.url).searchParams.get("jobId");
@@ -197,6 +197,12 @@ export async function GET(req: NextRequest) {
       return NextResponse.json(
         { error: pollData.error || `Бэкенд забыл задачу ${jobId} (перезапуск или истёк TTL)` },
         { status: 404 },
+      );
+    }
+    if (pollResp.status >= 400) {
+      return NextResponse.json(
+        { error: pollData.error || "Не удалось получить состояние задачи." },
+        { status: pollResp.status },
       );
     }
     if (pollData.status === "error") {
@@ -230,7 +236,7 @@ export async function GET(req: NextRequest) {
  * закрытие страницы.
  */
 export async function DELETE(req: NextRequest) {
-  const { identity, error: authError } = await resolveIdentity();
+  const { identity, error: authError } = await resolveIdentity(req);
   if (authError) return authError;
 
   const jobId = req.nextUrl.searchParams.get("jobId");

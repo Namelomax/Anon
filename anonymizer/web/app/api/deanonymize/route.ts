@@ -20,7 +20,7 @@ const BACKEND_KEY = process.env.ANONYMIZER_BACKEND_KEY || "";
  * доступна анонимным вызывающим.
  */
 export async function POST(req: NextRequest) {
-  const { error: authError } = await resolveIdentity();
+  const { error: authError } = await resolveIdentity(req);
   if (authError) return authError;
 
   try {

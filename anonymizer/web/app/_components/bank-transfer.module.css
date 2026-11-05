@@ -1,0 +1,19 @@
+.panel, .notice { color: #ececec; }
+.notice { padding: 16px; border: 1px solid #414141; border-radius: 8px; background: #252525; line-height: 1.5; }
+.notice p { margin: 0 0 12px; }
+.notice p:last-child { margin-bottom: 0; }
+.notice a { color: #ececec; text-decoration: underline; overflow-wrap: anywhere; }
+.summary { display: flex; flex-wrap: wrap; gap: 16px 32px; padding: 16px; background: #292929; border-radius: 8px; }
+.summary div { display: grid; gap: 4px; }
+.summary span, .row dt { color: #aaa; font-size: 14px; }
+.fields { margin: 16px 0; border-top: 1px solid #393939; }
+.row { display: grid; grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); align-items: start; gap: 12px; padding: 12px 0; border-bottom: 1px solid #393939; }
+.row dd { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px; margin: 0; min-width: 0; overflow-wrap: anywhere; user-select: text; }
+.button, .copy { cursor: pointer; font: inherit; border-radius: 6px; }
+.button { padding: 10px 16px; color: #171717; background: #eee; border: 1px solid #eee; }
+.copy { padding: 4px 8px; color: #ddd; background: #292929; border: 1px solid #555; font-size: 13px; }
+.button:focus-visible, .copy:focus-visible { outline: 2px solid #ddd; outline-offset: 2px; }
+.feedback, .explanation { margin: 12px 0 0; line-height: 1.5; font-size: 14px; }
+.explanation { color: #aaa; }
+@media (max-width: 560px) { .row { grid-template-columns: minmax(0, 1fr); gap: 4px; } }
+@media (pointer: coarse) { .copy { min-height: 44px; } }
