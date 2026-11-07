@@ -39,7 +39,7 @@ function setup(options = {}) {
   const keys = load('lib/api-keys.ts', { 'node:crypto': crypto, '@/lib/db': { prisma } });
   const auth = async () => { calls.auth++; return options.session === undefined ? { user: { id: '7', role: 'admin' }, accountId: 42 } : options.session; };
   const common = { 'next/server': { NextResponse }, '@/auth': { auth }, '@/lib/api-keys': keys };
-  return { calls, keys, guard: load('lib/auth-guard.ts', common, { ANONYMIZER_REQUIRE_AUTH: 'false' }), publicApi: load('lib/public-api.ts', common), route: load('app/api/account/api-keys/route.ts', { ...common, '@/lib/db': { prisma } }) };
+  return { calls, keys, guard: load('lib/auth-guard.ts', common, { ANONYMIZER_REQUIRE_AUTH: 'false' }), publicApi: load('lib/public-api.ts', common), route: load('app/api/account/api-keys/route.ts', { ...common, '@/lib/db': { prisma } }, options.env) };
 }
 const clean = value => JSON.parse(JSON.stringify(value));
 const noStore = response => assert.equal(response.headers.get('cache-control'), 'no-store');
@@ -106,6 +106,54 @@ test('management creates only hashed keys, returns secret once and lists metadat
   const data = ctx.calls.create[0].data; assert.equal(data.keyHash, ctx.keys.hashApiKey(created.body.key)); assert.equal(data.prefix, created.body.apiKey.prefix); assert.ok(!JSON.stringify(data).includes(created.body.key));
   const listed = await ctx.route.GET(); noStore(listed); assert.equal(ctx.calls.list[0].select.keyHash, undefined); assert.equal(listed.body.key, undefined);
   const revoked = await ctx.route.DELETE(request()); noStore(revoked); assert.equal(revoked.body.key, undefined);
+});
+
+test('root and admin can list, issue and revoke keys using their current database role', async () => {
+  for (const role of ['root', 'admin']) {
+    const ctx = setup({
+      user: { accountId: 42, role, isActive: true, account: { isActive: true } },
+      session: { user: { id: '7' }, role: 'member', accountId: 42 },
+    });
+    assert.equal((await ctx.route.GET()).status, 200);
+    assert.equal((await ctx.route.POST(request(null, { body: { name: 'Synthetic extension' } }))).status, 201);
+    assert.equal((await ctx.route.DELETE(request())).status, 200);
+    assert.equal(ctx.calls.create[0].data.userId, 7);
+  }
+  const downgraded = setup({ user: { accountId: 42, role: 'member', isActive: true, account: { isActive: true } },
+    session: { user: { id: '7' }, role: 'root', accountId: 42 } });
+  for (const method of ['GET', 'POST', 'DELETE']) {
+    assert.equal((await downgraded.route[method](request(null, { body: {} }))).status, 403);
+  }
+  assert.equal(downgraded.calls.create.length, 0);
+  assert.equal(downgraded.calls.revoke.length, 0);
+});
+
+test('management uses configured public origin behind nginx without trusting forwarded hosts', async () => {
+  for (const method of ['POST', 'DELETE']) {
+    const ctx = setup({ env: { AUTH_URL: 'https://example.test' } });
+    const response = await ctx.route[method](request(null, {
+      url: 'http://localhost:3000/api/account/api-keys?id=5',
+      headers: { origin: 'https://example.test', 'sec-fetch-site': 'same-origin' }, body: {},
+    }));
+    assert.equal(response.status, method === 'POST' ? 201 : 200);
+    for (const headers of [
+      { origin: 'https://evil.test', 'x-forwarded-host': 'evil.test', 'x-forwarded-proto': 'https' },
+      { origin: 'http://localhost:3000' },
+      { origin: 'https://example.test', 'sec-fetch-site': 'cross-site' },
+    ]) {
+      const rejected = setup({ env: { AUTH_URL: 'https://example.test' } });
+      assert.equal((await rejected.route[method](request(null, {
+        url: 'http://localhost:3000/api/account/api-keys?id=5', headers, body: {},
+      }))).status, 403);
+      assert.equal(rejected.calls.auth, 0);
+      assert.equal(rejected.calls.create.length, 0);
+      assert.equal(rejected.calls.revoke.length, 0);
+    }
+  }
+  const invalid = setup({ env: { AUTH_URL: 'invalid' } });
+  assert.equal((await invalid.route.POST(request(null, { headers: { origin: 'https://example.test' }, body: {} }))).status, 403);
+  const direct = setup();
+  assert.equal((await direct.route.POST(request(null, { headers: { origin: 'https://example.test' }, body: {} }))).status, 201);
 });
 
 test('management validates names and enforces active-key limit', async () => {

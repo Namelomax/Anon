@@ -20,8 +20,16 @@ async function manager() {
 }
 
 function sameOrigin(request: NextRequest) {
+  if (request.headers.get("sec-fetch-site") === "cross-site") return false;
   const origin = request.headers.get("origin");
-  return request.headers.get("sec-fetch-site") !== "cross-site" && (!origin || origin === new URL(request.url).origin);
+  if (!origin) return true;
+  // За nginx request.url может содержать localhost, хотя браузер открыт на
+  // публичном HTTPS-домене. AUTH_URL — настроенный сервером адрес сайта.
+  // Не доверяем Origin/X-Forwarded-Host как источнику разрешённого адреса.
+  try {
+    const target = new URL(process.env.AUTH_URL?.trim() || request.url);
+    return ["https:", "http:"].includes(target.protocol) && origin === target.origin;
+  } catch { return false; }
 }
 
 export async function GET() {

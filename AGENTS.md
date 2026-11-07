@@ -50,6 +50,7 @@ Sol работает отдельно. Фактическое число одн�
 - `anonymizer/usage_log.py`, `usage_report.py` — учёт использования.
 - `anonymizer/tests/` — Python-тесты; `test_samples/` — примеры для проверок.
 - `anonymizer/web/` — Next.js 15, React 19, TypeScript, NextAuth, Prisma.
+- `anonymizer/browser-extension/` — прототип Chrome MV3: выделение текста, боковая панель, Bearer API v1 и локальное восстановление; mapping, ключ и подписи из первых восьми слов хранятся только в `chrome.storage.session`. Установка и ограничения — в README расширения; проверки: `npm test` из его каталога.
 - `anonymizer/web/app/` — страницы и API-маршруты App Router.
 - `anonymizer/web/app/api/leads/`, `lib/leads.ts` — заявки на внедрение через SMTP; форма на лендинге — `app/_components/OnPremiseLead.tsx`. Настройки `LEADS_SMTP_*` и `LEADS_TO_EMAIL` только серверные; контакты заявок в логи не писать.
 - `anonymizer/web/app/developers/`, `anonymizer/web/docs/developer-api.md` — публичная справка API для разработчиков и примеры запросов.

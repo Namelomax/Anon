@@ -9,9 +9,9 @@ import styles from "./developer-access.module.css";
 
 type ApiKey = { id: number; name: string | null; prefix: string; createdAt: string; lastUsedAt: string | null; revokedAt: string | null };
 const date = (value: string) => new Date(value).toLocaleDateString("ru-RU", { timeZone: "UTC" });
-const errorFor = (status: number) => status === 401 ? "Сессия завершилась. Войдите в аккаунт снова." : status === 403 ? "Управление ключами доступно администратору аккаунта." : "Не удалось выполнить запрос. Попробуйте ещё раз.";
+const errorFor = (status: number) => status === 401 ? "Сессия завершилась. Войдите в аккаунт снова." : status === 403 ? "Нет доступа к управлению API-ключами." : "Не удалось выполнить запрос. Попробуйте ещё раз.";
 async function responseError(response: Response) {
-  if (response.status === 400 || response.status === 409) {
+  if (response.status === 400 || response.status === 403 || response.status === 409) {
     try {
       const body: unknown = await response.json();
       if (body && typeof body === "object" && "error" in body && typeof body.error === "string") return body.error;
@@ -47,7 +47,7 @@ export default function DeveloperAccess() {
     if (status !== "authenticated" || !identity) { setLoading(false); return () => { controller.abort(); generation.current++; }; }
     setLoading(true);
     fetch("/api/account/api-keys", { cache: "no-store", signal: controller.signal })
-      .then(async response => { if (!response.ok) throw new Error(errorFor(response.status)); return response.json() as Promise<{ keys: ApiKey[] }>; })
+      .then(async response => { if (!response.ok) throw new Error(await responseError(response)); return response.json() as Promise<{ keys: ApiKey[] }>; })
       .then(data => { if (generation.current === current) { setKeys(data.keys); setLoadedFor(identity); } })
       .catch((err: unknown) => { if (!controller.signal.aborted && generation.current === current) setError(err instanceof Error ? err.message : "Не удалось загрузить ключи."); })
       .finally(() => { if (generation.current === current) setLoading(false); });
