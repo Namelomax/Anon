@@ -1,0 +1,445 @@
+{
+  "audit_date_local": "2026-11-08",
+  "timezone": "Asia/Irkutsk",
+  "observed_at_utc": "2026-11-08T08:01:12Z",
+  "scope": "Public unauthenticated GET requests, HTML parsing, one browser rendering; no indexing or ranking verification",
+  "robots": {
+    "status": 200,
+    "text": "User-Agent: *\nAllow: /\nDisallow: /api/\nDisallow: /invite/\nDisallow: /login\nDisallow: /register\n\nHost: https://anonai.ru\nSitemap: https://anonai.ru/sitemap.xml\n"
+  },
+  "robots_interpretation": {
+    "Googlebot": {
+      "/": true,
+      "/welcome": true,
+      "/developers": true,
+      "/_next/static/": true
+    },
+    "YandexBot": {
+      "/": true,
+      "/welcome": true,
+      "/developers": true,
+      "/_next/static/": true
+    },
+    "OAI-SearchBot": {
+      "/": true,
+      "/welcome": true,
+      "/developers": true,
+      "/_next/static/": true
+    }
+  },
+  "pages": [
+    {
+      "url": "https://anonai.ru/",
+      "status": 200,
+      "final_url": "https://anonai.ru/",
+      "redirects": [],
+      "title": "Анонимизатор персональных данных в документах онлайн",
+      "canonical": [],
+      "headings": [],
+      "robots_meta": null,
+      "x_robots_tag": null,
+      "extracted_document_word_count_including_title": 7,
+      "raw_link_count": 0,
+      "raw_body_text_without_scripts": "Loading status only; no landing content"
+    },
+    {
+      "url": "https://anonai.ru/sitemap.xml",
+      "status": 200,
+      "final_url": "https://anonai.ru/sitemap.xml",
+      "redirects": [],
+      "sitemap_urls": [
+        "https://anonai.ru/",
+        "https://anonai.ru/legal",
+        "https://anonai.ru/legal/offer",
+        "https://anonai.ru/legal/privacy"
+      ],
+      "robots_meta": null,
+      "x_robots_tag": null
+    },
+    {
+      "url": "https://anonai.ru/developers",
+      "status": 200,
+      "final_url": "https://anonai.ru/developers",
+      "redirects": [],
+      "title": "API для разработчиков — Anon - Анонимизатор ПДн",
+      "canonical": [],
+      "headings": [
+        {
+          "tag": "h1",
+          "text": "Маскирование документов в вашем приложении"
+        },
+        {
+          "tag": "h2",
+          "text": "Авторизация"
+        },
+        {
+          "tag": "h2",
+          "text": "Маскирование"
+        },
+        {
+          "tag": "h3",
+          "text": "Отмена"
+        },
+        {
+          "tag": "h2",
+          "text": "Восстановление"
+        },
+        {
+          "tag": "h2",
+          "text": "Ошибки и квота"
+        }
+      ],
+      "robots_meta": null,
+      "x_robots_tag": null,
+      "extracted_document_word_count_including_title": 478
+    },
+    {
+      "url": "https://anonai.ru/billing",
+      "status": 200,
+      "final_url": "https://anonai.ru/billing",
+      "redirects": [],
+      "title": "Анонимизатор персональных данных в документах онлайн",
+      "canonical": [],
+      "headings": [
+        {
+          "tag": "h1",
+          "text": "Выберите тариф для работы с документами"
+        }
+      ],
+      "robots_meta": null,
+      "x_robots_tag": null,
+      "extracted_document_word_count_including_title": 33
+    },
+    {
+      "url": "https://anonai.ru/legal",
+      "status": 200,
+      "final_url": "https://anonai.ru/legal",
+      "redirects": [],
+      "title": "Правовая информация - Анонимизатор ПДн",
+      "canonical": [
+        "https://anonai.ru/legal"
+      ],
+      "headings": [
+        {
+          "tag": "h1",
+          "text": "Правовая информация"
+        },
+        {
+          "tag": "h2",
+          "text": "Лицензионное соглашение (публичная оферта)"
+        },
+        {
+          "tag": "h2",
+          "text": "Политика в отношении обработки персональных данных"
+        },
+        {
+          "tag": "h2",
+          "text": "Сведения о Лицензиаре"
+        }
+      ],
+      "robots_meta": null,
+      "x_robots_tag": null,
+      "extracted_document_word_count_including_title": 158
+    },
+    {
+      "url": "https://anonai.ru/legal/offer",
+      "status": 200,
+      "final_url": "https://anonai.ru/legal/offer",
+      "redirects": [],
+      "title": "Лицензионное соглашение (публичная оферта) - Анонимизатор ПДн",
+      "canonical": [
+        "https://anonai.ru/legal/offer"
+      ],
+      "headings": [
+        {
+          "tag": "h1",
+          "text": "ЛИЦЕНЗИОННОЕ СОГЛАШЕНИЕ О ПРЕДОСТАВЛЕНИИ ПРОСТОЙ (НЕИСКЛЮЧИТЕЛЬНОЙ) ЛИЦЕНЗИИ"
+        },
+        {
+          "tag": "h2",
+          "text": "1. Термины и определения"
+        },
+        {
+          "tag": "h2",
+          "text": "2. Предмет Договора"
+        },
+        {
+          "tag": "h2",
+          "text": "3. Порядок предоставления доступа"
+        },
+        {
+          "tag": "h2",
+          "text": "4. Тарифы, срок подписки"
+        },
+        {
+          "tag": "h2",
+          "text": "5. Порядок, условия и ограничения использования Сервиса"
+        },
+        {
+          "tag": "h2",
+          "text": "6. Оплата"
+        },
+        {
+          "tag": "h2",
+          "text": "7. Ограничения по устройствам и добросовестное использование"
+        },
+        {
+          "tag": "h2",
+          "text": "8. Запрещенные действия"
+        },
+        {
+          "tag": "h2",
+          "text": "9. Приостановка и прекращение доступа"
+        },
+        {
+          "tag": "h2",
+          "text": "10. Применимое право и порядок урегулирования споров. Возврат денежных средств"
+        },
+        {
+          "tag": "h2",
+          "text": "11. Форс‑мажор"
+        },
+        {
+          "tag": "h2",
+          "text": "12. Ответственность и ограничения ответственности"
+        },
+        {
+          "tag": "h2",
+          "text": "13. Персональные данные и конфиденциальность"
+        },
+        {
+          "tag": "h2",
+          "text": "14. Изменение оферты"
+        },
+        {
+          "tag": "h2",
+          "text": "15. Срок действия и расторжение"
+        },
+        {
+          "tag": "h2",
+          "text": "Адреса и реквизиты Лицензиара (Правообладателя)"
+        },
+        {
+          "tag": "h2",
+          "text": "Приложение 1 к Лицензионному соглашению о предоставлении простой (неисключительной) лицензии (публичной оферте)"
+        },
+        {
+          "tag": "h2",
+          "text": "ТАРИФЫ"
+        }
+      ],
+      "robots_meta": null,
+      "x_robots_tag": null,
+      "extracted_document_word_count_including_title": 3754
+    },
+    {
+      "url": "https://anonai.ru/legal/privacy",
+      "status": 200,
+      "final_url": "https://anonai.ru/legal/privacy",
+      "redirects": [],
+      "title": "Политика в отношении обработки персональных данных - Анонимизатор ПДн",
+      "canonical": [
+        "https://anonai.ru/legal/privacy"
+      ],
+      "headings": [
+        {
+          "tag": "h1",
+          "text": "ПОЛИТИКА"
+        },
+        {
+          "tag": "h2",
+          "text": "1. Общие положения"
+        },
+        {
+          "tag": "h2",
+          "text": "2. Сведения о Лицензиаре"
+        },
+        {
+          "tag": "h2",
+          "text": "3. Две самостоятельные обработки"
+        },
+        {
+          "tag": "h2",
+          "text": "4. Обработка № 1: документы Пользователя"
+        },
+        {
+          "tag": "h3",
+          "text": "4.1. Цель"
+        },
+        {
+          "tag": "h3",
+          "text": "4.2. Категории персональных данных"
+        },
+        {
+          "tag": "h3",
+          "text": "4.3. Специальные категории и биометрические персональные данные"
+        },
+        {
+          "tag": "h3",
+          "text": "4.4. Порядок обработки"
+        },
+        {
+          "tag": "h3",
+          "text": "4.5. Срок хранения"
+        },
+        {
+          "tag": "h3",
+          "text": "4.6. Использование для обучения моделей"
+        },
+        {
+          "tag": "h2",
+          "text": "5. Обработка № 2: учётные записи Пользователей"
+        },
+        {
+          "tag": "h3",
+          "text": "5.1. Цели и основания"
+        },
+        {
+          "tag": "h3",
+          "text": "5.5. Сроки хранения"
+        },
+        {
+          "tag": "h2",
+          "text": "6. Локализация баз данных"
+        },
+        {
+          "tag": "h2",
+          "text": "7. Привлечение третьих лиц"
+        },
+        {
+          "tag": "h2",
+          "text": "8. Права субъектов персональных данных"
+        },
+        {
+          "tag": "h2",
+          "text": "9. Меры по обеспечению безопасности"
+        },
+        {
+          "tag": "h2",
+          "text": "10. Изменение Политики"
+        }
+      ],
+      "robots_meta": null,
+      "x_robots_tag": null,
+      "extracted_document_word_count_including_title": 1493
+    },
+    {
+      "url": "https://anonai.ru/seo-audit-missing-20261108",
+      "status": 404,
+      "final_url": "https://anonai.ru/seo-audit-missing-20261108",
+      "redirects": [],
+      "title": "Анонимизатор персональных данных в документах онлайн",
+      "canonical": [],
+      "headings": [
+        {
+          "tag": "h1",
+          "text": "Страница не найдена"
+        }
+      ],
+      "robots_meta": "noindex",
+      "x_robots_tag": null,
+      "extracted_document_word_count_including_title": 48
+    },
+    {
+      "url": "http://anonai.ru/",
+      "status": 200,
+      "final_url": "https://anonai.ru/",
+      "redirects": [
+        {
+          "status": 301,
+          "url": "http://anonai.ru/",
+          "location": "https://anonai.ru/"
+        }
+      ],
+      "title": "Анонимизатор персональных данных в документах онлайн",
+      "canonical": [],
+      "headings": [],
+      "robots_meta": null,
+      "x_robots_tag": null,
+      "extracted_document_word_count_including_title": 7
+    },
+    {
+      "url": "https://www.anonai.ru/",
+      "status": 200,
+      "final_url": "https://anonai.ru/",
+      "redirects": [
+        {
+          "status": 301,
+          "url": "https://www.anonai.ru/",
+          "location": "https://anonai.ru/"
+        }
+      ],
+      "title": "Анонимизатор персональных данных в документах онлайн",
+      "canonical": [],
+      "headings": [],
+      "robots_meta": null,
+      "x_robots_tag": null,
+      "extracted_document_word_count_including_title": 7
+    },
+    {
+      "url": "https://anonai.ru/?utm_source=seo-audit",
+      "status": 200,
+      "final_url": "https://anonai.ru/?utm_source=seo-audit",
+      "redirects": [],
+      "title": "Анонимизатор персональных данных в документах онлайн",
+      "canonical": [],
+      "headings": [],
+      "robots_meta": null,
+      "x_robots_tag": null,
+      "extracted_document_word_count_including_title": 7
+    }
+  ],
+  "extra_pages": [
+    {
+      "url": "https://anonai.ru/welcome",
+      "requested": "/welcome",
+      "status": 200,
+      "redirects": [],
+      "canonical": [],
+      "h1": [
+        "Делитесь текстом. Не личным."
+      ],
+      "robots": []
+    },
+    {
+      "url": "https://anonai.ru/developers",
+      "requested": "/developers/",
+      "status": 200,
+      "redirects": [
+        [
+          308,
+          "/developers"
+        ]
+      ],
+      "canonical": [],
+      "h1": [
+        "Маскирование документов в вашем приложении"
+      ],
+      "robots": []
+    },
+    {
+      "url": "https://anonai.ru/llms.txt",
+      "requested": "/llms.txt",
+      "status": 200,
+      "redirects": [],
+      "canonical": [],
+      "h1": [],
+      "robots": []
+    }
+  ],
+  "rendered_home": {
+    "method": "Installed Edge headless, JavaScript enabled, fresh temporary profile, virtual-time-budget 12000 ms",
+    "h1": [
+      "Делитесь текстом. Не личным."
+    ],
+    "canonical": [],
+    "same_origin_navigation": [
+      "/developers",
+      "/legal",
+      "/legal/offer",
+      "/legal/privacy",
+      "/login",
+      "/register"
+    ]
+  }
+}

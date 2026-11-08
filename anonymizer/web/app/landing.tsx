@@ -37,7 +37,7 @@ export default function Landing() {
     <div className={styles.landing}>
       <header className={styles.header}>
         <a className={styles.brand} href="#top" aria-label="Anon - на главную"><span className={styles.brandMark}>a<span>.</span></span> anon</a>
-        <nav className={styles.nav} aria-label="Навигация"><a href="#on-premise">Внедрение</a><a href="#how">Как это работает</a><a href="#security">О данных</a><a href="/developers">API</a><a href="#faq">FAQ</a></nav>
+        <nav className={styles.nav} aria-label="Навигация"><Link href="/on-premise">Внедрение</Link><a href="#how">Как это работает</a><a href="#security">О данных</a><Link href="/developers">API</Link><Link href="/pricing">Тарифы</Link><a href="#faq">FAQ</a></nav>
         <div className={styles.headerActions}><Link href="/login">Войти</Link><Link className={styles.headerButton} href="/register">Регистрация <ArrowRight size={15} /></Link></div>
       </header>
 
@@ -45,8 +45,8 @@ export default function Landing() {
         <section className={styles.hero}>
           <div className={styles.heroCopy}>
             <div className={styles.eyebrow}><span /> СЕРВИС МАСКИРОВАНИЯ ДОКУМЕНТОВ</div>
-            <h1>Делитесь текстом.<br /><em>Не личным.</em></h1>
-            <p className={styles.lead}>Anon помогает скрыть персональные данные в документах и вернуть их обратно, когда это нужно.</p>
+            <h1>Маскирование<br />персональных данных<br /><em>в документах.</em></h1>
+            <p className={styles.lead}>Делитесь текстом, сохраняя контроль над личными данными. Anon заменяет найденные значения масками и позволяет вернуть их обратно по ключу восстановления.</p>
             <div className={styles.actions}><Link className={styles.primary} href="/register">Начать работу <ArrowRight size={18} /></Link><a className={styles.secondary} href="#on-premise">Внедрить в компании <ArrowRight size={18} /></a></div>
             <div className={styles.heroNote}><ShieldCheck size={17} /> Обратимое маскирование с ключом восстановления</div>
           </div>
@@ -79,13 +79,24 @@ export default function Landing() {
 
         <section className={styles.formats}><div><div className={styles.kicker}>ПРИВЫЧНЫЕ ФОРМАТЫ</div><h2>Ваши документы.<br /><em>Ваш рабочий процесс.</em></h2><p>Скачайте маскированный файл и ключ восстановления. Формат результата зависит от исходного файла и доступности преобразования.</p></div><div className={styles.formatList}>{["DOCX", "DOC", "XLSX", "XLS", "ODT", "RTF", "XML", "PDF", "TXT", "CSV", "MD", "JSON"].map(format => <span key={format}>.{format.toLowerCase()}</span>)}</div></section>
 
+        <section className={styles.resources} aria-labelledby="formats-guides-title">
+          <div className={styles.kicker}>ФОРМАТЫ И ПРАКТИКА</div>
+          <h2 id="formats-guides-title">Выберите свой<br /><em>рабочий сценарий</em></h2>
+          <div className={styles.resourceGrid}>
+            <Link href="/formats/docx"><h3>Word и DOCX</h3><p>Маскирование текста, таблиц и колонтитулов. Что проверить в готовом документе.</p><span>Подробнее о Word →</span></Link>
+            <Link href="/formats/pdf"><h3>PDF</h3><p>Работа с текстовым слоем, ограничения сканов и возможный формат результата.</p><span>Подробнее о PDF →</span></Link>
+            <Link href="/formats/excel"><h3>Excel</h3><p>Обработка текстовых ячеек, особенности XLS и XLSX, проверка результата.</p><span>Подробнее об Excel →</span></Link>
+            <Link href="/guides/pseudonymization-and-ai"><h3>Документы и ИИ</h3><p>Чем псевдонимизация отличается от необратимого обезличивания и зачем хранить ключ отдельно.</p><span>Прочитать руководство →</span></Link>
+          </div>
+        </section>
+
         <section className={styles.security} id="security"><div className={styles.securityIcon}><ShieldCheck size={30} /></div><div><div className={styles.kicker}>ОБРАЩЕНИЕ С ДАННЫМИ</div><h2>Контроль начинается<br /><em>с понимания</em></h2><p>Маскирование обратимо: ключ восстановления связывает плейсхолдеры с исходными значениями. Храните ключ отдельно от обработанного файла и ограничивайте доступ к нему.</p><p>Фронтенд и бэкенд размещаются в России, на инфраструктуре в Иркутске. Результат с сохранённым ключом остаётся персональными данными.</p></div></section>
 
         <section className={styles.faq} id="faq"><div><div className={styles.kicker}>ВОПРОСЫ И ОТВЕТЫ</div><h2>Полезно знать<br /><em>перед началом</em></h2></div><div className={styles.questions}><FaqItem question="Что такое ключ восстановления?"><p>Это таблица соответствий между плейсхолдерами и исходными значениями. Она нужна для восстановления документа.</p></FaqItem><FaqItem question="Можно ли восстановить исходный документ?"><p>Да, с помощью маскированного файла и его ключа восстановления. Восстановление выполняется без ИИ.</p></FaqItem><FaqItem question="Нужно ли проверять результат?"><p>Да. Перед передачей или использованием документа человек должен проверить, что нужные данные скрыты корректно.</p></FaqItem><FaqItem question="Это необратимое обезличивание?"><p>Нет. Пока существует ключ восстановления, данные можно восстановить. Это обратимое маскирование, или псевдонимизация.</p></FaqItem></div></section>
 
         <section className={styles.cta}><div><div className={styles.kicker}>НАЧНИТЕ РАБОТУ С ANON</div><h2>Меньше личного.<br /><em>Больше свободы в работе.</em></h2><p>Подготовьте документ к работе с помощью обратимого маскирования.</p></div><Link className={styles.primary} href="/register">Создать аккаунт <ArrowRight size={18} /></Link></section>
       </main>
-      <footer className={styles.footer}><a className={styles.brand} href="#top"><span className={styles.brandMark}>a<span>.</span></span> anon</a><span>Маскирование данных с возможностью восстановления</span><div><Link href={LEGAL_DOCS.offer.href}>Оферта</Link><Link href={LEGAL_DOCS.privacy.href}>Конфиденциальность</Link><Link href="/legal">Правовая информация</Link></div></footer>
+      <footer className={styles.footer}><a className={styles.brand} href="#top"><span className={styles.brandMark}>a<span>.</span></span> anon</a><span>Маскирование данных с возможностью восстановления</span><div><Link href="/pricing">Тарифы</Link><Link href="/on-premise">Внедрение</Link><Link href="/developers">API</Link><Link href={LEGAL_DOCS.offer.href}>Оферта</Link><Link href={LEGAL_DOCS.privacy.href}>Конфиденциальность</Link><Link href="/legal">Правовая информация</Link></div></footer>
     </div>
   );
 }

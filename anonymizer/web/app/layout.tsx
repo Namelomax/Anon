@@ -3,20 +3,20 @@ import "./globals.css";
 import { Providers } from "./providers";
 import { LICENSOR } from "@/lib/legal";
 import { SITE_DESCRIPTION, SITE_NAME, SITE_TITLE, SITE_URL } from "@/lib/site";
+import { pageMetadata } from "@/lib/seo";
 
 export const metadata: Metadata = {
+  ...pageMetadata(SITE_TITLE, SITE_DESCRIPTION, "/"),
   metadataBase: new URL(SITE_URL),
   title: { default: SITE_TITLE, template: `%s - ${SITE_NAME}` },
   description: SITE_DESCRIPTION,
   applicationName: SITE_NAME,
-  openGraph: {
-    type: "website",
-    locale: "ru_RU",
-    siteName: SITE_NAME,
-    title: SITE_TITLE,
-    description: SITE_DESCRIPTION,
+  // Canonical задаётся страницами: дочерние URL не должны наследовать адрес главной.
+  alternates: undefined,
+  verification: {
+    google: process.env.GOOGLE_SITE_VERIFICATION?.trim() || undefined,
+    yandex: process.env.YANDEX_SITE_VERIFICATION?.trim() || undefined,
   },
-  twitter: { card: "summary", title: SITE_TITLE, description: SITE_DESCRIPTION },
 };
 
 // Schema.org для сниппетов Яндекса и Google: что это за сервис и кто оператор.

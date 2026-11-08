@@ -1,14 +1,11 @@
-import type { Metadata } from "next";
+import { pageMetadata } from "@/lib/seo";
 import Link from "next/link";
 import { FileText } from "lucide-react";
 import { LEGAL_DOCS, LICENSOR } from "@/lib/legal";
 
 export const dynamic = "force-static";
 
-export const metadata: Metadata = {
-  title: "Правовая информация",
-  alternates: { canonical: "/legal" },
-};
+export const metadata = pageMetadata("Правовая информация", "Условия использования Anon, политика обработки персональных данных и сведения об операторе сервиса.", "/legal");
 
 const DOCS = [
   {

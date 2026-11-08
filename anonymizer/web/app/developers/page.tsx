@@ -1,11 +1,12 @@
-import type { Metadata } from "next";
+import { pageMetadata } from "@/lib/seo";
 import Link from "next/link";
 import styles from "./developers.module.css";
 
-export const metadata: Metadata = {
-  title: "API для разработчиков — Anon",
-  description: "Подключение API Anon: ключи доступа, маскирование документов, опрос задач и восстановление с помощью mapping.",
-};
+export const metadata = pageMetadata(
+  "API маскирования персональных данных",
+  "Подключение API Anon: ключи доступа, маскирование документов, опрос задач и восстановление с помощью mapping.",
+  "/developers",
+);
 
 const submit = `curl -X POST "$ANON_BASE_URL/api/v1/anonymize" \\
   -H "Authorization: Bearer $ANON_API_KEY" \\

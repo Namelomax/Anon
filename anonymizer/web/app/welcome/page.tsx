@@ -1,5 +1,5 @@
-import Landing from "../landing";
+import { permanentRedirect } from "next/navigation";
 
 export default function WelcomePage() {
-  return <Landing />;
+  permanentRedirect("/");
 }
