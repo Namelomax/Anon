@@ -78,22 +78,44 @@ export async function PATCH(request: NextRequest) {
     let body: unknown;
     try { body = await request.json(); } catch { return json({ error: "Некорректный JSON." }, 400); }
     if (!body || typeof body !== "object" || Array.isArray(body) ||
-        Object.keys(body).some(key => !["accountId", "pageLimitOverrideTenths"].includes(key))) {
-      return json({ error: "Укажите аккаунт и новый лимит." }, 400);
+        Object.keys(body).some(key => !["accountId", "pageLimitOverrideTenths", "paidUntil"].includes(key))) {
+      return json({ error: "Укажите аккаунт и изменения лимита или срока доступа." }, 400);
     }
-    const { accountId, pageLimitOverrideTenths } = body as Record<string, unknown>;
+    const fields = body as Record<string, unknown>;
+    const { accountId, pageLimitOverrideTenths, paidUntil } = fields;
+    const hasLimit = Object.prototype.hasOwnProperty.call(fields, "pageLimitOverrideTenths");
+    const hasExpiry = Object.prototype.hasOwnProperty.call(fields, "paidUntil");
     if (typeof accountId !== "number" || !Number.isInteger(accountId) || accountId <= 0 || accountId > MAX_INT ||
-        (pageLimitOverrideTenths !== null &&
+        (!hasLimit && !hasExpiry)) {
+      return json({ error: "Укажите аккаунт и изменения лимита или срока доступа." }, 400);
+    }
+    if (hasLimit && pageLimitOverrideTenths !== null &&
           (typeof pageLimitOverrideTenths !== "number" || !Number.isInteger(pageLimitOverrideTenths) ||
-           pageLimitOverrideTenths < 0 || pageLimitOverrideTenths > MAX_INT))) {
+           pageLimitOverrideTenths < 0 || pageLimitOverrideTenths > MAX_INT)) {
       return json({ error: "Лимит должен быть целым числом десятых долей страницы от 0 до 2147483647; null возвращает лимит тарифа." }, 400);
     }
-    // Меняется только базовый лимит аккаунта. Расход, гранты, тариф и даты
-    // подписки сохраняются; новые запросы checkQuota сразу увидят исключение.
+    const data: { pageLimitOverrideTenths?: number | null; paidUntil?: Date | null } = {};
+    if (hasLimit) data.pageLimitOverrideTenths = pageLimitOverrideTenths as number | null;
+    if (hasExpiry) {
+      if (paidUntil === null) {
+        data.paidUntil = null;
+      } else {
+        const date = typeof paidUntil === "string" &&
+          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(paidUntil)
+          ? new Date(paidUntil) : null;
+        if (!date || Number.isNaN(date.getTime()) || date.getUTCFullYear() < 1 || date.toISOString() !== paidUntil) {
+          return json({ error: "Укажите корректные дату и время окончания в UTC; null снимает ограничение срока." }, 400);
+        }
+        data.paidUntil = date;
+      }
+    }
+    // Частичное изменение без платежа. Не меняем тариф, якорь расчётных
+    // периодов, расход и гранты. Продление истёкшего срока продолжает прежний
+    // график квот; у аккаунта без якоря остаются календарные месяцы по UTC.
     const updated = await prisma.account.updateMany({
-      where: { id: accountId }, data: { pageLimitOverrideTenths: pageLimitOverrideTenths as number | null },
+      where: { id: accountId }, data,
     });
     if (!updated.count) return json({ error: "Аккаунт не найден." }, 404);
     return json({ ok: true });
-  } catch { return json({ error: "Не удалось изменить лимит." }, 503); }
+  } catch { return json({ error: "Не удалось сохранить изменения аккаунта." }, 503); }
 }

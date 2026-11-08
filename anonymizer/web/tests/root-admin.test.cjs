@@ -174,3 +174,54 @@ test('manual limit changes immediately affect real quota checks without resettin
   for (const call of calls.counters) assert.deepEqual(clean(call.update), {});
   for (const call of calls.grants) assert.deepEqual(clean(call.where), { accountId: 19, OR: [{ period: '2026-01' }, { period: null }] });
 });
+
+test('PATCH validates canonical UTC expiry and updates only requested fields', async () => {
+  for (const [body, expected] of [
+    [{ accountId: 19, paidUntil: '2030-02-28T12:34:56.789Z' }, { paidUntil: '2030-02-28T12:34:56.789Z' }],
+    [{ accountId: 19, paidUntil: '2000-01-01T00:00:00.000Z' }, { paidUntil: '2000-01-01T00:00:00.000Z' }],
+    [{ accountId: 19, paidUntil: null }, { paidUntil: null }],
+    [{ accountId: 19, paidUntil: '2030-01-01T00:00:00.000Z', pageLimitOverrideTenths: 0 }, { paidUntil: '2030-01-01T00:00:00.000Z', pageLimitOverrideTenths: 0 }],
+  ]) {
+    const ctx = setup(); const response = await ctx.route.PATCH(req({ headers: { origin: 'https://example.test' }, body }));
+    assert.equal(response.status, 200); noStore(response);
+    assert.deepEqual(clean(ctx.calls.update[0]), { where: { id: 19 }, data: expected });
+    if (typeof body.paidUntil === 'string') assert.equal(Object.prototype.toString.call(ctx.calls.update[0].data.paidUntil), '[object Date]');
+  }
+  for (const paidUntil of [0, true, {}, [], '2030-02-30T00:00:00.000Z', '0000-01-01T00:00:00.000Z', '2030-01-01T00:00:00Z', '2030-01-01T00:00:00.000+00:00', '2030-01-01T00:00:00.000', 'not-a-date']) {
+    const ctx = setup(); const response = await ctx.route.PATCH(req({ headers: { origin: 'https://example.test' }, body: { accountId: 19, paidUntil } }));
+    assert.equal(response.status, 400, JSON.stringify(paidUntil)); noStore(response); assert.equal(ctx.calls.update.length, 0);
+  }
+  const ctx = setup(); const response = await ctx.route.PATCH(req({ headers: { origin: 'https://example.test' }, body: { accountId: 19, paidUntil: null, periodAnchorAt: null } }));
+  assert.equal(response.status, 400); assert.equal(ctx.calls.update.length, 0);
+});
+
+test('expiry updates immediately change real quota decisions without changing anchor, limit or usage', async () => {
+  const anchor = new Date('2024-01-31T12:00:00.000Z');
+  const account = { id: 19, isActive: true, paidUntil: new Date('2000-01-01T00:00:00.000Z'), periodAnchorAt: anchor,
+    pageLimitOverrideTenths: 100, planId: 4, plan: { code: 'basic', pagesPerMonth: 10 } };
+  const updates = [], counters = [], grants = [];
+  const prisma = {
+    user: { findUnique: async () => ({ accountId: 42, role: 'root', isActive: true, account: { isActive: true } }) },
+    account: { findUnique: async () => account, updateMany: async args => { updates.push(args); Object.assign(account, args.data); return { count: 1 }; } },
+    quotaCounter: { upsert: async args => { counters.push(args); return { pagesUsedTenths: 50 }; } },
+    quotaGrant: { aggregate: async args => { grants.push(args); return { _sum: { pagesTenths: 20 } }; } },
+  };
+  const period = load('lib/period.ts', {});
+  const quota = load('lib/quota.ts', { '@/lib/db': { prisma }, '@/lib/usage-import': { importUsageLog: async () => {} }, '@/lib/period': period });
+  const guard = load('lib/root-admin.ts', { 'next/server': { NextResponse }, '@/auth': { auth: async () => ({ user: { id: '7' }, accountId: 42 }) }, '@/lib/db': { prisma } });
+  const route = load('app/api/admin/accounts/route.ts', { 'next/server': { NextResponse }, '@/lib/root-admin': guard, '@/lib/db': { prisma }, '@/lib/quota': quota });
+  const change = async paidUntil => {
+    const response = await route.PATCH(req({ headers: { origin: 'https://example.test' }, body: { accountId: 19, paidUntil } }));
+    assert.equal(response.status, 200); assert.deepEqual(Object.keys(updates.at(-1).data), ['paidUntil']);
+    assert.equal(account.periodAnchorAt, anchor); assert.equal(account.pageLimitOverrideTenths, 100); assert.equal(account.planId, 4);
+  };
+  assert.equal((await quota.checkQuota(19)).status, 402);
+  await change('9999-12-31T23:59:59.999Z');
+  let state = await quota.getQuotaState(19); assert.equal(state.usedTenths, 50); assert.equal(state.remainingTenths, 70); assert.equal((await quota.checkQuota(19)).ok, true);
+  await change('2000-01-01T00:00:00.000Z'); assert.equal((await quota.checkQuota(19)).status, 402);
+  await change(null); state = await quota.getQuotaState(19); assert.equal(state.usedTenths, 50); assert.equal(state.expired, false); assert.equal((await quota.checkQuota(19)).ok, true);
+  for (const call of counters) assert.deepEqual(clean(call.update), {});
+  assert.ok(grants.length > 0);
+  assert.equal(period.addMonthsClamped(anchor, 1).toISOString(), '2024-02-29T12:00:00.000Z');
+  assert.equal(period.addMonthsClamped(anchor, 2).toISOString(), '2024-03-31T12:00:00.000Z');
+});

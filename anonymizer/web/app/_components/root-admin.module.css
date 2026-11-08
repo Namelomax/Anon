@@ -5,3 +5,6 @@
 .actions button { padding: 10px 14px; border: 1px solid #555; border-radius: 8px; background: #303030; color: #eee; font: inherit; cursor: pointer; }
 .actions button:first-child { background: #eee; color: #171717; }
 .actions button:disabled { opacity: .45; cursor: default; }
+.access { border-top: 1px solid #343434; margin-top: 26px; padding-top: 22px; }
+.access h3 { margin: 0; font-size: 17px; }
+.access .actions + .actions { margin-top: 16px; }
