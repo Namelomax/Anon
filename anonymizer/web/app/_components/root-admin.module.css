@@ -1,0 +1,7 @@
+﻿.search, .field { display: flex; flex-direction: column; gap: 8px; color: #bbb; font-size: 14px; margin: 24px 0 12px; }
+.search input, .field input { width: 100%; max-width: 420px; color: #eee; background: #292929; border: 1px solid #444; border-radius: 8px; padding: 11px; font: inherit; }
+.stats { display: grid; gap: 8px; color: #ddd; font-size: 14px; line-height: 1.5; }
+.actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; color: #bbb; font-size: 14px; }
+.actions button { padding: 10px 14px; border: 1px solid #555; border-radius: 8px; background: #303030; color: #eee; font: inherit; cursor: pointer; }
+.actions button:first-child { background: #eee; color: #171717; }
+.actions button:disabled { opacity: .45; cursor: default; }

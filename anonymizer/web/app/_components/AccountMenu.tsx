@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import Link from "next/link";
-import { Code2, CreditCard, FileText, LogOut, Settings } from "lucide-react";
+import { Code2, CreditCard, FileText, LogOut, Settings, ShieldCheck } from "lucide-react";
 import styles from "./account-menu.module.css";
 
 type Props = {
@@ -10,11 +10,12 @@ type Props = {
   planTitle?: string;
   renewalLabel: string;
   canManage?: boolean;
+  isRoot?: boolean;
   onSettings: () => void;
   onSignOut: () => void;
 };
 
-export default function AccountMenu({ email, planTitle, renewalLabel, canManage = false, onSettings, onSignOut }: Props) {
+export default function AccountMenu({ email, planTitle, renewalLabel, canManage = false, isRoot = false, onSettings, onSignOut }: Props) {
   const details = useRef<HTMLDetailsElement>(null);
 
   useEffect(() => {
@@ -50,6 +51,7 @@ export default function AccountMenu({ email, planTitle, renewalLabel, canManage 
           <Link href="/account/subscription" onClick={close}><CreditCard size={16} aria-hidden="true" />Моя подписка</Link>
           {canManage && <Link href="/account/payments" onClick={close}><FileText size={16} aria-hidden="true" />Платежи и реквизиты</Link>}
           <Link href="/account/developers" onClick={close}><Code2 size={16} aria-hidden="true" />API</Link>
+          {isRoot && <Link href="/admin" onClick={close}><ShieldCheck size={16} aria-hidden="true" />Администрирование</Link>}
           <button type="button" onClick={() => { close(); onSettings(); }}><Settings size={16} aria-hidden="true" />Настройки аккаунта</button>
           <button type="button" onClick={() => { close(); onSignOut(); }}><LogOut size={16} aria-hidden="true" />Выйти</button>
         </nav>

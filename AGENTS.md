@@ -58,6 +58,7 @@ Sol работает отдельно. Фактическое число одн�
 - `anonymizer/web/app/billing/` — витрина тарифов и выбор оплаты; `app/account/subscription/` — текущий тариф и квота, `app/account/payments/` — история платежей и банковский перевод. Меню аккаунта внизу боковой панели — `app/_components/AccountMenu.tsx`.
 - `anonymizer/web/app/api/billing/bank-details/` — доступные администраторам реквизиты и расчёт банковского перевода только для чтения; настройки описаны в веб-README.
 - `anonymizer/web/lib/` — авторизация, квоты, биллинг, платежи и общая логика.
+- `anonymizer/web/app/admin/`, `app/api/admin/accounts/`, `lib/root-admin.ts` — доступная только активному `root` админка всех аккаунтов и пользователей; ручной общий лимит страниц через существующее `Account.pageLimitOverrideTenths`, без сброса расхода и продления подписки. Права перепроверяются в БД, PATCH проверяет Origin. Проверки — `tests/root-admin.test.cjs` из веб-каталога.
 - `anonymizer/web/prisma/` — схема SQLite, миграции и seed.
 - `deploy/` — конфигурации nginx/systemd, зависимости API и инструкции выкладки.
 - `anonymizer/ЮРИДИЧЕСКИЕ_ДОКУМЕНТЫ/` — требования, решения и документы проекта.

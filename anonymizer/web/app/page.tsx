@@ -1382,6 +1382,7 @@ export default function Home() {
               email={session.user.email}
               planTitle={summary?.plan.title}
               canManage={summary?.canManage === true}
+              isRoot={summary?.user.role === "root"}
               renewalLabel={summary?.plan.priceKopecks ? "Продлить" : "Тарифы"}
               onSettings={() => pickTab("account")}
               onSignOut={() => {
