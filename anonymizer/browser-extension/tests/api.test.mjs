@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { submitJob, pollJob, cancelJob } from '../api.js';
+import { submitJob, pollJob, cancelJob, checkConnection } from '../api.js';
 
 const settings = { baseUrl: 'https://example.org', apiKey: 'secret' };
 test('uses bearer, multipart and private request settings', async () => {
@@ -40,4 +40,39 @@ test('HTTP errors expose only status, never server content', async () => {
     globalThis.fetch = async () => new Response('secret private text', { status: 401 });
     await assert.rejects(pollJob(settings, 'id'), error => error.status === 401 && !error.message.includes('secret'));
   } finally { globalThis.fetch = old; }
+});
+
+test('connection check accepts only the authenticated missing-job response', async () => {
+  const old = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      assert.equal(options.method, 'GET');
+      assert.equal(url.search, '');
+      assert.equal(options.body, undefined);
+      return Response.json({ error: 'jobId обязателен' }, { status: 400 });
+    };
+    assert.deepEqual(await checkConnection(settings), { authenticated: true });
+    globalThis.fetch = async () => Response.json({ error: 'private secret' }, { status: 400 });
+    await assert.rejects(checkConnection(settings), e => e.code === 'INVALID_RESPONSE' && !e.message.includes('secret'));
+    globalThis.fetch = async () => new Response('<html>secret</html>', { status: 400 });
+    await assert.rejects(checkConnection(settings), e => e.code === 'INVALID_RESPONSE' && !e.message.includes('secret'));
+    globalThis.fetch = async () => Response.json({ error: 'secret' }, { status: 401 });
+    await assert.rejects(checkConnection(settings), e => e.code === 'HTTP' && e.status === 401 && !e.message.includes('secret'));
+  } finally { globalThis.fetch = old; }
+});
+
+test('submission timeout is bounded and does not retry', async () => {
+  const oldFetch = globalThis.fetch, oldSetTimeout = globalThis.setTimeout, oldClearTimeout = globalThis.clearTimeout;
+  let calls = 0;
+  try {
+    globalThis.setTimeout = (callback, delay) => { assert.equal(delay, 120000); queueMicrotask(callback); return 1; };
+    globalThis.clearTimeout = () => {};
+    globalThis.fetch = async (_url, options) => {
+      calls++;
+      await new Promise(resolve => options.signal.addEventListener('abort', resolve, { once: true }));
+      throw new Error('secret');
+    };
+    await assert.rejects(submitJob(settings, 'text'), e => e.code === 'TIMEOUT' && /могло быть создано/.test(e.message) && !e.message.includes('secret'));
+    assert.equal(calls, 1);
+  } finally { globalThis.fetch = oldFetch; globalThis.setTimeout = oldSetTimeout; globalThis.clearTimeout = oldClearTimeout; }
 });

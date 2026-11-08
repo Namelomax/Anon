@@ -1,17 +1,18 @@
 {
   "manifest_version": 3,
   "name": "Anon — маскирование текста",
-  "version": "0.1.0",
+  "version": "0.7.1",
   "description": "Маскирование выделенного текста через Anon и локальное восстановление по таблице соответствий.",
   "minimum_chrome_version": "116",
-  "permissions": ["activeTab", "scripting", "contextMenus", "sidePanel", "storage", "clipboardWrite"],
+  "permissions": ["activeTab", "scripting", "contextMenus", "sidePanel", "storage", "clipboardWrite", "alarms", "offscreen"],
   "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*", "http://[::1]/*"],
   "background": { "service_worker": "background.js", "type": "module" },
   "action": { "default_title": "Открыть Anon" },
   "side_panel": { "default_path": "panel.html" },
   "commands": {
-    "mask-selection": { "suggested_key": { "default": "Alt+Shift+M" }, "description": "Открыть выделенный текст для маскирования" },
-    "restore-selection": { "suggested_key": { "default": "Alt+Shift+R" }, "description": "Открыть выделенный текст для восстановления" }
+    "mask-selection": { "suggested_key": { "default": "Alt+Shift+M" }, "description": "Сразу маскировать и заменить выделенный текст" },
+    "restore-selection": { "suggested_key": { "default": "Alt+Shift+U" }, "description": "Сразу восстановить выделенный текст" },
+    "inspect-selection": { "suggested_key": { "default": "Alt+Shift+L" }, "description": "Показать замены в выделенном тексте" }
   },
   "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" }
 }

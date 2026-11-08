@@ -12,34 +12,44 @@ function checkMapping(mapping) {
   }
 }
 
-function randomNamespace() {
-  const bytes = crypto.getRandomValues(new Uint8Array(12));
-  return Array.from(bytes, byte => String.fromCharCode(65 + (byte & 15))).join('');
-}
-
-export function createRecord(text, result, namespace) {
+export function createRecord(text, result, counters = {}) {
   if (typeof text !== 'string' || !result || typeof result.anonymized_text !== 'string') throw new Error('Некорректный ответ сервера');
   checkMapping(result.mapping);
   // An identical source token cannot be distinguished reliably from a server replacement.
   if (Object.keys(result.mapping).some(key => text.includes(key))) throw new Error('Плейсхолдер в исходном тексте совпадает с ответом сервера');
-  const occupied = text + result.anonymized_text + Object.keys(result.mapping).join('');
-  let ns = namespace;
-  if (ns !== undefined && (!/^[A-P]{12}$/.test(ns) || occupied.includes(`_${ns}_`))) throw new Error('Некорректное пространство имён');
-  if (ns === undefined) {
-    do { ns = randomNamespace(); } while (occupied.includes(`_${ns}_`));
+  if (!counters || typeof counters !== 'object' || Array.isArray(counters)) throw new Error('Некорректные счётчики плейсхолдеров');
+  const tokenCounters = Object.create(null);
+  for (const [label, count] of Object.entries(counters)) {
+    if (!/^[A-Z_]+$/.test(label) || !Number.isSafeInteger(count) || count < 0) throw new Error('Некорректные счётчики плейсхолдеров');
+    tokenCounters[label] = count;
+  }
+  // Never overwrite literal placeholders already in the source or unknown
+  // placeholders returned unchanged by the server. Replacements are single-pass.
+  const occupied = new Set(text.match(TOKEN) || []);
+  for (const token of result.anonymized_text.match(TOKEN) || []) {
+    if (!Object.hasOwn(result.mapping, token)) occupied.add(token);
   }
   const replacements = Object.create(null);
   const mapping = Object.create(null);
   for (const [key, value] of Object.entries(result.mapping)) {
-    const [, label, number] = key.match(SERVER_TOKEN);
-    const renamed = `[${label}_${ns}_${number}]`;
+    const [, label] = key.match(SERVER_TOKEN);
+    let number = tokenCounters[label] || 0;
+    let renamed;
+    do {
+      number++;
+      if (!Number.isSafeInteger(number)) throw new Error('Исчерпан диапазон номеров плейсхолдеров');
+      renamed = `[${label}_${number}]`;
+    } while (occupied.has(renamed));
+    tokenCounters[label] = number;
+    occupied.add(renamed);
     replacements[key] = renamed;
     mapping[renamed] = value;
   }
+  const maskedText = result.anonymized_text.replace(TOKEN, token => replacements[token] ?? token);
   return {
     id: crypto.randomUUID(), title: makePreview(text), createdAt: new Date().toISOString(),
-    mapping, maskedText: result.anonymized_text.replace(TOKEN, token => replacements[token] ?? token),
-    warnings: result.warnings ?? [], summary: result.summary ?? null,
+    mapping, maskedText, edits: maskedEdits(text, maskedText, result.spans, mapping),
+    warnings: result.warnings ?? [], summary: result.summary ?? null, tokenCounters,
   };
 }
 
@@ -67,3 +77,32 @@ export function validateBaseUrl(value) {
 }
 
 export function serverOrigin(value) { return new URL(validateBaseUrl(value)).origin; }
+
+// Server spans use Unicode code-point offsets; DOM/JS strings use UTF-16.
+export function maskedEdits(source, masked, spans, mapping) {
+  if (!Array.isArray(spans)) return null;
+  const positions = [0];
+  for (const char of source) positions.push(positions.at(-1) + char.length);
+  const edits = [];
+  let originalAt = 0, maskedAt = 0;
+  for (const span of [...spans].sort((a, b) => a.start - b.start)) {
+    const start = positions[span.start], end = positions[span.end];
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < originalAt || end <= start) return null;
+    const unchanged = source.slice(originalAt, start);
+    if (!masked.startsWith(unchanged, maskedAt)) return null;
+    maskedAt += unchanged.length;
+    const token = /^\[[A-Z_]+_\d+\]/.exec(masked.slice(maskedAt))?.[0];
+    if (!token || !Object.hasOwn(mapping, token)) return null;
+    edits.push({ start, end, text: token });
+    maskedAt += token.length;
+    originalAt = end;
+  }
+  return masked.slice(maskedAt) === source.slice(originalAt) ? edits : null;
+}
+
+export function restorationEdits(text, mapping) {
+  checkMapping(mapping);
+  return [...text.matchAll(TOKEN)].filter(match => Object.hasOwn(mapping, match[0])).map(match => ({
+    start: match.index, end: match.index + match[0].length, text: mapping[match[0]]
+  }));
+}

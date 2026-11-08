@@ -13,15 +13,17 @@ let settingsLoaded = false;
 let consuming = null;
 let displayedSelection = null;
 let initialState = true;
+let noticeId = null;
 
 async function send(type, payload = {}) {
   const response = await chrome.runtime.sendMessage({ type, ...payload });
   if (!response?.ok) throw new Error(response?.error || 'Не удалось выполнить действие');
   return response;
 }
-function status(message, error = false) {
+function status(message, error = false, phase = error ? 'error' : 'success') {
   $('status').textContent = message;
   $('status').classList.toggle('error', error);
+  $('status').dataset.phase = phase;
 }
 function showError(error) { status(error?.message || 'Не удалось выполнить действие', true); }
 function controls() {
@@ -34,6 +36,7 @@ function controls() {
   $('clear').disabled = busy || !state.records.length;
   $('copy').disabled = !result.value;
   $('settings').querySelector('button').disabled = working;
+  $('check-connection').disabled = working;
 }
 function showWarnings(warnings) {
   $('warnings').textContent = Array.isArray(warnings) ? warnings.map(item => typeof item === 'string' ? item : JSON.stringify(item)).join('\n') : '';
@@ -80,6 +83,10 @@ async function update(next) {
     $('api-key').value = state.settings?.apiKey || '';
     $('settings').closest('details').open = !state.settings?.baseUrl || !state.settings?.apiKey;
     settingsLoaded = true;
+  }
+  if (state.notice?.id && state.notice.id !== noticeId) {
+    noticeId = state.notice.id;
+    status(state.notice.message, state.notice.error, state.notice.phase);
   }
   if (state.activeJob) {
     if (!previousJob) knownIds = new Set(state.records.map(record => record.id));
@@ -132,14 +139,16 @@ $('mask').addEventListener('click', () => action(async () => {
   if (!input.value.trim()) throw new Error('Введите текст для маскирования');
   $('mode-label').textContent = 'Маскирование';
   knownIds = new Set(state.records.map(record => record.id));
+  status('Отправляем текст на сервер Anon…', false, 'sending');
   const response = await send('START_MASK', { text: input.value });
   result.value = '';
   showWarnings([]);
   await update(response.state);
-  status('Маскирование выполняется…');
+  status('Маскирование выполняется…', false, 'processing');
 }));
 $('restore').addEventListener('click', () => action(async () => {
   if (!input.value) throw new Error('Введите текст для восстановления');
+  status('Восстанавливаем текст…', false, 'restoring');
   const response = await send('RESTORE', { text: input.value, id: state.selectedId });
   result.value = response.text;
   $('mode-label').textContent = 'Восстановление';
@@ -179,6 +188,20 @@ $('settings').addEventListener('submit', async event => {
     });
   } catch (error) { showError(error); }
 });
+$('check-connection').addEventListener('click', () => action(async () => {
+  status('Проверяем адрес сервиса и API-ключ…', false, 'sending');
+  await send('CHECK_CONNECTION');
+  status('Сервер доступен. API-ключ принят.');
+}));
+$('shortcut-settings').addEventListener('click', () => {
+  chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
+});
+chrome.commands.getAll().then(commands => {
+  const shortcut = name => commands.find(command => command.name === name)?.shortcut;
+  const mask = shortcut('mask-selection'), restore = shortcut('restore-selection'), inspect = shortcut('inspect-selection');
+  $('shortcuts').textContent = `Маскирование: ${mask || 'не назначено'}. Восстановление: ${restore || 'не назначено'}. Просмотр замен: ${inspect || 'не назначено'}.`;
+  if (!mask || !restore || !inspect) $('shortcuts').textContent += ' Назначьте сочетание вручную: браузер мог занять предложенную комбинацию.';
+}).catch(() => { $('shortcuts').textContent = 'Проверьте сочетания клавиш в настройках расширений браузера.'; });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'session' && changes.anonState) send('GET_STATE').then(response => update(response.state)).catch(showError);
 });

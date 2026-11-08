@@ -11,6 +11,10 @@
   <header><div class="brand">A</div><div><h1>Anon</h1><p>Маскирование текста</p></div></header>
   <main>
     <p class="notice">Маскирование выполняется на сервере, восстановление — локально. Данные сессии и ключ удаляются при перезапуске, обновлении или перезагрузке расширения. Превью могут содержать персональные данные.</p>
+    <p id="shortcuts" class="hint" aria-live="polite"></p>
+    <p class="hint">Восстановление без выделения использует последний выделенный фрагмент на этой странице, если текст не изменился.</p>
+    <button id="shortcut-settings" class="small" type="button">Настроить сочетания клавиш</button>
+    <p class="hint">Для просмотра оригинала задержите указатель над плейсхолдером в тексте страницы. В полях ввода используйте сочетание «Просмотр замен» для выделенного текста.</p>
     <section aria-labelledby="input-label">
       <div class="section-head"><h2 id="input-label">Исходный текст</h2><span id="mode-label">Маскирование</span></div>
       <textarea id="input" maxlength="100000" placeholder="Вставьте текст или выделите его на странице" aria-labelledby="input-label"></textarea>
@@ -35,6 +39,8 @@
         <p class="hint">Создайте персональный ключ на сайте Anon в разделе аккаунта «Для разработчиков» (/account/developers).</p>
         <p class="hint">HTTPS или HTTP для localhost. Доступ запрашивается только к указанному адресу.</p>
         <button class="primary" type="submit">Сохранить настройки</button>
+        <button id="check-connection" type="button">Проверить подключение</button>
+        <p class="hint">Проверка подтверждает адрес сайта и ключ без отправки текста. Работа обработки проверяется при маскировании.</p>
       </form>
     </details>
   </main>
