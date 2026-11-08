@@ -716,7 +716,8 @@ export default function Home() {
   const [docBusy, setDocBusy] = useState(false);
 
   // --- Deanonymize state ---
-  const [deUseLast, setDeUseLast] = useState(true);
+  // Загрузка файлов доступна сразу, даже если последнего результата ещё нет.
+  const [deUseLast, setDeUseLast] = useState(false);
   const [deFile, setDeFile] = useState<File | null>(null);
   const [deMapFile, setDeMapFile] = useState<File | null>(null);
   const [deLoading, setDeLoading] = useState(false);
@@ -1054,7 +1055,7 @@ export default function Home() {
   // галочку: так работает кнопка обратной подстановки сразу после
   // обезличивания (см. restoreLast).
   const runDeanon = useCallback(async (forceLast = false) => {
-    const useLast = forceLast || deUseLast;
+    const useLast = (forceLast || deUseLast) && !!result;
     setDeLoading(true);
     setDeError(null);
     setDeResult(null);
@@ -1282,7 +1283,7 @@ export default function Home() {
           </button>
           <button
             className={`nav-item${tab === "deanon" ? " active" : ""}`}
-            onClick={() => pickTab("deanon")}
+            onClick={() => { setDeUseLast(false); pickTab("deanon"); }}
           >
             <KeyRound size={16} />
             Деанонимизация
@@ -2288,7 +2289,7 @@ export default function Home() {
                 )}
               </div>
 
-              {!deUseLast && (
+              {!(deUseLast && result) && (
                 <div className="card">
                   <h2>Файлы</h2>
                   <div className="row" style={{ alignItems: "stretch" }}>
@@ -2343,7 +2344,7 @@ export default function Home() {
               <div className="run">
                 <button
                   className="primary big"
-                  disabled={deLoading || (!deUseLast && (!deFile || !deMapFile)) || (deUseLast && !result)}
+                  disabled={deLoading || (!(deUseLast && result) && (!deFile || !deMapFile))}
                   onClick={() => runDeanon()}
                 >
                   {deLoading ? (
