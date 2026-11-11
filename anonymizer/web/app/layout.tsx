@@ -11,6 +11,9 @@ export const metadata: Metadata = {
   title: { default: SITE_TITLE, template: `%s - ${SITE_NAME}` },
   description: SITE_DESCRIPTION,
   applicationName: SITE_NAME,
+  icons: {
+    icon: { url: "/favicon.png", type: "image/png", sizes: "120x120" },
+  },
   // Canonical задаётся страницами: дочерние URL не должны наследовать адрес главной.
   alternates: undefined,
   verification: {
