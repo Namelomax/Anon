@@ -49,9 +49,9 @@ export default function OnPremiseLead() {
   return (
     <section className={styles.section} id="on-premise" aria-labelledby="on-premise-title">
       <div className={styles.copy}>
-        <div className={styles.kicker}>ANON ДЛЯ КОМПАНИЙ</div>
-        <h2 id="on-premise-title">Anon внутри <em>вашей компании</em></h2>
-        <p className={styles.lead}>Не хотите отправлять документы в облако? Внедрим Anon в инфраструктуре вашей компании или в вашем контуре.</p>
+        <div className={styles.kicker}>ANONAI ДЛЯ КОМПАНИЙ</div>
+        <h2 id="on-premise-title">AnonAI внутри <em>вашей компании</em></h2>
+        <p className={styles.lead}>Не хотите отправлять документы в облако? Внедрим AnonAI в инфраструктуре вашей компании или в вашем контуре.</p>
         <p>Маскируйте персональные данные в привычных рабочих процессах, сохраняя контроль над документами и доступом к ним.</p>
         <div className={styles.benefits}>
           <div><Building2 size={20} /><span>Развёртывание в вашем контуре</span></div>

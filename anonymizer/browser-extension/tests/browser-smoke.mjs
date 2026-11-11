@@ -78,12 +78,12 @@ try {
         workerClients.set(worker.id, client);
       }
       try {
-        if (await client.evaluate("typeof chrome !== 'undefined' && chrome.runtime?.getManifest().name === 'Anon — маскирование текста'")) return client;
+        if (await client.evaluate("typeof chrome !== 'undefined' && chrome.runtime?.getManifest().name === 'AnonAI — маскирование текста'")) return client;
       } catch { /* another worker is still starting */ }
     }
   });
   const extensionBase = await background.evaluate("chrome.runtime.getURL('')");
-  assert.equal(await background.evaluate('chrome.runtime.getManifest().name'), 'Anon — маскирование текста');
+  assert.equal(await background.evaluate('chrome.runtime.getManifest().name'), 'AnonAI — маскирование текста');
   // UI smoke uses a synthetic API inside the real offscreen transport.
   // commands-browser.mjs separately checks real permissions, scripting and HTTP.
   await background.evaluate(`chrome.permissions.contains = async () => true;

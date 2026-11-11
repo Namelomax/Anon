@@ -77,7 +77,7 @@ export function pageInspector(action, payload = {}) {
         host.style.pointerEvents = 'none';
         const box = document.createElement('div');
         box.style.cssText = 'font:14px system-ui;max-width:260px;padding:10px 12px;background:#1d2433;color:white;border-radius:8px;box-shadow:0 4px 18px #0005;white-space:pre-wrap;overflow-wrap:anywhere';
-        box.textContent = !result?.ok || !Array.isArray(result.entries) ? `${token}\nОткройте Anon на этой странице ещё раз` : entry?.conflict ? `${token}\nНайдено несколько значений` : entry?.original != null ? `${token}\n${entry.original}` : `${token}\nИсходное значение не найдено`;
+        box.textContent = !result?.ok || !Array.isArray(result.entries) ? `${token}\nОткройте AnonAI на этой странице ещё раз` : entry?.conflict ? `${token}\nНайдено несколько значений` : entry?.original != null ? `${token}\n${entry.original}` : `${token}\nИсходное значение не найдено`;
         root.appendChild(box);
       }, 300);
     }, true);

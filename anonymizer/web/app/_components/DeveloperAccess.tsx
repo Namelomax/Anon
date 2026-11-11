@@ -98,7 +98,7 @@ export default function DeveloperAccess() {
     </aside>
     <main className={layout.main}><div className={layout.content}>
       <h1>API</h1>
-      <p className={styles.intro}>Создайте ключ для доступа к API Anon. Используйте ключ только в серверной интеграции и храните его в секрете. Обработка через API расходует общую квоту аккаунта. <Link href="/developers">Документация API →</Link></p>
+      <p className={styles.intro}>Создайте ключ для доступа к API AnonAI. Используйте ключ только в серверной интеграции и храните его в секрете. Обработка через API расходует общую квоту аккаунта. <Link href="/developers">Документация API →</Link></p>
       {(status === "loading" || loading) && <p className={layout.notice} role="status">Загружаем ключи…</p>}
       {status === "unauthenticated" && <p className={layout.notice}>Войдите в аккаунт, чтобы управлять ключами. <Link href="/login">Войти</Link></p>}
       {status === "authenticated" && !identity && <p className={layout.notice} role="alert">Не удалось определить аккаунт. Войдите снова.</p>}

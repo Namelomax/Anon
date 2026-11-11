@@ -21,7 +21,7 @@ function load(file, imports) {
   return module.exports;
 }
 
-const site = { SITE_NAME: 'Anon', SITE_URL: 'https://example.test', SITE_TITLE: 'Documents', SITE_DESCRIPTION: 'Mask documents' };
+const site = { SITE_NAME: 'AnonAI', SITE_URL: 'https://example.test', SITE_TITLE: 'Documents', SITE_DESCRIPTION: 'Mask documents' };
 const seo = load('lib/seo.ts', { '@/lib/site': site });
 const clean = value => JSON.parse(JSON.stringify(value));
 
@@ -76,7 +76,7 @@ test('sitemap includes public pages and excludes duplicate and private routes', 
   }).default();
   const urls = sitemap.map(item => item.url);
   assert.equal(new Set(urls).size, urls.length);
-  for (const path of ['/', '/developers', '/pricing', '/on-premise', '/formats/pdf', '/formats/docx', '/formats/excel', '/guides/pseudonymization-and-ai']) {
+  for (const path of ['/', '/developers', '/pricing', '/on-premise', '/formats/pdf', '/formats/docx', '/formats/excel', '/formats/other', '/guides', '/guides/pseudonymization-and-ai']) {
     assert.ok(urls.includes(`https://example.test${path}`), path);
   }
   assert.ok(urls.every(url => !/\/(welcome|account|billing|login|register)(\/|$)/.test(url)));

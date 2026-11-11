@@ -95,7 +95,7 @@ export function pageSelection(action, payload = {}) {
       content.className = 'content';
       const title = document.createElement('div');
       title.className = 'title';
-      title.textContent = `Anon · ${phases[phase]}`;
+      title.textContent = `AnonAI · ${phases[phase]}`;
       const message = document.createElement('div');
       message.className = 'message';
       message.textContent = typeof payload.message === 'string' ? payload.message.slice(0, 300) : '';
@@ -230,7 +230,7 @@ export function pageSelection(action, payload = {}) {
           if (!Number.isInteger(edit.start) || !Number.isInteger(edit.end) || edit.start < previous || edit.end < edit.start || edit.end > item.source.length || typeof edit.text !== 'string') return fail('Некорректные границы замены.');
           expected += item.source.slice(previous, edit.start) + edit.text;
           previous = edit.end;
-          if (segments.some(segment => segment.virtual && edit.start < segment.end && edit.end > segment.start)) return fail('Не удалось сохранить разметку этой замены. Результат доступен в панели Anon.');
+          if (segments.some(segment => segment.virtual && edit.start < segment.end && edit.end > segment.start)) return fail('Не удалось сохранить разметку этой замены. Результат доступен в панели AnonAI.');
           const affected = segments.filter(segment => !segment.virtual && edit.start < segment.end && edit.end > segment.start);
           if (!affected.length) return fail('Не удалось определить текст для замены.');
           plans.push({ edit, affected });

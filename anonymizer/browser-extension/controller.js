@@ -41,11 +41,11 @@ export function createController({ storage, counterStorage = storage, hasPermiss
     await storage.set({ [STATE_KEY]: state });
   }
   async function checkSettings(settings) {
-    if (!settings?.baseUrl || !settings?.apiKey) throw new Error('Сначала откройте Anon и сохраните адрес сервиса и API-ключ.');
+    if (!settings?.baseUrl || !settings?.apiKey) throw new Error('Сначала откройте AnonAI и сохраните адрес сервиса и API-ключ.');
     const baseUrl = validateBaseUrl(settings?.baseUrl);
     const apiKey = settings?.apiKey?.trim();
     if (typeof apiKey !== 'string' || !/^anon_[A-Za-z0-9_-]+$/.test(apiKey) || apiKey.length > 512) {
-      throw new Error('Введите персональный API-ключ Anon из раздела «Для разработчиков».');
+      throw new Error('Введите персональный API-ключ AnonAI из раздела «Для разработчиков».');
     }
     if (!await hasPermission(serverOrigin(baseUrl) + '/*')) {
       throw new Error('Разрешите расширению доступ к выбранному серверу в настройках.');
@@ -203,13 +203,13 @@ export function createController({ storage, counterStorage = storage, hasPermiss
             const mapping = Object.create(null);
             for (const record of state.records) {
               for (const [key, value] of Object.entries(record.mapping)) {
-                if (Object.hasOwn(mapping, key) && mapping[key] !== value) throw new Error('Конфликт таблиц соответствий. Выберите запись в панели Anon.');
+                if (Object.hasOwn(mapping, key) && mapping[key] !== value) throw new Error('Конфликт таблиц соответствий. Выберите запись в панели AnonAI.');
                 mapping[key] = value;
               }
             }
             const tokens = text.match(/\[[A-Z_]+_\d+\]/g) || [];
             const restoredCount = tokens.filter(token => Object.hasOwn(mapping, token)).length;
-            if (!restoredCount) throw new Error('Не найдены плейсхолдеры из текущей сессии Anon.');
+            if (!restoredCount) throw new Error('Не найдены плейсхолдеры из текущей сессии AnonAI.');
             return { ...restoreText(text, mapping), restoredCount, edits: restorationEdits(text, mapping) };
           }
           default: throw new Error('Неизвестное действие расширения.');

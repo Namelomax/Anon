@@ -3,7 +3,7 @@
 // указывать на тестовый поддомен, а поисковикам нужен один боевой адрес.
 export const SITE_URL = (process.env.SITE_URL?.trim() || "https://anonai.ru").replace(/\/$/, "");
 
-export const SITE_NAME = "Anon";
+export const SITE_NAME = "AnonAI";
 
 export const SITE_TITLE = "Маскирование персональных данных в документах онлайн";
 

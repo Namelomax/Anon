@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "Anon — маскирование текста",
+  "name": "AnonAI — маскирование текста",
   "version": "0.7.1",
-  "description": "Маскирование выделенного текста через Anon и локальное восстановление по таблице соответствий.",
+  "description": "Маскирование выделенного текста через AnonAI и локальное восстановление по таблице соответствий.",
   "minimum_chrome_version": "116",
   "permissions": ["activeTab", "scripting", "contextMenus", "sidePanel", "storage", "clipboardWrite", "alarms", "offscreen"],
   "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*", "http://[::1]/*"],
   "background": { "service_worker": "background.js", "type": "module" },
-  "action": { "default_title": "Открыть Anon" },
+  "action": { "default_title": "Открыть AnonAI" },
   "side_panel": { "default_path": "panel.html" },
   "commands": {
     "mask-selection": { "suggested_key": { "default": "Alt+Shift+M" }, "description": "Сразу маскировать и заменить выделенный текст" },

@@ -64,7 +64,7 @@ try {
   await pause(400);
   await evaluate(`respond({ok:false})`, context);
   await pause(50);
-  assert.match(await evaluate(`roots.__anon_extension_tooltip.textContent`, context), /Anon/);
+  assert.match(await evaluate(`roots.__anon_extension_tooltip.textContent`, context), /AnonAI/);
   await inspector('show');
   const count = await evaluate('calls.length', context);
   await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y });

@@ -6,7 +6,7 @@ import styles from "./pricing.module.css";
 export const dynamic = "force-dynamic";
 export const metadata = pageMetadata(
   "Тарифы на маскирование документов",
-  "Тарифы Anon для маскирования персональных данных в документах: лимиты страниц, пользователи и стоимость.",
+  "Тарифы AnonAI для маскирования персональных данных в документах: лимиты страниц, пользователи и стоимость.",
   "/pricing",
 );
 
@@ -22,7 +22,7 @@ export default async function PricingPage() {
 
   return <div className={styles.page}>
     <header className={styles.header}>
-      <Link href="/" className={styles.brand}>Anon<span>.</span></Link>
+      <Link href="/" className={styles.brand}>AnonAI<span>.</span></Link>
       <nav aria-label="Основная навигация">
         <Link href="/on-premise">Внедрение</Link>
         <Link href="/billing">Оплата</Link>
@@ -31,7 +31,7 @@ export default async function PricingPage() {
     </header>
     <main>
       <section className={styles.intro}>
-        <p className={styles.eyebrow}>Тарифы Anon</p>
+        <p className={styles.eyebrow}>Тарифы AnonAI</p>
         <h1>Тарифы на маскирование документов</h1>
         <p>Выберите объём обработки и число пользователей. После маскирования сохраните таблицу соответствий, чтобы восстановить исходные значения.</p>
       </section>
@@ -64,7 +64,7 @@ export default async function PricingPage() {
       </section>
     </main>
     <footer className={styles.footer}>
-      <Link href="/" className={styles.brand}>Anon<span>.</span></Link>
+      <Link href="/" className={styles.brand}>AnonAI<span>.</span></Link>
       <nav aria-label="Ссылки в подвале"><Link href="/register">Регистрация</Link><Link href="/billing">Оплата</Link><Link href="/on-premise">Внедрение</Link><Link href="/legal/offer">Оферта</Link></nav>
     </footer>
   </div>;

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>AnonAI — черновик брендбука</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #eaf1ef; color: #132b3a; font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    main { max-width: 1440px; margin: auto; padding: 48px 32px 80px; }
+    .intro { max-width: 850px; margin-bottom: 40px; }
+    .eyebrow { color: #126c56; font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    h1 { margin: 12px 0 16px; font-size: clamp(36px, 5vw, 60px); line-height: 1.05; letter-spacing: -.05em; }
+    h2 { margin: 0; font-size: 30px; letter-spacing: -.04em; }
+    h3, p { margin: 0; }
+    .intro p, .direction-head p { color: #536b70; }
+    .direction { margin-top: 48px; }
+    .direction-head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 20px; }
+    .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .sample { --bg:#f5f9f8; --panel:#fff; --ink:#132b3a; --dim:#536b70; --line:#dcebe7; --accent:#126c56; --primary:#143b40; --primary-text:#fff; --subtle:#e8f5ef; --ring:#28a984; min-width: 0; padding: 32px; border: 1px solid var(--line); border-radius: 18px; background: var(--bg); color: var(--ink); }
+    .dark { --bg:#09111e; --panel:#101e2b; --ink:#eef4ff; --dim:#aab9cc; --line:#304657; --accent:#71e7cf; --primary:#8be9d4; --primary-text:#09111e; --subtle:#173b40; --ring:#71e7cf; }
+    .b.dark { --panel:#122533; --line:#38505c; }
+    .sample-top { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:32px; }
+    .mode { color:var(--dim); font-size:12px; letter-spacing:.1em; text-transform:uppercase; }
+    .brand { display:inline-flex; align-items:center; gap:9px; font-size:22px; font-weight:750; letter-spacing:-1px; }
+    .mark { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; border:1px solid var(--accent); border-radius:10px; color:var(--ink); font-size:23px; line-height:1; }
+    .mark span { color:var(--accent); }
+    .hero-title { max-width:540px; font-size:clamp(30px,3vw,44px); line-height:1.1; letter-spacing:-.05em; font-weight:650; }
+    .hero-title em { color:var(--accent); font-style:normal; }
+    .desc { max-width:520px; margin-top:14px; color:var(--dim); }
+    .actions { display:flex; flex-wrap:wrap; gap:10px; margin:24px 0 32px; }
+    button, .file-label { display:inline-flex; align-items:center; justify-content:center; min-height:44px; padding:10px 16px; border:1px solid transparent; border-radius:8px; font:700 14px/1.5 inherit; font-family:inherit; cursor:pointer; }
+    .primary { background:var(--primary); color:var(--primary-text); }
+    .secondary { border-color:var(--line); background:transparent; color:var(--ink); }
+    button:hover:not(:disabled), .file-label:hover { filter:brightness(.9); }
+    .dark button:hover:not(:disabled), .dark .file-label:hover { filter:brightness(1.15); }
+    button:active:not(:disabled), .file-label:active { transform:translateY(1px); }
+    button:focus-visible, .file-label:focus-within, input:focus-visible { outline:3px solid var(--ring); outline-offset:3px; }
+    button:disabled { opacity:.48; cursor:not-allowed; }
+    .b button, .b .file-label { border-radius:12px; }
+    .card { margin-top:16px; padding:24px; border:1px solid var(--line); border-radius:12px; background:var(--panel); }
+    .b .card { padding:32px; border-radius:20px; }
+    .card h3 { font-size:20px; letter-spacing:-.02em; }
+    .card p { margin-top:8px; color:var(--dim); font-size:14px; }
+    .drop { margin-top:20px; padding:24px; border:1px dashed var(--line); border-radius:10px; text-align:center; }
+    .b .drop { border-radius:16px; background:var(--bg); }
+    .drop strong { display:block; }
+    .drop p { margin:6px 0 16px; }
+    .file-label { position:relative; border-color:var(--line); color:var(--ink); }
+    .file-label input { position:absolute; width:1px; height:1px; opacity:0; }
+    .field { display:block; margin-top:20px; font-size:14px; font-weight:600; }
+    .field input { display:block; width:100%; margin-top:8px; padding:12px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); font:inherit; }
+    .statuses { display:flex; flex-wrap:wrap; gap:8px; margin-top:16px; }
+    .status { padding:6px 10px; border:1px solid var(--line); border-radius:999px; font-size:12px; font-weight:700; }
+    .status.ok { background:var(--subtle); color:var(--accent); }
+    .status.wait { color:var(--dim); }
+    .status.error { border-color:#e9bdb9; background:#fff0ef; color:#ad3737; }
+    .dark .status.error { border-color:#a55a60; background:#462a30; color:#ffd5d5; }
+    .swatches { display:flex; flex-wrap:wrap; gap:8px; margin-top:20px; }
+    .swatches span { padding:6px 8px; border:1px solid var(--line); border-radius:8px; color:var(--dim); font-size:12px; }
+    .footnote { margin-top:24px; color:var(--dim); font-size:12px; }
+    @media (max-width:800px) { main { padding:32px 16px 64px; } .pair { grid-template-columns:1fr; } .direction-head { display:block; } .direction-head p { margin-top:6px; } .sample, .b .card { padding:24px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header class="intro">
+    <div class="eyebrow">AnonAI · рабочий материал</div>
+    <h1>Брендбук для обсуждения</h1>
+    <p>Черновик не утверждён. Сравните два направления в светлой и тёмной темах: знак, типографику, кнопки, карточки, загрузку и состояния. Поля демонстрационные, ничего не отправляется.</p>
+  </header>
+  <section class="direction">
+    <div class="direction-head"><h2>A · Преемственный</h2><p>Ближе к текущей главной: собранная геометрия и более плотные элементы.</p></div>
+    <div class="pair" id="samples-a"></div>
+  </section>
+  <section class="direction">
+    <div class="direction-head"><h2>B · Мягче</h2><p>Больше воздуха внутри карточек, мягкие углы и спокойные подложки.</p></div>
+    <div class="pair" id="samples-b"></div>
+  </section>
+</main>
+<template id="sample-template">
+  <article class="sample">
+    <div class="sample-top">
+      <div class="brand"><span class="mark">a<span>.</span></span>AnonAI</div>
+      <span class="mode"></span>
+    </div>
+    <div class="hero-title">Маскирование данных <em>с возможностью восстановления</em></div>
+    <p class="desc">Подготовьте текст или документ к работе, сохранив контроль над исходными данными.</p>
+    <div class="actions">
+      <button class="primary" type="button">Начать маскирование</button>
+      <button class="secondary" type="button">Как это работает</button>
+      <button class="secondary" type="button" disabled>Недоступно</button>
+    </div>
+    <div class="card">
+      <h3>Документ для маскирования</h3>
+      <p>Выберите файл, чтобы увидеть состояние элемента. Это демонстрация, файл никуда не отправляется.</p>
+      <div class="drop">
+        <strong>Выберите документ</strong>
+        <p>Демонстрационное поле загрузки</p>
+        <label class="file-label">Выбрать файл<input type="file" aria-label="Выбрать демонстрационный файл"></label>
+      </div>
+      <label class="field">Название документа · демо<input type="text" placeholder="Например, договор"></label>
+      <div class="statuses" aria-label="Примеры статусов">
+        <span class="status ok">✓ Готово</span>
+        <span class="status wait">◷ Ожидает</span>
+        <span class="status error">! Ошибка</span>
+      </div>
+    </div>
+    <div class="swatches"></div>
+    <p class="footnote">Примеры состояний интерфейса, не реальные результаты обработки.</p>
+  </article>
+</template>
+<script>
+  const template = document.getElementById("sample-template");
+  for (const variant of ["a", "b"]) {
+    for (const theme of ["light", "dark"]) {
+      const sample = template.content.firstElementChild.cloneNode(true);
+      sample.classList.add(variant, theme);
+      const label = theme === "dark" ? "Тёмная тема" : "Светлая тема";
+      sample.setAttribute("aria-label", "Вариант " + variant.toUpperCase() + ", " + label.toLowerCase());
+      sample.querySelector(".mode").textContent = label;
+      const colors = theme === "dark" ? ["Фон #09111e", "Текст #eef4ff", "Акцент #71e7cf", "Кнопка #8be9d4"] : ["Фон #f5f9f8", "Текст #132b3a", "Акцент #126c56", "Кнопка #143b40"];
+      for (const color of colors) {
+        const chip = document.createElement("span");
+        chip.textContent = color;
+        sample.querySelector(".swatches").appendChild(chip);
+      }
+      document.getElementById("samples-" + variant).appendChild(sample);
+    }
+  }
+</script>
+</body>
+</html>

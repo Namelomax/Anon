@@ -139,7 +139,7 @@ $('mask').addEventListener('click', () => action(async () => {
   if (!input.value.trim()) throw new Error('Введите текст для маскирования');
   $('mode-label').textContent = 'Маскирование';
   knownIds = new Set(state.records.map(record => record.id));
-  status('Отправляем текст на сервер Anon…', false, 'sending');
+  status('Отправляем текст на сервер AnonAI…', false, 'sending');
   const response = await send('START_MASK', { text: input.value });
   result.value = '';
   showWarnings([]);

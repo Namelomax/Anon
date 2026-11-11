@@ -34,5 +34,5 @@ export function bankTransferSelection(
 
 /** Назначение идентифицирует аккаунт, но не создаёт счёт или подтверждение платежа. */
 export function bankTransferPurpose(accountId: number, planId: number, months: 1 | 12): string {
-  return `Оплата лицензии Anon. Аккаунт ${accountId}; тариф ${planId}; срок ${months} мес.`;
+  return `Оплата лицензии AnonAI. Аккаунт ${accountId}; тариф ${planId}; срок ${months} мес.`;
 }

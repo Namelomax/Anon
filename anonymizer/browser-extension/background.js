@@ -14,7 +14,7 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({ id: 'mask-selection', title: 'Маскировать выделенное', contexts: ['selection'] });
     chrome.contextMenus.create({ id: 'restore-selection', title: 'Восстановить выделенное', contexts: ['selection'] });
-    chrome.contextMenus.create({ id: 'inspect-selection', title: 'Показать замены Anon', contexts: ['selection'] });
+    chrome.contextMenus.create({ id: 'inspect-selection', title: 'Показать замены AnonAI', contexts: ['selection'] });
   });
 });
 
@@ -96,13 +96,13 @@ async function deliver(delivery) {
       await notify(delivery.target, delivery.error, true);
     } else if (delivery.unchanged) {
       await notify(delivery.target, delivery.warningCount
-        ? 'Текст не изменён. Проверьте предупреждения в истории Anon.'
+        ? 'Текст не изменён. Проверьте предупреждения в истории AnonAI.'
         : 'Совпадения для маскирования не найдены. Текст не изменён.', Boolean(delivery.warningCount), delivery.warningCount ? 'warning' : 'success');
     } else {
       const result = await execute(delivery.target, 'apply', { id: delivery.target.id, text: delivery.text, edits: delivery.edits });
       await notify(delivery.target, result.error
-        ? `${result.error} Результат сохранён в истории Anon.`
-        : delivery.warningCount ? 'Текст заменён. В истории Anon есть предупреждения обработки.' : 'Текст замаскирован.',
+        ? `${result.error} Результат сохранён в истории AnonAI.`
+        : delivery.warningCount ? 'Текст заменён. В истории AnonAI есть предупреждения обработки.' : 'Текст замаскирован.',
       Boolean(result.error || delivery.warningCount), result.error ? 'error' : delivery.warningCount ? 'warning' : 'success');
     }
   } catch {
@@ -158,7 +158,7 @@ async function directSelection(tab, mode, frameId) {
       try {
         results = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: pageSelection, args: ['capture', captureOptions] });
       } catch {
-        await notify(target, 'Нет доступа к выделению во вложенном окне. Используйте панель Anon для этого текста.', true);
+        await notify(target, 'Нет доступа к выделению во вложенном окне. Используйте панель AnonAI для этого текста.', true);
         return;
       }
     }
@@ -172,7 +172,7 @@ async function directSelection(tab, mode, frameId) {
     await installInspector(target).catch(() => {});
     if (mode === 'inspect') {
       const tokens = [...new Set(capture.text.match(/\[[A-Z_]+_\d+\]/g) || [])];
-      if (!tokens.length) throw new Error('В выделении нет плейсхолдеров Anon.');
+      if (!tokens.length) throw new Error('В выделении нет плейсхолдеров AnonAI.');
       if (tokens.length > 200) throw new Error('Выберите фрагмент не более чем с 200 разными плейсхолдерами.');
       const result = await controller.lookupTokens(tokens);
       await execute(target, 'release', { id: capture.id });
@@ -180,7 +180,7 @@ async function directSelection(tab, mode, frameId) {
       return;
     }
     if (mode === 'restore') {
-      await notify(target, 'Anon: восстанавливаем выделенный текст…', false, 'restoring');
+      await notify(target, 'AnonAI: восстанавливаем выделенный текст…', false, 'restoring');
       const restored = await controller.dispatch({ type: 'RESTORE_AUTO', text: capture.text });
       const applied = await execute(target, 'apply', { id: capture.id, text: restored.text, edits: restored.edits });
       if (applied.error) throw new Error(applied.error);
@@ -189,14 +189,14 @@ async function directSelection(tab, mode, frameId) {
     }
     // Create the watchdog before submitting: the worker can be suspended at any time.
     await chrome.alarms.create(POLL_ALARM, { periodInMinutes: 1 });
-    await notify(target, 'Отправляем выделенный текст на сервер Anon…', false, 'sending');
+    await notify(target, 'Отправляем выделенный текст на сервер AnonAI…', false, 'sending');
     await controller.dispatch({ type: 'START_MASK', text: capture.text, directTarget: target });
     await chrome.alarms.create(POLL_ALARM, { periodInMinutes: 1 });
     await notify(target, 'Запрос принят. Маскируем текст…', false, 'processing');
     void processDirect();
   } catch (error) {
     if (capture) await execute(target, 'release', { id: capture.id }).catch(() => {});
-    await notify(target, error.message || 'Не удалось обработать выделение. Откройте Anon для проверки настроек.', true);
+    await notify(target, error.message || 'Не удалось обработать выделение. Откройте AnonAI для проверки настроек.', true);
     void processDirect();
   }
 }

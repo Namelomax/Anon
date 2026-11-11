@@ -114,7 +114,7 @@ export default function BillingPage() {
   const warning = summary && selection && !summary.quota.expired && summary.quota.paidUntil && (summary.quota.remainingTenths ?? 0) > 0 && selection.offer.code !== summary.plan.code;
   return <div className={styles.page}>
     <header className={styles.header}>
-      <Link className={styles.brand} href="/">Anon</Link>
+      <Link className={styles.brand} href="/">AnonAI</Link>
       <nav aria-label="Навигация">
         <Link href="/account/subscription">Моя подписка</Link>
         <Link href="/account/payments">Платежи и реквизиты</Link>

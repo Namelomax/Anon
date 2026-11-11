@@ -76,7 +76,7 @@ test('quote takes price and plan id from database and account from session', asy
   const { status, body } = await ctx.get('plan=business&months=12&amount=1&accountId=999&planId=999');
   assert.equal(status, 200);
   assert.deepEqual(body.selection, { plan: 'business', title: 'Бизнес', months: 12, amountKopecks: 120000 });
-  assert.equal(body.purpose, 'Оплата лицензии Anon. Аккаунт 42; тариф 19; срок 12 мес.');
+  assert.equal(body.purpose, 'Оплата лицензии AnonAI. Аккаунт 42; тариф 19; срок 12 мес.');
   assert.equal(body.configured, true);
   assert.deepEqual(body.recipient, { name: legal.LICENSOR.fullName, inn: legal.LICENSOR.inn, ogrnip: legal.LICENSOR.ogrnip, address: legal.LICENSOR.address, bankName: validEnv.BANK_TRANSFER_BANK_NAME, bic: validEnv.BANK_TRANSFER_BIC, account: validEnv.BANK_TRANSFER_ACCOUNT, correspondentAccount: validEnv.BANK_TRANSFER_CORR_ACCOUNT });
   assert.equal(body.supportEmail, legal.LICENSOR.email);

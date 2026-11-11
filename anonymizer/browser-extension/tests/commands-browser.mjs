@@ -111,7 +111,7 @@ try {
     for (const item of (await targets()).filter(target => target.type === 'service_worker')) {
       let client = workerClients.get(item.id);
       if (!client) { client = await connect(item.webSocketDebuggerUrl); workerClients.set(item.id, client); }
-      if (await client.evaluate("chrome.runtime.getManifest().name === 'Anon — маскирование текста'")) return client;
+      if (await client.evaluate("chrome.runtime.getManifest().name === 'AnonAI — маскирование текста'")) return client;
     }
   }, 'Запуск расширения');
   const extensionBase = await worker.evaluate("chrome.runtime.getURL('')");

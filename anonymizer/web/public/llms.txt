@@ -1,4 +1,4 @@
-# Anon
+# AnonAI
 
 > Сервис обратимого маскирования персональных данных в текстах и документах. Найденные значения заменяются плейсхолдерами; таблица соответствий mapping позволяет детерминированно восстановить исходные значения без ИИ. Маскирование с сохранением mapping не является необратимым обезличиванием.
 
@@ -12,6 +12,8 @@
 - [Маскирование DOCX](https://anonai.ru/formats/docx)
 - [Маскирование PDF](https://anonai.ru/formats/pdf)
 - [Маскирование Excel](https://anonai.ru/formats/excel)
+- [Другие форматы](https://anonai.ru/formats/other)
+- [Как работает AnonAI](https://anonai.ru/guides)
 - [Псевдонимизация и ИИ](https://anonai.ru/guides/pseudonymization-and-ai)
 - [API для разработчиков](https://anonai.ru/developers)
 - [Правовая информация](https://anonai.ru/legal)

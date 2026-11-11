@@ -5,7 +5,7 @@ import { LEGAL_DOCS, LICENSOR } from "@/lib/legal";
 
 export const dynamic = "force-static";
 
-export const metadata = pageMetadata("Правовая информация", "Условия использования Anon, политика обработки персональных данных и сведения об операторе сервиса.", "/legal");
+export const metadata = pageMetadata("Правовая информация", "Условия использования AnonAI, политика обработки персональных данных и сведения об операторе сервиса.", "/legal");
 
 const DOCS = [
   {

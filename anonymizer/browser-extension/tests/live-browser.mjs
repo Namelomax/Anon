@@ -92,7 +92,7 @@ try {
     for (const target of (await targets()).filter(t => t.type === 'service_worker')) {
       let client = workers.get(target.id);
       if (!client) { client = await connect(target.webSocketDebuggerUrl); workers.set(target.id, client); }
-      if (await client.evaluate("chrome.runtime.getManifest().name === 'Anon — маскирование текста'")) return client;
+      if (await client.evaluate("chrome.runtime.getManifest().name === 'AnonAI — маскирование текста'")) return client;
     }
   });
   const extensionBase = await worker.evaluate("chrome.runtime.getURL('')");

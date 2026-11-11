@@ -33,9 +33,21 @@
 .resourceGrid p{color:#aab9cc;font-size:14px;line-height:1.7}
 .resourceGrid span{margin-top:auto;color:#86e8d6;font-size:13px}
 @media(max-width:1000px){.resourceGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:900px){.nav a[href="/on-premise"]{display:inline}}
+@media(max-width:900px){.nav a[href="/guides"]{display:inline}}
 @media(max-width:700px){.hero h1{font-size:clamp(32px,7.5vw,48px)}.resources{padding:20px 20px 55px}.resourceGrid{grid-template-columns:1fr}}
 /* Grid items must be allowed to shrink below the document demo's intrinsic width. */
+.formatList{position:relative;align-items:flex-start}
+.formatItem button{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:12px 17px;border:1px solid #304453;border-radius:7px;background:#11202c;color:#b5c9d1;font:12px ui-monospace,monospace;cursor:pointer}
+.formatItem button:hover,.formatItem button[aria-expanded="true"]{border-color:var(--mint);background:#173638;color:#d3fff3}
+.formatItem button:active{transform:translateY(1px)}
+.formatTooltip{display:none;position:absolute;top:100%;left:0;z-index:5;width:100%;box-sizing:border-box;padding:20px 24px;border:1px solid #385768;border-radius:10px;background:#142936;box-shadow:0 12px 35px #0005;color:var(--ink);font-size:14px;line-height:1.6}
+.formatTooltip[data-open="true"]{display:block}
+.formatTooltip p{margin:8px 0!important;font-size:14px;line-height:1.6}
+.formatTooltip a{color:var(--mint);text-decoration:underline;text-underline-offset:3px}
+.security ul{max-width:700px;margin:24px 0 0;padding-left:22px;color:#a1b1c4;line-height:1.8}
+.security li+li{margin-top:16px}
+.ctaButton{min-height:60px;padding:0 28px;font-size:16px;flex-shrink:0}
+.steps .stepIcon{margin-top:8px}
 .heroCopy,.demoWrap{min-width:0}
 @media(max-width:700px){.hero{grid-template-columns:minmax(0,1fr)}.heroNote{align-items:flex-start}.heroNote svg{flex-shrink:0}.paperLine{white-space:normal;overflow-wrap:anywhere}}
 @media(max-width:420px){.header .nav{display:none}.headerActions{gap:10px}.headerButton{font-size:12px}.header{gap:10px}}

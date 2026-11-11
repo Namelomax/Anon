@@ -8,7 +8,7 @@ export default function NotFound() {
       <div className="legal-top">
         <Link href="/" className="legal-brand">
           <ShieldCheck size={20} />
-          Anon
+          AnonAI
         </Link>
       </div>
       <main className="legal-main">

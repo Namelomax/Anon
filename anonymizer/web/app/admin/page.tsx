@@ -6,7 +6,7 @@ import { NextResponse } from "next/server";
 import { requireRoot } from "@/lib/root-admin";
 import RootAdmin from "@/app/_components/RootAdmin";
 
-export const metadata: Metadata = { title: "Администрирование — Anon", robots: { index: false, follow: false } };
+export const metadata: Metadata = { title: "Администрирование — AnonAI", robots: { index: false, follow: false } };
 
 export default async function AdminPage() {
   const access = await requireRoot();

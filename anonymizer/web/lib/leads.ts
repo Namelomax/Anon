@@ -53,12 +53,12 @@ export function leadMailConfig(env: Partial<NodeJS.ProcessEnv> = process.env): M
 
 export function leadMessage(lead: Lead, config: Pick<MailConfig, "from" | "to">, now = new Date()) {
   return {
-    from: { name: "Anon", address: config.from },
+    from: { name: "AnonAI", address: config.from },
     to: { address: config.to, name: "" },
     ...(lead.email ? { replyTo: { address: lead.email, name: "" } } : {}),
-    subject: "Anon: новая заявка на внедрение в компанию",
+    subject: "AnonAI: новая заявка на внедрение в компанию",
     text: [
-      "Поступила заявка на внедрение Anon в инфраструктуре компании.",
+      "Поступила заявка на внедрение AnonAI в инфраструктуре компании.",
       "",
       `Телефон: ${lead.phone}`,
       `Компания: ${lead.company || "не указана"}`,
@@ -129,7 +129,7 @@ export async function handleLeadRequest(
     try { return new URL(url!).origin; } catch { return ""; }
   });
   const origin = request.headers.get("origin");
-  if (!origin || !origins.includes(origin)) return reply(403, { error: "Отправьте заявку с сайта Anon." });
+  if (!origin || !origins.includes(origin)) return reply(403, { error: "Отправьте заявку с сайта AnonAI." });
   if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
     return reply(415, { error: "Некорректный формат заявки." });
   }
