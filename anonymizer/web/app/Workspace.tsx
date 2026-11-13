@@ -1745,7 +1745,7 @@ export default function Workspace() {
                       </button>
                       <button className="ghost" onClick={downloadDoc} disabled={docBusy}>
                         <Download size={16} />
-                        {result.document_name}
+                        Скачать документ
                       </button>
                       <button className="ghost recovery-key-download" onClick={downloadMapping}>
                         <KeyRound size={18} />
