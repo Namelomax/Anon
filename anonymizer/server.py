@@ -77,6 +77,14 @@ _REVIEW_CFG = None       # ReviewConfig for the LLM review layer, or None if dis
 _INFO: dict = {}
 _NER_BACKEND = "none"    # args.ner, set once in main() ("gliner"/"natasha"/"remote"/"none")
 
+# Доступность обработки. Порт поднимается сразу, а прогрев (в т.ч. пробные
+# вызовы удалённых GLiNER/LLM) идёт в фоновом потоке: при лежащем инференс-шлюзе
+# коннект-таймауты занимают минуты, и ждать их, не слушая порт, нельзя.
+# ready=False — прогрев ещё идёт; ner/llm=None — состояние неизвестно (прогрев
+# не завершён либо слой локальный/выключен и удалённая проверка ему не нужна);
+# True/False — удалённый слой доступен/недоступен по итогам прогрева.
+_READY: dict = {"ready": False, "ner": None, "llm": None, "error": None}
+
 # _LOCK serializes model calls, but is only actually taken when the process
 # holds a LOCAL model in memory (--ner gliner or --ner natasha): both are not
 # thread-safe (GLiNER wraps torch; concurrent calls corrupt each other's
@@ -1096,7 +1104,19 @@ class Handler(BaseHTTPRequestHandler):
             # аутентифицированному вызову; см. докстринг задачи в верхнем
             # комментарии файла.
             principal = _authenticate(self.headers)
-            payload = {"status": "ok", **_INFO} if principal is not None else {"status": "ok"}
+            if principal is not None:
+                # ready/remote — для веб-интерфейса: страница обработки показывает
+                # «серверы обработки недоступны», пока прогрев не завершён или
+                # удалённый слой (GLiNER/LLM) не ответил.
+                payload = {
+                    "status": "ok",
+                    "ready": _READY["ready"],
+                    "remote": {"ner": _READY["ner"], "llm": _READY["llm"]},
+                    "warmup_error": _READY["error"],
+                    **_INFO,
+                }
+            else:
+                payload = {"status": "ok"}
             self._send(200, payload)
             return
         principal = self._authenticate_or_401()
@@ -1431,6 +1451,50 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def _warmup(defaults: dict, ner_remote: bool, llm_remote: bool) -> None:
+    """Прогрев конвейера в фоне + фиксация доступности удалённых слоёв.
+
+    Выполняется в отдельном потоке: ни один вызов сюда не должен задерживать
+    поднятие порта. По итогам пробного документа смотрим warnings: чанковый
+    сбой удалённого слоя — это и есть его недоступность (детекторы сами
+    логируют «возможна утечка ПДн» и продолжают без слоя). Слои, которым
+    удалённый шлюз не нужен (локальный GLiNER, выключенный LLM), остаются
+    None — «не применимо», а не «сломан».
+    """
+    global _READY
+    try:
+        res = _compose(defaults).anonymize("Иван Иванов из Москвы, ИНН 7707083893.")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] прогрев не удался (сервер всё равно поднят): {exc}", flush=True)
+        _READY = {"ready": True, "ner": None, "llm": None, "error": str(exc)}
+        return
+    kinds = {
+        w.get("kind")
+        for w in (getattr(res, "warnings", None) or [])
+        if isinstance(w, dict)
+    }
+    ner_ok = "gliner_chunk_failed" not in kinds
+    llm_ok = not bool(
+        kinds
+        & {
+            "llm_chunk_failed", "recall_failed", "recall_partial",
+            "review_failed", "review_adjacent_failed", "review_short_numbers_failed",
+        }
+    )
+    _READY = {
+        "ready": True,
+        "ner": ner_ok if ner_remote else None,
+        "llm": llm_ok if llm_remote else None,
+        "error": None,
+    }
+    if ner_remote and not ner_ok:
+        print("[warn] прогрев: удалённый GLiNER недоступен — слой ner отключится "
+              "для запросов до восстановления шлюза", flush=True)
+    if llm_remote and not llm_ok:
+        print("[warn] прогрев: LLM-шлюз недоступен — слои llm/review будут "
+              "подтверждать сбои на запросах", flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default="127.0.0.1")
@@ -1669,12 +1733,16 @@ def main() -> None:
         subject=args.subject and args.llm,
     )
 
-    # Warm up the pipeline. A transient LLM outage must NOT prevent the server
-    # from starting — regex/GLiNER still work, and the LLM can come back later.
-    try:
-        _compose(_DEFAULTS).anonymize("Иван Иванов из Москвы, ИНН 7707083893.")
-    except Exception as exc:  # noqa: BLE001
-        print(f"[warn] прогрев не удался (сервер всё равно поднят): {exc}", flush=True)
+    # Warm up the pipeline in a BACKGROUND thread: with the remote GLiNER/LLM
+    # gateway down, the probe call sits in connect timeouts for many minutes
+    # (observed: ~2 min per GLiNER chunk, ~4.5 min per LLM chunk), and the port
+    # must listen anyway — the UI shows «серверы обработки недоступны» until
+    # _READY flips. A transient LLM outage must NOT prevent the server from
+    # starting — regex/GLiNER still work, and the LLM can come back later.
+    threading.Thread(
+        target=_warmup, args=(dict(_DEFAULTS), args.ner == "remote", bool(args.llm)),
+        daemon=True, name="pipeline-warmup",
+    ).start()
     # Фактическое устройство GLiNER, а не запрошенное: при откате на CPU
     # (несовместимый cuDNN в LD_LIBRARY_PATH, занятая карта) /health раньше
     # продолжал показывать "cuda", и трёхкратное замедление выглядело

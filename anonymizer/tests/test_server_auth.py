@@ -228,7 +228,16 @@ def test_health_minimal_without_key_full_with_key():
             "GET", "/health", headers={"Authorization": "Bearer secret1"}
         )
         assert code2 == 200
-        assert body2 == {"status": "ok", "ner": "none", "llm_model": "test-model"}
+        # Конфигурация (_INFO) плюс доступность обработки: ready/remote нужны
+        # веб-интерфейсу для баннера «серверы обработки недоступны».
+        assert body2 == {
+            "status": "ok",
+            "ready": server._READY["ready"],
+            "remote": {"ner": server._READY["ner"], "llm": server._READY["llm"]},
+            "warmup_error": server._READY["error"],
+            "ner": "none",
+            "llm_model": "test-model",
+        }
     finally:
         server._INFO = orig_info
 

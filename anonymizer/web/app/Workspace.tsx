@@ -683,6 +683,18 @@ export default function Workspace() {
   // под результатом).
   const [resultCached, setResultCached] = useState(false);
   const [drag, setDrag] = useState(false);
+  // --- Доступность серверов обработки (баннер на странице обработки) ---
+  // checked — хотя бы один опрос завершился; до этого кнопку не блокируем,
+  // чтобы стартовый флап при загрузке страницы не мигал. up — бэкенд
+  // отвечает; ready — прогрев моделей завершён; ner/llm — доступность
+  // удалённых слоёв (null = не применимо, напр. локальный GLiNER).
+  const [backend, setBackend] = useState<{
+    checked: boolean;
+    up: boolean;
+    ready: boolean;
+    ner: boolean | null;
+    llm: boolean | null;
+  }>({ checked: false, up: false, ready: false, ner: null, llm: null });
   // Боковое меню открыто по умолчанию на любой ширине; на узком экране оно
   // выезжает поверх содержимого и закрывается по выбору пункта.
   const [menuOpen, setMenuOpen] = useState(true);
@@ -774,6 +786,37 @@ export default function Workspace() {
   useEffect(() => {
     if (sessionStatus === "authenticated") void loadSummary();
   }, [sessionStatus, loadSummary]);
+
+  // Опрос /api/status: баннер «серверы обработки недоступны» и блокировка
+  // кнопки, пока бэкенд или модельные серверы не поднялись. Повторяем — шлюз
+  // может восстановиться без перезагрузки страницы, баннер уберётся сам.
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const resp = await fetch("/api/status", { cache: "no-store" });
+        const data = await resp.json().catch(() => null);
+        if (cancelled) return;
+        setBackend({
+          checked: true,
+          up: data?.ok === true,
+          ready: data?.ready !== false,
+          ner: typeof data?.ner === "boolean" ? data.ner : null,
+          llm: typeof data?.llm === "boolean" ? data.llm : null,
+        });
+      } catch {
+        if (!cancelled) {
+          setBackend({ checked: true, up: false, ready: false, ner: null, llm: null });
+        }
+      }
+    };
+    void check();
+    const id = window.setInterval(check, 20_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
 
   // Cancel the in-flight job when the tab is closed, reloaded, or navigated
   // away from. `pagehide` (not `beforeunload`) is used because it also fires
@@ -1105,6 +1148,16 @@ export default function Workspace() {
   };
 
   const entityCount = result ? Object.keys(result.mapping).length : 0;
+  // Доступность серверов обработки. Недоступны = бэкенд не ответил ИЛИ прогрев
+  // моделей ещё идёт (при лежащем GLiNER/LLM он занимает минуты — кнопка и
+  // так не должна принимать документы в это окно). Пока первый опрос не
+  // вернулся (checked=false) — не мешаем работать.
+  const backendUnavailable = backend.checked && (!backend.up || !backend.ready);
+  // Поднялись частично: прогрев завершён, но удалённый слой не ответил.
+  // Маскирование работает силами остальных слоёв — предупреждаем, но не
+  // блокируем.
+  const backendDegraded =
+    backend.up && backend.ready && (backend.ner === false || backend.llm === false);
   // Только явно исчерпанная квота или истёкший срок: пока сводки нет (не
   // вошёл, режим без авторизации, сеть) - не мешаем работать, решение всё
   // равно за бэкендом.
@@ -1426,6 +1479,40 @@ export default function Workspace() {
             <p>Загрузите документ - получите маскированную версию и ключ восстановления.</p>
           </header>
 
+          {/* Статус серверов обработки. Три состояния: недоступны (бэкенд не
+              отвечает или прогрев моделей идёт), частичная доступность
+              (прогрев прошёл, но GLiNER/LLM не ответили — маскирование
+              работает силами остальных слоёв), штатно — баннера нет.
+              Стили — общие классы globals.css, как у остальных карточек. */}
+          {backendUnavailable && (
+            <div className="error" role="alert">
+              <TriangleAlert size={16} className="inline-icon" />
+              Сервера обработки сейчас недоступны - маскирование временно не работает.
+              Обновлять страницу не нужно: статус проверяется автоматически, кнопка
+              разблокируется, как только серверы поднимутся.
+            </div>
+          )}
+          {!backendUnavailable && backendDegraded && (
+            <div className="card warn-card">
+              <h2 style={{ marginTop: 0 }}>
+                <TriangleAlert size={18} />
+                Сервера обработки работают не полностью
+              </h2>
+              <p className="note" style={{ marginTop: 0 }}>
+                Недоступен{" "}
+                {[
+                  backend.ner === false ? "GLiNER (поиск ФИО, адресов, организаций)" : "",
+                  backend.llm === false ? "LLM (сложные случаи и проверка)" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" и ")}
+                . Документы маскируются остальными слоями, но тщательность проверки
+                ниже обычного - важные документы лучше обработать повторно, когда
+                серверы восстановятся. Статус проверяется автоматически.
+              </p>
+            </div>
+          )}
+
           {tab === "anon" && (
             <>
               <div className="card">
@@ -1469,7 +1556,11 @@ export default function Workspace() {
                 <button
                   className="primary big"
                   disabled={
-                    !file || loading || !Object.values(stages).some(Boolean) || quotaExhausted
+                    !file ||
+                    loading ||
+                    !Object.values(stages).some(Boolean) ||
+                    quotaExhausted ||
+                    backendUnavailable
                   }
                   onClick={run}
                 >

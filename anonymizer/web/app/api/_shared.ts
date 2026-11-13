@@ -168,6 +168,19 @@ function _callBackendOnce(
 }
 
 /**
+ * Single-attempt GET with NO connect retries and a short timeout — for
+ * health/status probes. Retrying here would only delay the «серверы
+ * недоступны» signal; the caller polls again soon anyway.
+ */
+export function probeBackend(
+  url: string,
+  apiKey: string,
+  timeoutMs: number,
+): Promise<{ status: number; text: string }> {
+  return _callBackendOnce(url, "GET", "", apiKey, timeoutMs);
+}
+
+/**
  * Turn a thrown value into a message that says what actually went wrong. The
  * real reason often hides in `error.cause` (ECONNREFUSED / ENOTFOUND / ETIMEDOUT
  * / TLS / parser errors), so we walk the cause chain and surface a code + hint.
