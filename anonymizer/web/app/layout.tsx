@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { Providers } from "./providers";
+import ChunkErrorReload from "./_components/ChunkErrorReload";
 import { LICENSOR } from "@/lib/legal";
 import { SITE_DESCRIPTION, SITE_NAME, SITE_TITLE, SITE_URL } from "@/lib/site";
 import { pageMetadata } from "@/lib/seo";
@@ -53,6 +54,7 @@ export default function RootLayout({
           dangerouslySetInnerHTML={{ __html: JSON.stringify(JSON_LD) }}
         />
         <Providers>{children}</Providers>
+        <ChunkErrorReload />
       </body>
     </html>
   );
