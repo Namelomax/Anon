@@ -52,8 +52,12 @@ function LoginForm() {
         <label htmlFor="email">Email</label>
         <input
           id="email"
+          name="email"
           type="email"
-          autoComplete="email"
+          inputMode="email"
+          autoComplete="username"
+          spellCheck={false}
+          enterKeyHint="next"
           required
           value={email}
           onChange={(e) => setEmail(e.target.value)}
@@ -63,8 +67,10 @@ function LoginForm() {
         <label htmlFor="password">Пароль</label>
         <input
           id="password"
+          name="password"
           type="password"
           autoComplete="current-password"
+          enterKeyHint="done"
           required
           value={password}
           onChange={(e) => setPassword(e.target.value)}

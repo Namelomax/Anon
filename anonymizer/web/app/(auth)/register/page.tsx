@@ -82,8 +82,12 @@ export default function RegisterPage() {
               <label htmlFor="email">Email</label>
               <input
                 id="email"
+                name="email"
                 type="email"
-                autoComplete="email"
+                inputMode="email"
+                autoComplete="username"
+                spellCheck={false}
+                enterKeyHint="next"
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -93,9 +97,11 @@ export default function RegisterPage() {
               <label htmlFor="password">Пароль</label>
               <input
                 id="password"
+                name="password"
                 aria-describedby="password-hint"
                 type="password"
                 autoComplete="new-password"
+                enterKeyHint="next"
                 required
                 minLength={MIN_PASSWORD_LENGTH}
                 value={password}
@@ -106,9 +112,12 @@ export default function RegisterPage() {
               <label htmlFor="confirm">Повторите пароль</label>
               <input
                 id="confirm"
+                name="confirm"
                 type="password"
                 autoComplete="new-password"
+                enterKeyHint="done"
                 required
+                minLength={MIN_PASSWORD_LENGTH}
                 value={confirm}
                 onChange={(e) => setConfirm(e.target.value)}
               />
@@ -120,7 +129,9 @@ export default function RegisterPage() {
 
             <label className="consent">
               <input
+                name="consent"
                 type="checkbox"
+                required
                 checked={consent}
                 onChange={(e) => setConsent(e.target.checked)}
               />
@@ -133,7 +144,7 @@ export default function RegisterPage() {
               </div>
             )}
 
-            <button className="primary" type="submit" disabled={loading || !consent}>
+            <button className="primary" type="submit" disabled={loading}>
               {loading ? "Регистрируем…" : "Зарегистрироваться"}
             </button>
           </form>

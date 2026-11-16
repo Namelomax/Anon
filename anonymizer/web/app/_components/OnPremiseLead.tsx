@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
@@ -63,9 +63,9 @@ export default function OnPremiseLead() {
         <h3>Обсудим внедрение</h3>
         <p>Оставьте контакты, и мы свяжемся с вами по заявке.</p>
         <form onSubmit={submit}>
-          <label>Телефон <span aria-hidden="true">*</span><input name="phone" type="tel" autoComplete="tel" maxLength={80} required disabled={loading} /></label>
-          <label>Компания <span className={styles.optional}>необязательно</span><input name="company" autoComplete="organization" maxLength={160} disabled={loading} /></label>
-          <label>Email <span className={styles.optional}>необязательно</span><input name="email" type="email" autoComplete="email" maxLength={254} disabled={loading} /></label>
+          <label htmlFor="lead-phone">Телефон <span aria-hidden="true">*</span><input id="lead-phone" name="phone" type="tel" inputMode="tel" autoComplete="tel" enterKeyHint="next" maxLength={80} required disabled={loading} /></label>
+          <label htmlFor="lead-company">Компания <span className={styles.optional}>необязательно</span><input id="lead-company" name="company" autoComplete="organization" enterKeyHint="next" maxLength={160} disabled={loading} /></label>
+          <label htmlFor="lead-email">Email <span className={styles.optional}>необязательно</span><input id="lead-email" name="email" type="email" inputMode="email" autoComplete="email" spellCheck={false} enterKeyHint="done" maxLength={254} disabled={loading} /></label>
           <div className={styles.honeypot} aria-hidden="true"><label>Website<input name="website" tabIndex={-1} autoComplete="off" disabled={loading} /></label></div>
           <label className={styles.consent}><input type="checkbox" name="consent" required disabled={loading} /><span>Согласен на обработку контактов только для связи по заявке. <Link href={LEGAL_DOCS.privacy.href}>Политика конфиденциальности</Link></span></label>
           <button type="submit" disabled={loading}>{loading ? "Отправляем…" : "Отправить заявку"} <ArrowRight size={17} /></button>

@@ -40,25 +40,16 @@ function FormatButton({ format }: { format: typeof formats[number] }) {
 }
 
 function FaqItem({ question, children }: { question: string; children: React.ReactNode }) {
-  const [open, setOpen] = useState(false);
-  const answerId = useId();
-
   return (
-    <div className={styles.question}>
-      <button
-        className={styles.questionButton}
-        type="button"
-        aria-expanded={open}
-        aria-controls={answerId}
-        onClick={() => setOpen((value) => !value)}
-      >
+    <details className={styles.question}>
+      <summary className={styles.questionButton}>
         {question}
         <span className={styles.questionIndicator} aria-hidden="true">+</span>
-      </button>
-      <div className={styles.answer} data-open={open} id={answerId} inert={!open}>
+      </summary>
+      <div className={styles.answer}>
         <div className={styles.answerInner}>{children}</div>
       </div>
-    </div>
+    </details>
   );
 }
 
@@ -67,6 +58,7 @@ export default function Landing() {
 
   return (
     <div className={styles.landing}>
+      <a className={styles.skipLink} href="#content">Перейти к содержимому</a>
       <header className={styles.header}>
         <a className={styles.brand} href="#top" aria-label="AnonAI - на главную"><span className={styles.brandMark}>a<span>.</span></span> AnonAI</a>
         <nav className={styles.nav} aria-label="Навигация"><Link href="/guides">Как это работает</Link><a href="#security">О данных</a><Link href="/developers">API</Link><Link href="/pricing">Тарифы</Link><a href="#faq">FAQ</a><Link href="/on-premise">Внедрение</Link></nav>
@@ -77,7 +69,7 @@ export default function Landing() {
         <section className={styles.hero}>
           <div className={styles.heroCopy}>
             <div className={styles.eyebrow}><span /> СЕРВИС МАСКИРОВАНИЯ ДОКУМЕНТОВ</div>
-            <h1>Маскирование<br />персональных данных<br /><em>в документах.</em></h1>
+            <h1 id="content" tabIndex={-1}>Маскирование<br />персональных данных<br /><em>в документах.</em></h1>
             <p className={styles.lead}>Делитесь текстом, сохраняя контроль над личными данными. AnonAI заменяет найденные значения масками и позволяет вернуть их обратно по ключу восстановления.</p>
             <div className={styles.actions}><Link className={styles.primary} href="/register">Начать работу <ArrowRight size={18} /></Link><a className={styles.secondary} href="#on-premise">Внедрить в компании <ArrowRight size={18} /></a></div>
             <div className={styles.heroNote}><ShieldCheck size={17} /> Обратимое маскирование с ключом восстановления</div>
@@ -94,7 +86,7 @@ export default function Landing() {
                 <div className={styles.fakeLine} /><div className={`${styles.fakeLine} ${styles.shortLine}`} />
               </div>
               <p className={styles.srOnly}>Демонстрация: вымышленные имя, телефон и email заменяются плейсхолдерами PERSON_1, PHONE_1 и EMAIL_1.</p>
-              <div className={styles.demoBottom}><span><span className={styles.statusDot} /> Пример маскирования</span><button type="button" aria-pressed={paused} aria-label="Приостановить демонстрацию" onClick={() => setPaused((value) => !value)}>{paused ? "Продолжить" : "Пауза"}</button></div>
+              <div className={styles.demoBottom}><span><span className={styles.statusDot} /> Пример маскирования</span><button type="button" onClick={() => setPaused((value) => !value)}>{paused ? "Продолжить" : "Пауза"}</button></div>
             </div>
             <div className={styles.floating}><LockKeyhole size={17} /><span>Ключ восстановления<small>Сохраните отдельно</small></span></div>
           </div>

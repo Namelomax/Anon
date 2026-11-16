@@ -1,6 +1,5 @@
 "use client";
 
-import JSZip from "jszip";
 import {
   ChevronDown,
   CircleUser,
@@ -1082,6 +1081,7 @@ export default function Workspace() {
     if (!result) return;
     setDocBusy(true);
     try {
+      const { default: JSZip } = await import("jszip");
       const zip = new JSZip();
       zip.file(result.document_name, await buildEffectiveDoc());
       zip.file(`${stem}.map.json`, mappingJson);
