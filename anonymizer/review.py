@@ -66,7 +66,6 @@ Design contract, mirroring ``llm.py``:
 
 from __future__ import annotations
 
-import concurrent.futures
 import json
 import os
 import re
@@ -75,7 +74,7 @@ from dataclasses import dataclass, field, replace
 
 from . import http_pool, usage_log
 from .detectors import can_trim_person, can_unmask_person  # deterministic PERSON-unmask veto
-from .llm import _extract_json_array  # reuse the same tolerant JSON-array scanner
+from .llm import Cancelled, _extract_json_array  # reuse the same tolerant JSON-array scanner
 from .spans import Span
 
 # Only these labels are second-guessed. Structured/format-driven identifiers
@@ -391,6 +390,12 @@ class ReviewConfig:
     # маску с товарной номенклатуры под предлогом «это продукт». Выставляется
     # сервером из стадии `subject` (server._compose); см. _build_review_prompt.
     subject: bool = False
+    cancel_event: object = field(default=None, repr=False, compare=False)
+
+
+def _check_cancelled(cfg: "ReviewConfig") -> None:
+    if cfg.cancel_event is not None and cfg.cancel_event.is_set():
+        raise Cancelled()
 
 
 @dataclass
@@ -502,6 +507,7 @@ def review_spans(
     if not spans:
         return spans
     cfg = config or ReviewConfig()
+    _check_cancelled(cfg)
 
     # Короткие голые числа судим отдельным сфокусированным вопросом: жёсткий
     # порог по длине тут неуместен — «000» бывает куском госномера, «12» —
@@ -509,6 +515,7 @@ def review_spans(
     # контекст. Отдельный вызов (а не общий батч) потому же, почему и
     # _ask_adjacent: на маленьком прицельном вопросе модель стабильна.
     drop_short = _judge_short_numbers(text, spans, cfg, warnings)
+    _check_cancelled(cfg)
     if drop_short:
         spans = [s for s in spans if id(s) not in drop_short]
         if not spans:
@@ -536,6 +543,8 @@ def review_spans(
     verdicts: dict[int, dict] = {}
     try:
         raw = _ask(items, cfg)
+    except Cancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         import sys
 
@@ -548,6 +557,7 @@ def review_spans(
                     "message": _REVIEW_FAILED_MESSAGE,
                 }
             )
+    _check_cancelled(cfg)
     for idx, v in raw.items():
         if not (0 <= idx < len(items)):
             continue
@@ -771,6 +781,8 @@ def review_spans(
     if _suspects:
         try:
             _decisions = _ask_adjacent(_suspects, cfg)
+        except Cancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             import sys
 
@@ -965,6 +977,8 @@ def _judge_short_numbers(
              for i, (value, ctx) in enumerate(items)]
     try:
         verdicts = _ask_short_numbers(lines, items, cfg)
+    except Cancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         import sys
 
@@ -1503,9 +1517,9 @@ def recall_spans(
     if not spans and not text.strip():
         return []
     cfg = config or ReviewConfig()
+    _check_cancelled(cfg)
 
     from .chunking import chunk_text
-    from .llm import Cancelled
     from .mapping import assign_placeholders
 
     ordered = sorted(spans, key=lambda s: s.start)
@@ -1523,64 +1537,29 @@ def recall_spans(
     ok_chunks = 0
     failed_chunks = 0
 
-    if cfg.recall_concurrency > 1 and len(chunks) > 1:
-        # Куски одного документа — параллельно, но их не больше
-        # cfg.recall_concurrency сразу: чат-пул общий на ВСЕ одновременно
-        # обрабатываемые документы (http_pool.MAX_INFLIGHT, 24 слота), и
-        # recall-стадия одного документа не должна забирать себе заметную
-        # долю пула — см. ReviewConfig.recall_concurrency.
-        results: list[list[tuple[str, str]] | Exception] = [None] * len(chunks)  # type: ignore[list-item]
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=cfg.recall_concurrency
-        ) as pool:
-            future_to_index = {}
-            for i, (_offset, chunk) in enumerate(chunks):
-                # run_in_context, НЕ pool.submit напрямую — обычный submit
-                # не копирует contextvars в поток-воркер, и usage_log
-                # потеряет request_id (см. usage_log.run_in_context и
-                # идентичный приём в llm.py / gliner_remote.py).
-                future_to_index[usage_log.run_in_context(pool, _ask_recall, chunk, cfg)] = i
-            for future in future_to_index:
-                index = future_to_index[future]
-                try:
-                    results[index] = future.result()
-                except Cancelled:
-                    # Пробрасываем как есть — см. докстринг recall_spans.
-                    # Остальные future's с `with` уже дожидаются завершения
-                    # (ThreadPoolExecutor.__exit__ ждёт весь пул), это не
-                    # обрывает уже запущенные HTTP-запросы на середине.
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    results[index] = exc
-        # Слияние — СТРОГО по индексу куска (порядку в документе), а не по
-        # порядку завершения запроса: см. докстринг recall_spans.
-        for result in results:
-            if isinstance(result, Exception):
-                failed_chunks += 1
-                print(f"[recall] LLM-запрос упал: {result}", file=sys.stderr)
+    from .chunking import map_chunks
+
+    results = map_chunks(
+        chunks,
+        lambda chunk: _ask_recall(chunk, cfg),
+        concurrency=cfg.recall_concurrency,
+        catch=(Exception,),
+        propagate=(Cancelled,),
+        cancel_event=cfg.cancel_event,
+        parallel_single=False,
+    )
+    _check_cancelled(cfg)
+    for result in results:
+        if isinstance(result, Exception):
+            failed_chunks += 1
+            print(f"[recall] LLM-запрос упал: {result}", file=sys.stderr)
+            continue
+        ok_chunks += 1
+        for pair in result:
+            if pair in seen_pairs:  # дубликат из другого куска — учли один раз
                 continue
-            ok_chunks += 1
-            for pair in result:
-                if pair in seen_pairs:  # дубликат из другого куска — учли один раз
-                    continue
-                seen_pairs.add(pair)
-                found.append(pair)
-    else:
-        for _offset, chunk in chunks:
-            try:
-                chunk_found = _ask_recall(chunk, cfg)
-            except Cancelled:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                failed_chunks += 1
-                print(f"[recall] LLM-запрос упал: {exc}", file=sys.stderr)
-                continue
-            ok_chunks += 1
-            for pair in chunk_found:
-                if pair in seen_pairs:  # дубликат из другого куска — учли один раз
-                    continue
-                seen_pairs.add(pair)
-                found.append(pair)
+            seen_pairs.add(pair)
+            found.append(pair)
 
     if ok_chunks == 0:
         if warnings is not None:

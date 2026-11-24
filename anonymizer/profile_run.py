@@ -246,7 +246,7 @@ def _build(args, *, second_pass: bool, recall: bool, review_on: bool):
     from dataclasses import replace as dc_replace
 
     from anonymizer.detectors import CORPORATE_DETECTORS, DEFAULT_DETECTORS
-    from anonymizer.engine import Anonymizer
+    from anonymizer.engine import assemble_anonymizer
     from anonymizer.glossary import DEFAULT_GLOSSARY_PATH, GlossaryDetector, load_glossary
     from anonymizer.llm import NO_THINKING_EXTRA_BODY, LLMConfig, LLMDetector
     from anonymizer.review import ReviewConfig
@@ -278,8 +278,6 @@ def _build(args, *, second_pass: bool, recall: bool, review_on: bool):
         lconf = dc_replace(lconf, max_chars=args.max_chars)
 
     llm_det = LLMDetector(lconf)
-    dets.append(llm_det)
-
     rconf = None
     if review_on:
         rconf = ReviewConfig(
@@ -287,10 +285,11 @@ def _build(args, *, second_pass: bool, recall: bool, review_on: bool):
             extra_body=extra, recall=recall,
         )
 
-    return Anonymizer(
+    return assemble_anonymizer(
         dets,
+        llm_detector=llm_det,
+        use_second_pass=second_pass,
         review_config=rconf,
-        second_pass_detectors=[llm_det] if second_pass else [],
     )
 
 

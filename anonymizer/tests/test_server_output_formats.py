@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import sys
 import tempfile
 import zipfile
@@ -68,7 +69,7 @@ def _temp_usage_log():
     with tempfile.TemporaryDirectory() as tmp:
         usage_log.LOG_PATH = Path(tmp) / "usage.jsonl"
         try:
-            yield
+            yield usage_log.LOG_PATH
         finally:
             usage_log.LOG_PATH = orig
 
@@ -91,6 +92,24 @@ def no_libreoffice(monkeypatch):
     monkeypatch.setattr(
         documents, "_libreoffice_convert", lambda data, src, to, out: None
     )
+
+
+def test_rebuild_failure_marks_request_outcome_error(monkeypatch):
+    monkeypatch.setattr(
+        documents, "rebuild_document", lambda *args: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    with _regex_pipeline(), _temp_usage_log() as log_path:
+        with pytest.raises(RuntimeError, match="boom"):
+            server._run_anonymize_file(
+                {
+                    "filename": "doc.txt",
+                    "file_base64": base64.b64encode(f"Почта {_EMAIL}".encode()).decode(),
+                }
+            )
+        records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+
+    assert len(records) == 1
+    assert records[0]["outcome"] == "error"
 
 
 # --- форматы, которые правятся напрямую ------------------------------------

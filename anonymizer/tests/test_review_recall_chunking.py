@@ -32,6 +32,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -46,7 +47,9 @@ from anonymizer.review import (  # noqa: E402
     _ask_recall,
     ReviewConfig,
     recall_spans,
+    review_spans,
 )
+from anonymizer.spans import Span  # noqa: E402
 
 
 @contextmanager
@@ -248,6 +251,46 @@ def test_cancelled_propagates_out_of_recall_spans_and_is_not_a_warning():
             assert False, "expected Cancelled to propagate out of recall_spans"
 
     assert warnings == []
+
+
+def test_cancelled_propagates_out_of_review_spans_and_is_not_a_warning():
+    cfg = ReviewConfig(model="test-model")
+
+    def _fake(url, payload_bytes, headers, timeout, *, pool="chat"):
+        raise Cancelled()
+
+    span = Span(0, 6, "PERSON", "Иванов", source="llm")
+    warnings: list[dict] = []
+    with _patched_post_json(_fake), _captured_stderr():
+        try:
+            review_spans("Иванов", [span], cfg, warnings)
+        except Cancelled:
+            pass
+        else:
+            raise AssertionError("expected Cancelled to propagate out of review_spans")
+
+    assert warnings == []
+
+
+def test_set_cancel_event_stops_recall_before_http():
+    cancel_event = threading.Event()
+    cancel_event.set()
+    cfg = ReviewConfig(model="test-model", cancel_event=cancel_event)
+    calls = []
+
+    def _fake(*args, **kwargs):
+        calls.append(args)
+        return 200, _chat_body("[]")
+
+    with _patched_post_json(_fake):
+        try:
+            recall_spans(_TEXT, [], cfg)
+        except Cancelled:
+            pass
+        else:
+            raise AssertionError("expected cancellation before recall HTTP")
+
+    assert calls == []
 
 
 # =============================================================================

@@ -190,3 +190,47 @@ def test_submit_sets_heartbeat_event_and_last_seen(monkeypatch):
     job = server._JOBS[json.loads(raw)["job_id"]]
     assert isinstance(job["cancel"], server._JobCancelEvent)
     assert time.monotonic() - job["last_seen"] < 5
+
+
+def test_job_ttl_starts_at_terminal_transition(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        server.depersonalization_log, "record_event", lambda **kw: events.append(kw)
+    )
+    _put_job("ttl", None, status="done")
+    server._JOBS["ttl"]["created"] = time.time() - 10_000
+    server._JOBS["ttl"]["finished_at"] = time.time()
+
+    with server._JOBS_LOCK:
+        server._sweep_jobs()
+    assert "ttl" in server._JOBS
+
+    server._JOBS["ttl"]["finished_at"] = (
+        time.time() - server._JOB_TTL_SECONDS - 1
+    )
+    with server._JOBS_LOCK:
+        server._sweep_jobs()
+    assert "ttl" not in server._JOBS
+
+
+def test_result_issued_only_for_done_after_successful_send(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        server.depersonalization_log, "record_event", lambda **kw: events.append(kw)
+    )
+    handler = server.Handler.__new__(server.Handler)
+
+    _put_job("error", None, status="error")
+    monkeypatch.setattr(handler, "_send", lambda code, payload: True)
+    handler._handle_job_status("error")
+    assert events == []
+
+    _put_job("done-lost", None, status="done", result={"x": 1})
+    monkeypatch.setattr(handler, "_send", lambda code, payload: False)
+    handler._handle_job_status("done-lost")
+    assert events == []
+
+    _put_job("done-sent", None, status="done", result={"x": 1})
+    monkeypatch.setattr(handler, "_send", lambda code, payload: True)
+    handler._handle_job_status("done-sent")
+    assert [e["event"] for e in events] == ["result_issued"]

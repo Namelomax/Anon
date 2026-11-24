@@ -26,97 +26,16 @@ import {
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { loginUrl } from "@/lib/auth-navigation";
+import type { AccountSummary, WorkspaceAccountSummary } from "@/lib/account-summary";
 import { signOut, useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LEGAL_DOCS } from "@/lib/legal";
-import Landing from "./landing";
 import AccountMenu from "./_components/AccountMenu";
 import "./interface-tweaks.css";
 
 type StageKey = "regex" | "corporate" | "ner" | "llm" | "review" | "subject";
 
 type Tab = "anon" | "deanon" | "account";
-
-// Зеркало lib/account-summary.ts: страницы везде в ДЕСЯТЫХ долях (как в БД,
-// см. шапку prisma/schema.prisma - страницы и деньги только целыми).
-type AccountSummary = {
-  user: { email: string; role: string };
-  account: { id: number; name: string; isActive: boolean };
-  plan: {
-    code: string;
-    title: string;
-    pagesPerMonth: number | null;
-    maxUsers: number | null;
-    priceKopecks: number;
-  };
-  quota: {
-    period: string;
-    unlimited: boolean;
-    usedTenths: number;
-    limitTenths: number | null;
-    grantsTenths: number;
-    allowanceTenths: number | null;
-    remainingTenths: number | null;
-    exhausted: boolean;
-    periodStart: string;
-    periodEnd: string | null;
-    paidUntil: string | null;
-    expired: boolean;
-  };
-  canManage: boolean;
-  offers: {
-    code: string;
-    title: string;
-    pagesPerMonth: number | null;
-    maxUsers: number | null;
-    priceKopecks: number;
-    priceYearKopecks: number | null;
-  }[];
-  payBlockedReason: "role" | "not_configured" | null;
-  payments: {
-    orderId: string;
-    createdAt: string;
-    planTitle: string;
-    months: number;
-    amountKopecks: number;
-    refundedKopecks: number;
-    status: string;
-    activated: boolean;
-    accessUntil: string | null;
-  }[];
-  users: {
-    active: number;
-    limit: number | null;
-    taken: number;
-    free: number | null;
-    list: {
-      id: number;
-      email: string;
-      role: string;
-      isActive: boolean;
-      createdAt: string;
-      isSelf: boolean;
-    }[];
-  };
-  invitations: {
-    id: number;
-    email: string;
-    role: string;
-    createdAt: string;
-    expiresAt: string;
-  }[];
-  periodTotals: { documents: number; chars: number; pagesTenths: number };
-  recent: {
-    id: number;
-    createdAt: string;
-    userEmail: string | null;
-    chars: number;
-    pagesTenths: number;
-    billablePagesTenths: number;
-    seconds: number;
-    ok: boolean;
-  }[];
-};
 
 type AnonResult = {
   filename: string;
@@ -613,6 +532,9 @@ export default function Workspace() {
   const userIdRef = useRef<string | null>(userId);
   userIdRef.current = userId;
   const [tab, setTab] = useState<Tab>("anon");
+  const tabRef = useRef<Tab>(tab);
+  tabRef.current = tab;
+  const [tabReady, setTabReady] = useState(false);
   useEffect(() => {
     if (sessionStatus !== "unauthenticated") return;
     const query = new URLSearchParams(window.location.search);
@@ -625,13 +547,16 @@ export default function Workspace() {
   }, [router, sessionStatus, tab]);
   useEffect(() => {
     if (new URLSearchParams(window.location.search).get("tab") === "account") setTab("account");
+    setTabReady(true);
   }, []);
   // Сводка кабинета: тариф, остаток квоты, история. Нужна не только самому
   // кабинету - по ней в меню показывается остаток, а исчерпанная квота
   // гасит кнопку «Обезличить» ДО загрузки файла (бэкенд всё равно откажет,
   // см. lib/quota.ts, но узнать об этом лучше заранее).
-  const [summary, setSummary] = useState<AccountSummary | null>(null);
+  const [summary, setSummary] = useState<AccountSummary | WorkspaceAccountSummary | null>(null);
   const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [summaryUnavailable, setSummaryUnavailable] = useState(false);
+  const summaryRequestRef = useRef(0);
   // Управление составом аккаунта. inviteUrl - ссылка последнего выписанного
   // приглашения: она существует в открытом виде ровно один раз (в БД только
   // хеш, см. lib/invitations.ts), поэтому держим её на экране, пока админ её
@@ -653,6 +578,7 @@ export default function Workspace() {
   const [glBusy, setGlBusy] = useState(false);
   const [glError, setGlError] = useState<string | null>(null);
   const [glNote, setGlNote] = useState<string | null>(null);
+  const glossaryRequestRef = useRef(0);
 
   // --- Anonymize state ---
   const [file, setFile] = useState<File | null>(null);
@@ -736,6 +662,48 @@ export default function Workspace() {
   const [deResult, setDeResult] = useState<DeanonResult | null>(null);
   const deFileRef = useRef<HTMLInputElement>(null);
   const deMapRef = useRef<HTMLInputElement>(null);
+  const previousUserIdRef = useRef<string | null>(userId);
+
+  useEffect(() => {
+    if (sessionStatus !== "authenticated" || previousUserIdRef.current === userId) return;
+    previousUserIdRef.current = userId;
+    summaryRequestRef.current += 1;
+    glossaryRequestRef.current += 1;
+    setSummary(null);
+    setSummaryError(null);
+    setSummaryUnavailable(false);
+    setGlTerms([]);
+    setGlMax(500);
+    setGlAliases("");
+    setGlCanonical("");
+    setGlBulk("");
+    setGlError(null);
+    setGlNote(null);
+    setInviteEmail("");
+    setInviteError(null);
+    setInviteUrl(null);
+    setInviteCopied(false);
+    setInviteBusy(false);
+    if (activeJobIdRef.current) cancelJob(activeJobIdRef.current);
+    activeJobIdRef.current = null;
+    jobPersistedRef.current = false;
+    clearCachedResult();
+    clearJob();
+    setFile(null);
+    setResult(null);
+    setResultCached(false);
+    setKept(new Set());
+    setError(null);
+    setNotice(null);
+    setCancelled(false);
+    setLoading(false);
+    setDeFile(null);
+    setDeMapFile(null);
+    setDeResult(null);
+    setDeError(null);
+    setDeUseLast(false);
+    setDeLoading(false);
+  }, [sessionStatus, userId]);
 
   const stem = useMemo(
     () => (result ? result.filename.replace(/\.[^.]+$/, "") : "document"),
@@ -764,27 +732,38 @@ export default function Workspace() {
   }, []);
 
   const loadSummary = useCallback(async () => {
+    const requestId = ++summaryRequestRef.current;
+    const requestUserId = userIdRef.current;
+    const view = tabRef.current === "account" ? "full" : "workspace";
+    const isCurrent = () =>
+      requestId === summaryRequestRef.current && requestUserId === userIdRef.current;
+    setSummaryError(null);
+    setSummaryUnavailable(false);
     try {
-      const resp = await fetch("/api/account", { cache: "no-store" });
+      const resp = await fetch(`/api/account?view=${view}`, { cache: "no-store" });
+      if (!isCurrent()) return;
       if (resp.status === 401 || resp.status === 404) {
         // Не вошёл или работает в режиме без авторизации - кабинета просто
         // нет, и это не ошибка, о которой нужно кричать.
         setSummary(null);
         setSummaryError(null);
+        setSummaryUnavailable(true);
         return;
       }
       const data = await resp.json();
+      if (!isCurrent()) return;
       if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-      setSummary(data as AccountSummary);
+      setSummary(data as AccountSummary | WorkspaceAccountSummary);
       setSummaryError(null);
     } catch (e: unknown) {
-      setSummaryError(e instanceof Error ? e.message : String(e));
+      if (isCurrent()) setSummaryError(e instanceof Error ? e.message : String(e));
     }
   }, []);
 
+  const summaryView = tab === "account" ? "full" : "workspace";
   useEffect(() => {
-    if (sessionStatus === "authenticated") void loadSummary();
-  }, [sessionStatus, loadSummary]);
+    if (tabReady && sessionStatus === "authenticated") void loadSummary();
+  }, [sessionStatus, summaryView, userId, tabReady, loadSummary]);
 
   // Опрос /api/status: баннер «серверы обработки недоступны» и блокировка
   // кнопки, пока бэкенд или модельные серверы не поднялись. Повторяем — шлюз
@@ -875,10 +854,12 @@ export default function Workspace() {
   // notice, остальные сбои - красная ошибка.
   const trackJob = useCallback(
     async (jobId: string, fileName: string, startedAt: number) => {
+      const requestUserId = userIdRef.current;
       activeJobIdRef.current = jobId;
-      jobPersistedRef.current = writeJob({ jobId, fileName, startedAt }, userIdRef.current);
+      jobPersistedRef.current = writeJob({ jobId, fileName, startedAt }, requestUserId);
       try {
         const final = await pollJob(jobId, setElapsed, startedAt);
+        if (requestUserId !== userIdRef.current) return;
         // Terminal state reached (done or cancelled) - clear the ref so a
         // later unload/new submit never sends a cancel for this job again.
         activeJobIdRef.current = null;
@@ -889,6 +870,7 @@ export default function Workspace() {
           showResult(final as AnonResult, fileName, startedAt);
         }
       } catch (e: unknown) {
+        if (requestUserId !== userIdRef.current) return;
         activeJobIdRef.current = null;
         if (e instanceof JobGoneError) {
           clearJob();
@@ -935,11 +917,14 @@ export default function Workspace() {
     setLoading(true);
     setJobName(job.fileName);
     setElapsed(Math.max(0, Math.round((Date.now() - job.startedAt) / 1000)));
-    void trackJob(job.jobId, job.fileName, job.startedAt).finally(() => setLoading(false));
+    void trackJob(job.jobId, job.fileName, job.startedAt).finally(() => {
+      if (userIdRef.current === userId) setLoading(false);
+    });
   }, [sessionStatus, userId, trackJob]);
 
   const run = useCallback(async () => {
     if (!file) return;
+    const requestUserId = userIdRef.current;
     // A previous job may still be in flight - either genuinely still running,
     // or orphaned client-side after `pollJob` gave up on a flaky connection.
     // Cancel it before starting a new one instead of leaving it to burn
@@ -971,6 +956,7 @@ export default function Workspace() {
       // «An error occurred…») обычным текстом или HTML. Читаем как текст и
       // разбираем защищённо, чтобы наружу шло понятное сообщение.
       const rawBody = await resp.text();
+      if (requestUserId !== userIdRef.current) return;
       let data: any = null;
       try {
         data = rawBody ? JSON.parse(rawBody) : null;
@@ -996,9 +982,11 @@ export default function Workspace() {
         showResult(data as AnonResult, file.name, startedAt);
       }
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (requestUserId === userIdRef.current) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setLoading(false);
+      if (requestUserId === userIdRef.current) setLoading(false);
     }
   }, [file, stages, trackJob, showResult]);
 
@@ -1098,6 +1086,7 @@ export default function Workspace() {
   // галочку: так работает кнопка обратной подстановки сразу после
   // обезличивания (см. restoreLast).
   const runDeanon = useCallback(async (forceLast = false) => {
+    const requestUserId = userIdRef.current;
     const useLast = (forceLast || deUseLast) && !!result;
     setDeLoading(true);
     setDeError(null);
@@ -1130,12 +1119,15 @@ export default function Workspace() {
         resp = await fetch("/api/deanonymize", { method: "POST", body: fd });
       }
       const data = await resp.json();
+      if (requestUserId !== userIdRef.current) return;
       if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
       setDeResult(data as DeanonResult);
     } catch (e: unknown) {
-      setDeError(e instanceof Error ? e.message : String(e));
+      if (requestUserId === userIdRef.current) {
+        setDeError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setDeLoading(false);
+      if (requestUserId === userIdRef.current) setDeLoading(false);
     }
   }, [deUseLast, result, deFile, deMapFile]);
 
@@ -1166,6 +1158,7 @@ export default function Workspace() {
 
   const createInvite = async (e: React.FormEvent) => {
     e.preventDefault();
+    const requestUserId = userIdRef.current;
     setInviteBusy(true);
     setInviteError(null);
     setInviteUrl(null);
@@ -1177,14 +1170,17 @@ export default function Workspace() {
         body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
       });
       const data = await resp.json().catch(() => ({}));
+      if (requestUserId !== userIdRef.current) return;
       if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
       setInviteUrl(typeof data?.url === "string" ? data.url : null);
       setInviteEmail("");
       await loadSummary();
     } catch (e: unknown) {
-      setInviteError(e instanceof Error ? e.message : String(e));
+      if (requestUserId === userIdRef.current) {
+        setInviteError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setInviteBusy(false);
+      if (requestUserId === userIdRef.current) setInviteBusy(false);
     }
   };
 
@@ -1217,10 +1213,15 @@ export default function Workspace() {
   };
 
   const loadGlossary = useCallback(async () => {
+    const requestId = ++glossaryRequestRef.current;
+    const requestUserId = userIdRef.current;
+    const isCurrent = () =>
+      requestId === glossaryRequestRef.current && requestUserId === userIdRef.current;
     try {
       const resp = await fetch("/api/account/glossary", { cache: "no-store" });
-      if (!resp.ok) return;
+      if (!isCurrent() || !resp.ok) return;
       const data = await resp.json();
+      if (!isCurrent()) return;
       setGlTerms(Array.isArray(data?.terms) ? (data.terms as GlossaryRow[]) : []);
       if (typeof data?.max === "number") setGlMax(data.max);
     } catch {
@@ -1306,8 +1307,7 @@ export default function Workspace() {
     void runDeanon(true);
   };
 
-  if (sessionStatus === "loading") return <p className="wrap" role="status">Загрузка…</p>;
-  if (sessionStatus === "unauthenticated") return <Landing />;
+  if (sessionStatus !== "authenticated") return <p className="wrap" role="status">Загрузка…</p>;
 
   return (
     <div className={`shell${menuOpen ? "" : " menu-closed"}`}>
@@ -1886,14 +1886,21 @@ export default function Workspace() {
           {tab === "account" && (
             <>
               {summaryError && <div className="error">Ошибка: {summaryError}</div>}
-              {!summary && !summaryError && (
+              {!(summary && "users" in summary) && !summaryError && !summaryUnavailable && (
+                <div className="card">
+                  <p className="note" role="status" style={{ margin: 0 }}>
+                    Загрузка кабинета…
+                  </p>
+                </div>
+              )}
+              {!(summary && "users" in summary) && !summaryError && summaryUnavailable && (
                 <div className="card">
                   <p className="note" style={{ margin: 0 }}>
                     Кабинет доступен после входа в систему.
                   </p>
                 </div>
               )}
-              {summary && (
+              {summary && "users" in summary && (
                 <>
                   <div className="card">
                     <h2>

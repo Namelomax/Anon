@@ -33,6 +33,7 @@ import io
 import json
 import sys
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -41,7 +42,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from anonymizer import http_pool, usage_log  # noqa: E402
 from anonymizer import review as review_mod  # noqa: E402
-from anonymizer.engine import Anonymizer  # noqa: E402
+from anonymizer.engine import Anonymizer, assemble_anonymizer  # noqa: E402
+from anonymizer.llm import Cancelled  # noqa: E402
 from anonymizer.review import ReviewConfig  # noqa: E402
 from anonymizer.spans import Span  # noqa: E402
 
@@ -358,6 +360,62 @@ def test_review_and_recall_calls_share_the_same_request_id():
     assert len(seen_request_ids) == 2
     assert all(rid == totals.request_id for rid in seen_request_ids)
     assert totals.request_id is not None
+
+
+def test_review_cancelled_propagates_without_warning_or_recall():
+    calls = []
+
+    def _review_cancelled(text, spans, cfg, warnings=None):
+        raise Cancelled()
+
+    def _recall(text, spans, cfg, warnings=None):
+        calls.append("recall")
+        return []
+
+    anon = _anonymizer()
+    with _patched_review_recall(_review_cancelled, _recall):
+        try:
+            anon.anonymize(_TEXT)
+        except Cancelled:
+            pass
+        else:
+            raise AssertionError("Cancelled должен пробрасываться из engine")
+
+    assert calls == []
+
+
+def test_recall_cancelled_propagates_without_warning():
+    def _review(text, spans, cfg, warnings=None):
+        return list(spans)
+
+    def _recall_cancelled(text, spans, cfg, warnings=None):
+        raise Cancelled()
+
+    anon = _anonymizer()
+    with _patched_review_recall(_review, _recall_cancelled):
+        try:
+            anon.anonymize(_TEXT)
+        except Cancelled:
+            pass
+        else:
+            raise AssertionError("Cancelled должен пробрасываться из engine")
+
+
+def test_assemble_wires_cancel_event_into_review_stage():
+    cancel_event = threading.Event()
+    cancel_event.set()
+    anon = assemble_anonymizer(
+        [_FakeDetector("PERSON", _PERSON)],
+        review_config=ReviewConfig(model="test-model"),
+        cancel_event=cancel_event,
+    )
+
+    try:
+        anon.anonymize(_TEXT)
+    except Cancelled:
+        pass
+    else:
+        raise AssertionError("cancel_event должен остановить pipeline перед review HTTP")
 
 
 if __name__ == "__main__":

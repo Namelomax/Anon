@@ -25,7 +25,6 @@ Works with LM Studio (``http://127.0.0.1:1234/v1``) and Ollama
 
 from __future__ import annotations
 
-import concurrent.futures
 import json
 import re
 import sys
@@ -34,7 +33,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import http_pool, usage_log
-from .chunking import chunk_text
+from .chunking import chunk_text, map_chunks
 from .spans import Span
 
 
@@ -306,39 +305,13 @@ class LLMDetector:
         # Either way results are collected by chunk index, not completion
         # order, so the output is deterministic regardless of which request
         # answers first.
-        results: list[str | _DegenerateReply | _TransportFailure] = [None] * len(chunks)  # type: ignore[list-item]
-        if self.config.concurrency > 1:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=self.config.concurrency
-            ) as pool:
-                future_to_index = {}
-                for i, (_offset, chunk) in enumerate(chunks):
-                    if self.cancel_event is not None and self.cancel_event.is_set():
-                        raise Cancelled()
-                    # run_in_context, НЕ pool.submit напрямую — обычный submit
-                    # не копирует contextvars в поток-воркер, и usage_log
-                    # потеряет request_id (см. usage_log.run_in_context).
-                    future_to_index[usage_log.run_in_context(pool, self._complete, chunk)] = i
-                for future in future_to_index:
-                    index = future_to_index[future]
-                    try:
-                        results[index] = future.result()
-                    except (_DegenerateReply, _TransportFailure) as exc:
-                        results[index] = exc
-                # In-flight requests above have already run to completion (we
-                # don't kill HTTP calls mid-flight — see Change 1's docstring
-                # in the spec); this just stops us from starting a new batch
-                # of chunks on a job the client already gave up on.
-                if self.cancel_event is not None and self.cancel_event.is_set():
-                    raise Cancelled()
-        else:
-            for i, (_offset, chunk) in enumerate(chunks):
-                if self.cancel_event is not None and self.cancel_event.is_set():
-                    raise Cancelled()
-                try:
-                    results[i] = self._complete(chunk)
-                except (_DegenerateReply, _TransportFailure) as exc:
-                    results[i] = exc
+        results = map_chunks(
+            chunks,
+            self._complete,
+            concurrency=self.config.concurrency,
+            catch=(_DegenerateReply, _TransportFailure),
+            cancel_event=self.cancel_event,
+        )
 
         spans: list[Span] = []
         for (offset, chunk), result in zip(chunks, results):

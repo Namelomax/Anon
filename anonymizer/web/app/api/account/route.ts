@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { resolveIdentity } from "@/lib/auth-guard";
 import { getAccountSummary } from "@/lib/account-summary";
 
@@ -16,7 +16,12 @@ export const runtime = "nodejs";
  * Ответ помечается no-store: остаток квоты меняется после каждого документа,
  * и закешированная цифра здесь хуже отсутствующей.
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const views = request.nextUrl.searchParams.getAll("view");
+  if (views.length > 1 || (views[0] != null && !["full", "workspace"].includes(views[0]))) {
+    return NextResponse.json({ error: "Некорректный вид сводки." }, { status: 400 });
+  }
+  const view = views[0] === "workspace" ? "workspace" : "full";
   const { identity, error } = await resolveIdentity();
   if (error) return error;
   if (!identity) {
@@ -27,7 +32,9 @@ export async function GET() {
   }
 
   try {
-    const summary = await getAccountSummary(identity.accountId, identity.userId);
+    const summary = view === "workspace"
+      ? await getAccountSummary(identity.accountId, identity.userId, "workspace")
+      : await getAccountSummary(identity.accountId, identity.userId);
     if (!summary) {
       return NextResponse.json({ error: "Аккаунт не найден." }, { status: 404 });
     }

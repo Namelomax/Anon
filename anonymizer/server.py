@@ -454,7 +454,8 @@ def _sweep_jobs() -> None:
     now = time.time()
     stale = [
         jid for jid, job in _JOBS.items()
-        if job["status"] in _TERMINAL_STATUSES and now - job["created"] > _JOB_TTL_SECONDS
+        if job["status"] in _TERMINAL_STATUSES
+        and now - job.get("finished_at", job["created"]) > _JOB_TTL_SECONDS
     ]
     for jid in stale:
         del _JOBS[jid]
@@ -554,51 +555,26 @@ def _compose(
     such per-request state either (only model weights, expensive to
     duplicate), so they also stay shared.
     """
-    subject_on = stages.get("subject")
-    if subject_on is None:
-        subject_on = _DEFAULTS.get("subject", False)
+    from anonymizer.engine import assemble_anonymizer
 
-    # SUBJECT (предмет договора) — просто расширяем allowed_labels существующего
-    # LLM-детектора; отдельного прохода не добавляем. Строим ОДИН экземпляр и
-    # переиспользуем его и в детекции, и во втором проходе: иначе leak-скан
-    # (second_pass) шёл базовым детектором и предмет договора не видел вовсе.
-    subject_detector = None
-    if subject_on and _DETECTORS.get("llm"):
-        from dataclasses import replace
+    def enabled(name: str) -> bool:
+        value = stages.get(name)
+        return _DEFAULTS.get(name, False) if value is None else value
 
-        from anonymizer.llm import LLMDetector
-
-        base_cfg = _DETECTORS["llm"][0].config
-        subject_detector = LLMDetector(
-            replace(base_cfg, allowed_labels=base_cfg.allowed_labels | {"SUBJECT"})
-        )
-        subject_detector.cancel_event = cancel_event
-
-    # Fresh per-request LLM detector for the non-subject case too (replacing
-    # what used to be the shared _DETECTORS["llm"][0] instance — see the
-    # warnings-isolation note in the docstring above). Built unconditionally
-    # whenever an LLM detector is configured at all, independent of whether
-    # this particular request has the "llm" stage on: second_pass below can
-    # still want it even when "llm" itself is off.
-    base_llm_detector = None
+    # Fresh per-request LLM detector even when its main stage is off: second
+    # pass can still use it. Shared config retains model settings; mutable
+    # warnings and cancellation remain request-local.
+    llm_detector = None
     if _DETECTORS.get("llm"):
         from anonymizer.llm import LLMDetector
 
-        base_llm_detector = LLMDetector(_DETECTORS["llm"][0].config)
-        base_llm_detector.cancel_event = cancel_event
+        llm_detector = LLMDetector(_DETECTORS["llm"][0].config)
 
     dets: list = []
-    for name in ("regex", "corporate", "glossary", "ner", "llm"):
-        on = stages.get(name)
-        if on is None:
-            on = _DEFAULTS.get(name, False)
-        if not (on and _DETECTORS.get(name)):
+    for name in ("regex", "corporate", "glossary", "ner"):
+        if not (enabled(name) and _DETECTORS.get(name)):
             continue
         if name == "ner" and _NER_BACKEND == "remote":
-            # RemoteGLiNERDetector.warnings is per-request mutable state too
-            # (see docstring above) — always build a fresh one from the
-            # shared config, same shape as the local-GLiNER threshold-override
-            # branch below.
             from dataclasses import replace
 
             from anonymizer.gliner_remote import RemoteGLiNERDetector
@@ -615,12 +591,6 @@ def _compose(
             from anonymizer.gliner_ner import GLiNERDetector
 
             dets.append(GLiNERDetector(replace(_GLINER_CFG, threshold=float(ner_threshold))))
-        elif name == "llm" and subject_detector is not None:
-            # Если llm выключена, до этой ветки не доходим — subject молча
-            # игнорируется.
-            dets.append(subject_detector)
-        elif name == "llm":
-            dets.append(base_llm_detector)
         else:
             dets.extend(_DETECTORS[name])
 
@@ -634,33 +604,15 @@ def _compose(
     # стадии "regex": маскирование спецкатегорий не отключается флагами запроса.
     dets.extend(_special_category_masking_detectors())
 
-    review_on = stages.get("review")
-    if review_on is None:
-        review_on = _DEFAULTS.get("review", False)
-    review_cfg = _REVIEW_CFG if (review_on and _REVIEW_CFG is not None) else None
-    if review_cfg is not None and subject_on:
-        # Иначе слои воюют: детекция маскирует номенклатуру, а ревью снимает её
-        # обратно по правилу «название продукта — не ПДн» (см. review.py).
-        from dataclasses import replace
-
-        review_cfg = replace(review_cfg, subject=True)
-
-    # Leak check: re-scan the interim-anonymized text with the LLM detector and
-    # mask whatever it still finds (bare first names, standalone surnames...).
-    # Model-driven recall; costs roughly one extra LLM sweep of the document.
-    sp_on = stages.get("second_pass")
-    if sp_on is None:
-        sp_on = _DEFAULTS.get("second_pass", False)
-    if not sp_on:
-        second_pass = []
-    elif subject_detector is not None:
-        second_pass = [subject_detector]
-    elif base_llm_detector is not None:
-        second_pass = [base_llm_detector]
-    else:
-        second_pass = []
-
-    return Anonymizer(dets, review_config=review_cfg, second_pass_detectors=second_pass)
+    return assemble_anonymizer(
+        dets,
+        llm_detector=llm_detector,
+        use_llm=enabled("llm"),
+        use_second_pass=enabled("second_pass"),
+        review_config=_REVIEW_CFG if enabled("review") else None,
+        subject=enabled("subject"),
+        cancel_event=cancel_event,
+    )
 
 
 class _BadRequest(Exception):
@@ -959,6 +911,11 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
                 account_terms=account_terms,
             )
             res = anon.anonymize(text)
+        # Сборка — часть результата запроса: её сбой обязан дать outcome=error,
+        # а не оставить успешную биллинговую запись без выданного документа.
+        doc_bytes, out_ext, doc_source = rebuild_document(
+            prepared, masking_replacer(res.mapping), res.anonymized_text
+        )
     elapsed = time.time() - t0
 
     stem = PurePosixPath(filename).stem or "document"
@@ -966,9 +923,6 @@ def _run_anonymize_file(data: dict, cancel_event: threading.Event | None = None)
     # "converted" сохраняют разметку оригинала, "text" — нет (документ собран
     # заново из обезличенного текста). Клиенту это нужно, чтобы сказать об
     # этом честно, а не молча подменить формат.
-    doc_bytes, out_ext, doc_source = rebuild_document(
-        prepared, masking_replacer(res.mapping), res.anonymized_text
-    )
     doc_name = f"{stem}.anon{out_ext}"
     doc_mime = mime_for(out_ext)
     # is_docx = «документ собирает сервер»: у простого текста документ и есть
@@ -1035,7 +989,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
-    def _send(self, code: int, obj: dict) -> None:
+    def _send(self, code: int, obj: dict) -> bool:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         # Клиент (фронтенд с лимитом ~300 с) может отвалиться, пока мы ещё пишем ответ —
         # тогда send_response/end_headers/write кидают BrokenPipeError, а
@@ -1055,6 +1009,8 @@ class Handler(BaseHTTPRequestHandler):
                 "ответ не доставлен",
                 file=sys.stderr,
             )
+            return False
+        return True
 
     def do_OPTIONS(self):  # CORS preflight — НИКОГДА не требует Authorization,
         # иначе браузер не смог бы даже дойти до реального запроса.
@@ -1252,25 +1208,28 @@ class Handler(BaseHTTPRequestHandler):
             except Cancelled:
                 with _JOBS_LOCK:
                     job = _JOBS.get(job_id)
-                    if job is not None:
+                    if job is not None and job["status"] not in _TERMINAL_STATUSES:
                         job["status"] = "cancelled"
                         job["error"] = None
+                        job["finished_at"] = time.time()
                 return
             except Exception as exc:  # noqa: BLE001
                 with _JOBS_LOCK:
                     job = _JOBS.get(job_id)
-                    if job is not None and job["status"] != "cancelled":
+                    if job is not None and job["status"] not in _TERMINAL_STATUSES:
                         job["status"] = "error"
                         job["error"] = str(exc)
+                        job["finished_at"] = time.time()
                 return
             with _JOBS_LOCK:
                 job = _JOBS.get(job_id)
                 # Don't resurrect a job DELETE already marked "cancelled" —
                 # e.g. the cancel event was set right after the last
                 # cancellation check, so the pipeline ran to completion anyway.
-                if job is not None and job["status"] != "cancelled":
+                if job is not None and job["status"] not in _TERMINAL_STATUSES:
                     job["status"] = "done"
                     job["result"] = result
+                    job["finished_at"] = time.time()
 
         depersonalization_log.run_in_context(_worker).start()
         self._send(202, {"job_id": job_id})
@@ -1357,14 +1316,14 @@ class Handler(BaseHTTPRequestHandler):
                     request_id=job_id,
                     detail={"reason": "oneshot"},
                 )
-        if payload is not None and payload["status"] in _TERMINAL_STATUSES:
-            depersonalization_log.record_event(
-                event="result_issued", request_id=job_id
-            )
         if payload is None:
             self._send(404, {"error": "unknown job"})
             return
-        self._send(200, payload)
+        sent = self._send(200, payload)
+        if payload["status"] == "done" and sent:
+            depersonalization_log.record_event(
+                event="result_issued", request_id=job_id
+            )
 
     def _handle_job_cancel(self, job_id: str, caller=(None, None)):
         """DELETE /jobs/<job_id> -> {"status": ...}. Cooperative cancellation:
@@ -1385,6 +1344,7 @@ class Handler(BaseHTTPRequestHandler):
             if job["status"] not in _TERMINAL_STATUSES:
                 job["cancel"].set()
                 job["status"] = "cancelled"
+                job["finished_at"] = time.time()
             status = job["status"]
         self._send(200, {"status": status})
 

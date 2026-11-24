@@ -18,28 +18,28 @@ button.drop { background: transparent; font: inherit; }
 
 /* Ключ восстановления выделен как отдельное действие после обработки. */
 .card.recovery-notice {
-  background: #1b1b1b;
-  border-color: #606060;
+  background: var(--panel);
+  border-color: var(--border);
 }
 .card.recovery-key-card {
-  background: #222;
-  border-color: #858585;
+  background: rgba(139, 233, 212, 0.07);
+  border-color: var(--accent);
 }
 .card.recovery-key-card h2 {
-  color: #fff;
+  color: var(--text);
 }
 .recovery-key-download.ghost {
-  background: #f1f1f1;
-  border-color: #f1f1f1;
-  color: #111;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #092321;
   font-weight: 700;
 }
 .recovery-key-download.ghost:hover {
-  background: #fff;
-  border-color: #fff;
+  background: #b1f6e7;
+  border-color: #b1f6e7;
 }
 .recovery-key-note {
-  color: #dedede;
+  color: var(--text);
 }
 .api-price {
   font-size: 24px;
@@ -51,31 +51,31 @@ button.drop { background: transparent; font: inherit; }
   flex-direction: column;
   gap: 2px;
   margin-bottom: 6px;
-  color: #c5c5c5;
+  color: var(--muted);
   font-size: 12px;
 }
 .year-price.ghost {
   padding: 6px 10px;
   min-width: 130px;
   justify-content: center;
-  background: #f1f1f1;
-  border-color: #f1f1f1;
-  color: #111;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #092321;
   font-size: 13px;
   font-weight: 700;
 }
 .year-price.ghost:hover:not(:disabled) {
-  background: #fff;
-  border-color: #fff;
+  background: #b1f6e7;
+  border-color: #b1f6e7;
 }
 .year-saving {
   display: inline-block;
   margin-top: 6px;
   padding: 3px 7px;
-  border: 1px solid #aaa;
+  border: 1px solid var(--accent);
   border-radius: 6px;
-  background: #303030;
-  color: #fff;
+  background: rgba(139, 233, 212, 0.08);
+  color: var(--accent);
   font-size: 12px;
   font-weight: 700;
 }

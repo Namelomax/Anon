@@ -125,10 +125,26 @@ export type AccountSummary = {
   }[];
 };
 
+export type WorkspaceAccountSummary = Pick<
+  AccountSummary,
+  "user" | "account" | "plan" | "quota" | "canManage"
+>;
+
+export function getAccountSummary(
+  accountId: number,
+  userId: number,
+  view: "workspace",
+): Promise<WorkspaceAccountSummary | null>;
+export function getAccountSummary(
+  accountId: number,
+  userId: number,
+  view?: "full",
+): Promise<AccountSummary | null>;
 export async function getAccountSummary(
   accountId: number,
   userId: number,
-): Promise<AccountSummary | null> {
+  view: "full" | "workspace" = "full",
+): Promise<AccountSummary | WorkspaceAccountSummary | null> {
   const state = await getQuotaState(accountId);
   if (!state) return null;
 
@@ -136,6 +152,38 @@ export async function getAccountSummary(
   if (!user) return null;
 
   const canManage = user.role === "root" || user.role === "admin";
+  const base = {
+    user: { email: user.email, role: user.role },
+    account: {
+      id: state.account.id,
+      name: state.account.name,
+      isActive: state.account.isActive,
+    },
+    plan: {
+      code: state.account.plan.code,
+      title: state.account.plan.title,
+      pagesPerMonth: state.account.plan.pagesPerMonth,
+      maxUsers: state.account.plan.maxUsers,
+      priceKopecks: state.account.plan.priceKopecks,
+    },
+    quota: {
+      period: state.period,
+      periodStart: state.periodStart.toISOString(),
+      periodEnd: state.periodEnd?.toISOString() ?? null,
+      paidUntil: state.paidUntil?.toISOString() ?? null,
+      expired: state.expired,
+      unlimited: state.allowanceTenths == null,
+      usedTenths: state.usedTenths,
+      limitTenths: state.limitTenths,
+      grantsTenths: state.grantsTenths,
+      allowanceTenths: state.allowanceTenths,
+      remainingTenths: state.remainingTenths,
+      exhausted: state.exhausted,
+    },
+    canManage,
+  };
+  if (view === "workspace") return base;
+
   const [seats, members, invitations, totals, recent, offers, payments, allPlans] = await Promise.all([
     getSeatUsage(accountId),
     prisma.user.findMany({
@@ -175,37 +223,10 @@ export async function getAccountSummary(
   const planTitles = new Map(allPlans.map((p) => [p.code, p.title]));
 
   return {
-    user: { email: user.email, role: user.role },
-    account: {
-      id: state.account.id,
-      name: state.account.name,
-      isActive: state.account.isActive,
-    },
-    plan: {
-      code: state.account.plan.code,
-      title: state.account.plan.title,
-      pagesPerMonth: state.account.plan.pagesPerMonth,
-      maxUsers: state.account.plan.maxUsers,
-      priceKopecks: state.account.plan.priceKopecks,
-    },
-    quota: {
-      period: state.period,
-      periodStart: state.periodStart.toISOString(),
-      periodEnd: state.periodEnd?.toISOString() ?? null,
-      paidUntil: state.paidUntil?.toISOString() ?? null,
-      expired: state.expired,
-      unlimited: state.allowanceTenths == null,
-      usedTenths: state.usedTenths,
-      limitTenths: state.limitTenths,
-      grantsTenths: state.grantsTenths,
-      allowanceTenths: state.allowanceTenths,
-      remainingTenths: state.remainingTenths,
-      exhausted: state.exhausted,
-    },
+    ...base,
     // Оплата тарифа доступна ТОЛЬКО при canManage (admin/root) и
     // проверяется по роли из сессии на сервере (/api/billing/checkout);
     // member платить за аккаунт не может ни при каких условиях.
-    canManage,
     offers: offers.map((p) => ({
       code: p.code,
       title: p.title,

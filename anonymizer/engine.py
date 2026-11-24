@@ -263,6 +263,7 @@ class Anonymizer:
         # to stderr.
         stage_warnings: list[dict] = []
         if self._review_config is not None:
+            from .llm import Cancelled
             from .review import (
                 _RECALL_FAILED_MESSAGE,
                 _REVIEW_FAILED_MESSAGE,
@@ -280,6 +281,8 @@ class Anonymizer:
             detected = spans
             try:
                 spans = review_spans(text, detected, self._review_config, stage_warnings)
+            except Cancelled:
+                raise
             except Exception as exc:  # noqa: BLE001
                 import sys
 
@@ -299,6 +302,8 @@ class Anonymizer:
                 # pre-review ``detected`` list) is load-bearing.
                 try:
                     recalled = recall_spans(text, spans, self._review_config, stage_warnings)
+                except Cancelled:
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     import sys
 
@@ -620,6 +625,54 @@ def _apply(text: str, spans: list[Span], span_placeholders: dict[int, str]) -> s
     return "".join(pieces)
 
 
+def assemble_anonymizer(
+    detectors: Iterable[Detector],
+    *,
+    llm_detector: Detector | None = None,
+    use_llm: bool = True,
+    use_second_pass: bool = False,
+    review_config=None,
+    subject: bool = False,
+    cancel_event=None,
+) -> Anonymizer:
+    """Assemble ready-made detectors with consistent LLM/review wiring."""
+    if llm_detector is not None and subject:
+        from dataclasses import replace
+
+        from .llm import LLMDetector
+
+        llm_detector = LLMDetector(
+            replace(
+                llm_detector.config,
+                allowed_labels=llm_detector.config.allowed_labels | {"SUBJECT"},
+            )
+        )
+    if llm_detector is not None:
+        llm_detector.cancel_event = cancel_event
+
+    selected = list(detectors)
+    if llm_detector is not None and use_llm:
+        selected.append(llm_detector)
+    if review_config is not None and (subject or cancel_event is not None):
+        from dataclasses import replace
+
+        review_config = replace(
+            review_config,
+            subject=subject or review_config.subject,
+            cancel_event=cancel_event,
+        )
+
+    return Anonymizer(
+        selected,
+        review_config=review_config,
+        second_pass_detectors=(
+            [llm_detector]
+            if use_second_pass and llm_detector is not None
+            else []
+        ),
+    )
+
+
 def build_anonymizer(
     *,
     use_regex: bool = True,
@@ -676,7 +729,6 @@ def build_anonymizer(
         A configured :class:`Anonymizer`.
     """
     detectors: list[Detector] = list(DEFAULT_DETECTORS) if use_regex else []
-    second_pass: list[Detector] = []
     if corporate:
         detectors.extend(CORPORATE_DETECTORS)
     if custom_terms is not None:
@@ -701,6 +753,7 @@ def build_anonymizer(
             detectors.append(NatashaDetector(include_org=include_org))
         else:
             raise ValueError(f"Unknown ner_backend: {ner_backend!r}")
+    llm_detector = None
     if use_llm:
         from dataclasses import replace
 
@@ -710,17 +763,17 @@ def build_anonymizer(
         if corporate:  # the LLM (not regex) handles organizations and money sums
             cfg = replace(cfg, allowed_labels=cfg.allowed_labels | {"ORG", "AMOUNT"})
         llm_detector = LLMDetector(cfg)
-        detectors.append(llm_detector)
-        if use_second_pass:  # leak check re-uses the same LLM detector
-            second_pass.append(llm_detector)
 
     review_cfg = None
     if use_review:
         from .review import ReviewConfig
 
         review_cfg = review_config or ReviewConfig()
-    return Anonymizer(
-        detectors, review_config=review_cfg, second_pass_detectors=second_pass
+    return assemble_anonymizer(
+        detectors,
+        llm_detector=llm_detector,
+        use_second_pass=use_second_pass,
+        review_config=review_cfg,
     )
 
 

@@ -1,14 +1,17 @@
 :root {
-  --bg: #080808;
-  --panel: #141414;
-  --panel-2: #202020;
-  --border: #383838;
-  --text: #f1f1f1;
-  --muted: #b0b0b0;
-  --accent: #eeeeee;
-  --accent-2: #2bd4a8;
-  --danger: #ff6b6b;
-  --warn: #ffcc4d;
+  /* Единая тёмная тема в стиле лендинга: глубокий тёмно-синий фон и мятный
+     акцент (см. app/landing.module.css). Все страницы — кабинет, оплата,
+     документы разработчика, правовые — используют эти же токены. */
+  --bg: #09111e;
+  --panel: #101d2b;
+  --panel-2: #152a3d;
+  --border: #2a4256;
+  --text: #eef4ff;
+  --muted: #9baac2;
+  --accent: #8be9d4;
+  --accent-2: #86e8d6;
+  --danger: #ff8080;
+  --warn: #ffd166;
   --radius: 12px;
 }
 
@@ -424,7 +427,7 @@ button.primary {
   justify-content: center;
   gap: 8px;
   background: var(--accent);
-  color: #111;
+  color: #092321;
   border: none;
   border-radius: 10px;
   padding: 12px 22px;
@@ -439,14 +442,14 @@ button.primary:disabled {
 }
 
 button.primary:not(:disabled):hover {
-  background: #fff;
+  background: #b1f6e7;
 }
 
 .shell :focus-visible,
 .field input:focus-visible,
 .consent input:focus-visible,
 .legal-page :focus-visible {
-  outline: 2px solid #f0f0f0;
+  outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
 

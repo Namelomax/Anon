@@ -14,6 +14,58 @@ simple addition.
 
 from __future__ import annotations
 
+import concurrent.futures
+from collections.abc import Callable, Iterable
+from typing import Any
+
+
+def map_chunks(
+    chunks: Iterable[tuple[int, str]],
+    worker: Callable[[str], Any],
+    *,
+    concurrency: int,
+    catch: tuple[type[Exception], ...] = (Exception,),
+    propagate: tuple[type[Exception], ...] = (),
+    cancel_event=None,
+    parallel_single: bool = True,
+) -> list[Any]:
+    """Run chunk workers with deterministic result order and local error policy."""
+    chunks = list(chunks)
+    results: list[Any] = [None] * len(chunks)
+
+    def check_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            from .llm import Cancelled
+
+            raise Cancelled()
+
+    if concurrency > 1 and (parallel_single or len(chunks) > 1):
+        from . import usage_log
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+            future_to_index = {}
+            for i, (_offset, chunk) in enumerate(chunks):
+                check_cancelled()
+                future_to_index[usage_log.run_in_context(pool, worker, chunk)] = i
+            for future, index in future_to_index.items():
+                try:
+                    results[index] = future.result()
+                except propagate:
+                    raise
+                except catch as exc:
+                    results[index] = exc
+            check_cancelled()
+    else:
+        for i, (_offset, chunk) in enumerate(chunks):
+            check_cancelled()
+            try:
+                results[i] = worker(chunk)
+            except propagate:
+                raise
+            except catch as exc:
+                results[i] = exc
+    return results
+
 
 def chunk_text(text: str, max_chars: int, *, group: bool = True) -> list[tuple[int, str]]:
     """Split ``text`` into ``(offset, chunk)`` pieces of at most ~``max_chars``.

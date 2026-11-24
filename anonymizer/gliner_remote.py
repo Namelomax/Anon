@@ -31,7 +31,6 @@
 
 from __future__ import annotations
 
-import concurrent.futures
 import json
 import os
 import random
@@ -41,7 +40,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import http_pool, usage_log
-from .chunking import chunk_text
+from .chunking import chunk_text, map_chunks
 from .gliner_ner import _DEFAULT_LABEL_MAP
 from .llm import Cancelled
 from .spans import Span
@@ -207,39 +206,12 @@ class RemoteGLiNERDetector:
         # индексу куска, а не по порядку завершения — вывод детерминирован
         # от запуска к запуску независимо от того, какой запрос ответил
         # первым.
-        results: list[list[dict] | Exception] = [None] * len(chunks)  # type: ignore[list-item]
-        if cfg.concurrency > 1:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=cfg.concurrency
-            ) as pool:
-                future_to_index = {}
-                for i, (_offset, chunk) in enumerate(chunks):
-                    if self.cancel_event is not None and self.cancel_event.is_set():
-                        raise Cancelled()
-                    # run_in_context, НЕ pool.submit напрямую — обычный submit
-                    # не копирует contextvars в поток-воркер, и usage_log
-                    # потеряет request_id (см. usage_log.run_in_context).
-                    future_to_index[usage_log.run_in_context(pool, self._extract, chunk)] = i
-                for future in future_to_index:
-                    index = future_to_index[future]
-                    try:
-                        results[index] = future.result()
-                    except Exception as exc:  # noqa: BLE001
-                        results[index] = exc
-                # Запросы выше уже отработали до конца (in-flight HTTP не
-                # прерываем — кусок стоит максимум пару секунд), это лишь не
-                # даёт запустить новую партию на job'е, от которого клиент
-                # уже отвалился.
-                if self.cancel_event is not None and self.cancel_event.is_set():
-                    raise Cancelled()
-        else:
-            for i, (_offset, chunk) in enumerate(chunks):
-                if self.cancel_event is not None and self.cancel_event.is_set():
-                    raise Cancelled()
-                try:
-                    results[i] = self._extract(chunk)
-                except Exception as exc:  # noqa: BLE001
-                    results[i] = exc
+        results = map_chunks(
+            chunks,
+            self._extract,
+            concurrency=cfg.concurrency,
+            cancel_event=self.cancel_event,
+        )
 
         spans: list[Span] = []
         for (offset, chunk), result in zip(chunks, results):
