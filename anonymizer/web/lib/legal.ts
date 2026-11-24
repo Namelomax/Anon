@@ -18,13 +18,13 @@ export const LEGAL_DOCS = {
     href: "/legal/offer",
     pdf: "/legal/oferta.pdf",
     title: "Лицензионное соглашение (публичная оферта)",
-    edition: "Редакция № 2 от 28 октября 2026 г.",
+    edition: "Редакция № 3 от 24 ноября 2026 г.",
   },
   privacy: {
     href: "/legal/privacy",
     pdf: "/legal/politika.pdf",
     title: "Политика в отношении обработки персональных данных",
-    edition: "Редакция № 1 от 25 октября 2026 г.",
+    edition: "Редакция № 2 от 24 ноября 2026 г.",
   },
 } as const;
 
@@ -34,4 +34,4 @@ export const LEGAL_DOCS = {
 // принял пользователь. Переменная окружения — только для переопределения на
 // стенде.
 export const LEGAL_DOCS_VERSION =
-  process.env.LEGAL_DOCS_VERSION || "offer:2/2026-10-28; policy:1/2026-10-25";
+  process.env.LEGAL_DOCS_VERSION || "offer:3/2026-11-24; policy:2/2026-11-24";
